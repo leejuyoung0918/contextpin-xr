@@ -1,0 +1,8 @@
+{
+  "points": [
+    {"id": "input",  "code": "IN",  "label": "입력 단자",   "x": 0.22, "y": 0.26},
+    {"id": "amp",    "code": "AMP", "label": "증폭단 출력", "x": 0.76, "y": 0.26},
+    {"id": "gnd",    "code": "GND", "label": "접지 지점",   "x": 0.22, "y": 0.73},
+    {"id": "output", "code": "OUT", "label": "최종 출력",   "x": 0.76, "y": 0.73}
+  ]
+}

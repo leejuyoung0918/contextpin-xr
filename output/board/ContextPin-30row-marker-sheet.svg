@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="210mm" height="297mm" viewBox="0 0 210 297">
+<title>ContextPin Trace · 30-row LED board marker sheet</title>
+<rect width="210" height="297" fill="white"/>
+<g font-family="sans-serif" fill="#182d2a">
+<text x="17" y="24" font-size="8" font-weight="bold">ContextPin Trace</text>
+<text x="17" y="34" font-size="4.8">30-row LED board · ArUco mounting reference</text>
+<text x="17" y="51" font-size="3.9">Print at 100% / actual size. Measure the 50 mm scale below before use.</text>
+<text x="17" y="59" font-size="3.9">Keep the marker faces level with the TOP surface of the board holes.</text>
+<text x="17" y="67" font-size="3.9">Fasten both markers and the board to one rigid backing. Check kit layout and nets.</text>
+</g>
+<g id="aruco-11" transform="translate(40.00,126.00)">
+<rect x="-5" y="-5" width="36" height="36" fill="white"/>
+<g transform="scale(4.333333333333)" shape-rendering="crispEdges">
+<rect x="0" y="0" width="1" height="1"/>
+<rect x="1" y="0" width="1" height="1"/>
+<rect x="2" y="0" width="1" height="1"/>
+<rect x="3" y="0" width="1" height="1"/>
+<rect x="4" y="0" width="1" height="1"/>
+<rect x="5" y="0" width="1" height="1"/>
+<rect x="0" y="1" width="1" height="1"/>
+<rect x="1" y="1" width="1" height="1"/>
+<rect x="2" y="1" width="1" height="1"/>
+<rect x="3" y="1" width="1" height="1"/>
+<rect x="5" y="1" width="1" height="1"/>
+<rect x="0" y="2" width="1" height="1"/>
+<rect x="1" y="2" width="1" height="1"/>
+<rect x="2" y="2" width="1" height="1"/>
+<rect x="3" y="2" width="1" height="1"/>
+<rect x="5" y="2" width="1" height="1"/>
+<rect x="0" y="3" width="1" height="1"/>
+<rect x="2" y="3" width="1" height="1"/>
+<rect x="4" y="3" width="1" height="1"/>
+<rect x="5" y="3" width="1" height="1"/>
+<rect x="0" y="4" width="1" height="1"/>
+<rect x="1" y="4" width="1" height="1"/>
+<rect x="5" y="4" width="1" height="1"/>
+<rect x="0" y="5" width="1" height="1"/>
+<rect x="1" y="5" width="1" height="1"/>
+<rect x="2" y="5" width="1" height="1"/>
+<rect x="3" y="5" width="1" height="1"/>
+<rect x="4" y="5" width="1" height="1"/>
+<rect x="5" y="5" width="1" height="1"/>
+</g><text x="0" y="34" font-family="sans-serif" font-size="3.7">ID 11 · 26 mm</text></g>
+<g id="aruco-29" transform="translate(137.00,126.00)">
+<rect x="-5" y="-5" width="36" height="36" fill="white"/>
+<g transform="scale(4.333333333333)" shape-rendering="crispEdges">
+<rect x="0" y="0" width="1" height="1"/>
+<rect x="1" y="0" width="1" height="1"/>
+<rect x="2" y="0" width="1" height="1"/>
+<rect x="3" y="0" width="1" height="1"/>
+<rect x="4" y="0" width="1" height="1"/>
+<rect x="5" y="0" width="1" height="1"/>
+<rect x="0" y="1" width="1" height="1"/>
+<rect x="1" y="1" width="1" height="1"/>
+<rect x="2" y="1" width="1" height="1"/>
+<rect x="5" y="1" width="1" height="1"/>
+<rect x="0" y="2" width="1" height="1"/>
+<rect x="1" y="2" width="1" height="1"/>
+<rect x="3" y="2" width="1" height="1"/>
+<rect x="4" y="2" width="1" height="1"/>
+<rect x="5" y="2" width="1" height="1"/>
+<rect x="0" y="3" width="1" height="1"/>
+<rect x="1" y="3" width="1" height="1"/>
+<rect x="4" y="3" width="1" height="1"/>
+<rect x="5" y="3" width="1" height="1"/>
+<rect x="0" y="4" width="1" height="1"/>
+<rect x="5" y="4" width="1" height="1"/>
+<rect x="0" y="5" width="1" height="1"/>
+<rect x="1" y="5" width="1" height="1"/>
+<rect x="2" y="5" width="1" height="1"/>
+<rect x="3" y="5" width="1" height="1"/>
+<rect x="4" y="5" width="1" height="1"/>
+<rect x="5" y="5" width="1" height="1"/>
+</g><text x="0" y="34" font-family="sans-serif" font-size="3.7">ID 29 · 26 mm</text></g>
+<path d="M 87 164 h 27.94 v -73.66 h -27.94 Z" fill="none" stroke="#557e76" stroke-width=".25" stroke-dasharray="1.5 1"/>
+<g fill="#182d2a" font-family="sans-serif" font-size="3.6">
+<text x="89" y="177">Row 1 near edge</text><text x="89" y="84">Row 30 far edge</text>
+<path d="M 85.70 164.00 h 2.6 M 87.00 162.70 v 2.6" fill="none" stroke="#182d2a" stroke-width=".4"/>
+<text x="80.00" y="173.00">A1</text>
+<path d="M 113.64 164.00 h 2.6 M 114.94 162.70 v 2.6" fill="none" stroke="#182d2a" stroke-width=".4"/>
+<text x="113.94" y="173.00">J1</text>
+<path d="M 85.70 90.34 h 2.6 M 87.00 89.04 v 2.6" fill="none" stroke="#182d2a" stroke-width=".4"/>
+<text x="78.00" y="88.34">A30</text>
+<path d="M 113.64 90.34 h 2.6 M 114.94 89.04 v 2.6" fill="none" stroke="#182d2a" stroke-width=".4"/>
+<text x="116.14" y="88.34">J30</text>
+<path d="M 103.48 128.44 h 2.6 M 104.78 127.14 v 2.6" fill="none" stroke="#182d2a" stroke-width=".4"/>
+<text x="106.78" y="129.24">F15</text>
+</g>
+<g font-family="sans-serif" fill="#182d2a" font-size="4">
+  <text x="17" y="196">Align the centres of A1, J1 and A30 with the reference marks before fastening.</text>
+  <text x="17" y="205">Fit is a preview. Confirm the physical J30 and F15 points in the app.</text>
+  <text x="17" y="230">50 mm print scale</text>
+  <path d="M 17 238 H 67 M 17 235 v 6 M 27 236 v 4 M 37 236 v 4 M 47 236 v 4 M 57 236 v 4 M 67 235 v 6" fill="none" stroke="#182d2a" stroke-width=".35"/>
+  <text x="17" y="263">Layout led-board-26mm-v1 · DICT_4X4_50 · 26 mm markers</text>
+</g></svg>
