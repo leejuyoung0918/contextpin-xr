@@ -10,7 +10,11 @@ namespace ContextPin
     {
         void AddMeetingDigit(string digit)
         {
-            if (!meetingBusy && meetingJoinCode.Length < 6) { meetingJoinCode += digit; Draw(); }
+            if (meetingBusy || meetingJoinCode.Length >= 6) return;
+            StopJoinQr();
+            showJoinKeypad = true;
+            meetingJoinCode += digit;
+            Draw();
         }
 
         void RemoveMeetingDigit()
@@ -22,6 +26,7 @@ namespace ContextPin
         void DrawMeeting()
         {
             if (meetingSnapshot == null) { DrawMeetingSetup(); return; }
+            DrawPanelHandle(572, 12, 244, 45);
             var profile = meetingSnapshot["profile"];
             var name = IsAssemblyMeeting ? TextValue(meetingSnapshot["assembly"], "display_name") : TextValue(profile, "display_name");
             var members = Values(meetingSnapshot, "participants").Count();
@@ -93,27 +98,41 @@ namespace ContextPin
 
         void DrawMeetingSetup()
         {
-            Heading("3D 설계 회의", "같은 모델을 보며 수정 후보를 비교하고, 결정한 모델과 이유를 남깁니다.");
-            RoundBox("MeetingSetupNew", content, 36, 204, 537, 390, Card, 16);
-            BoldLabel("MeetingSetupCreateTitle", content, 64, 229, 475, 59, "새 회의", 36, Light);
-            Label("MeetingSetupCreateHelp", content, 65, 295, 473, 98,
-                "초기 모델을 불러와 치수를 바꾸고, 참가 코드를 공유하세요.", 25, Muted);
-            Button("MeetingCreate", 65, 417, 471, 66, meetingBusy ? "연결 중" : "새 회의 만들기", () => BeginMeetingSession(false), true);
-            Label("MeetingEndpoint", content, 65, 504, 470, 50, MeetingAddress(), 20, Muted);
-            RoundBox("MeetingSetupJoin", content, 595, 204, 609, 390, Card, 16);
-            BoldLabel("MeetingSetupJoinTitle", content, 623, 229, 540, 54, "참가 코드", 33, Light);
-            BoldLabel("MeetingCodeInput", content, 623, 289, 541, 49,
+            Heading("3D 설계 회의", "시제품을 함께 보며 수정할 내용을 정하고 설계안을 비교합니다.");
+            DrawPanelHandle(925, 12, 275, 45);
+            RoundBox("MeetingSetupNew", content, 36, 206, 537, 398, Card, 16);
+            BoldLabel("MeetingSetupCreateTitle", content, 64, 229, 475, 56, "회의 열기", 34, Light);
+            Label("MeetingSetupCreateHelp", content, 65, 300, 470, 74, xr ? "회의 시작을 누르면 대화를 기록하고 실물 정렬과 책상 지정을 준비합니다." : "회의를 만든 뒤 녹음을 시작하면 대화가 서버에 기록됩니다.", 24, Muted);
+            Button("MeetingCreate", 65, 385, 471, 66, meetingBusy ? "연결 중…" : xr ? "회의 시작" : "새 회의 만들기", () => BeginMeetingSession(false, xr), true);
+            Button("MeetingExample", 65, 475, 222, 48, "대본으로 체험", BeginExampleMeeting);
+            if (PlayerPrefs.HasKey(MostRecentMeeting + "Session"))
+                Button("MeetingResume", 303, 475, 233, 48, "이전 회의 열기", ResumeMeetingSession);
+            if (PlayerPrefs.HasKey(MostRecentLiveMeeting + "Session") &&
+                PlayerPrefs.GetString(MostRecentLiveMeeting + "Session") != PlayerPrefs.GetString(MostRecentMeeting + "Session"))
+                Button("MeetingResumeLive", 65, 531, 471, 48, "마지막 실시간 회의 열기", ResumeLiveMeeting);
+            RoundBox("MeetingSetupJoin", content, 595, 206, 609, 398, Card, 16);
+            BoldLabel("MeetingSetupJoinTitle", content, 623, 229, 540, 54, "회의 참가", 34, Light);
+            if (!showJoinKeypad)
+            {
+                string joinHint = !string.IsNullOrWhiteSpace(AssemblyQrStatus) ? AssemblyQrStatus : xr ?
+                    "진행자 PC의 참가 QR을 읽으세요. 참가 후 받침 QR로 모델 위치를 맞춥니다." : "진행자에게 받은 여섯 자리 참가 코드를 입력하세요.";
+                Label("MeetingJoinHint", content, 623, 291, 540, 80, joinHint, 24, Muted);
+                if (xr) Button("MeetingJoinQr", 623, 385, 548, 64, joiningByQr ? "참가 QR 읽기 취소" : "참가 QR 읽기", () =>
+                { if (joiningByQr) { StopJoinQr(); Draw(); } else BeginJoinQr(); });
+                Button("MeetingShowCode", 623, xr ? 475 : 385, 258, 49, "코드로 참가", () =>
+                { StopJoinQr(); showJoinKeypad = true; Draw(); });
+                return;
+            }
+            BoldLabel("MeetingCodeInput", content, 623, 286, 541, 49,
                 string.Join("  ", meetingJoinCode.PadRight(6, '·').Select(c => c.ToString())), 35, Mint);
             for (int n = 0; n < 10; n++)
             {
                 var digit = ((n + 1) % 10).ToString(CultureInfo.InvariantCulture);
-                Button("MeetingDigit-" + digit, 623 + n % 5 * 107, 355 + n / 5 * 66, 94, 54, digit, () => AddMeetingDigit(digit));
+                Button("MeetingDigit-" + digit, 623 + n % 5 * 107, 349 + n / 5 * 60, 94, 52, digit, () => AddMeetingDigit(digit));
             }
-            Button("MeetingErase", 623, 488, 149, 56, "한 자리 지우기", RemoveMeetingDigit);
-            Button("MeetingJoin", 783, 488, 362, 56, "회의 참가", () => BeginMeetingSession(true), meetingJoinCode.Length == 6);
-            Button("MeetingHome", 36, 612, 209, 53, "홈으로", LeaveMeeting);
-            Label("MeetingSetupCapability", content, 605, 605, 597, 63,
-                xr ? "공간 배치는 기기별로 맞춥니다. 마이크는 권한과 서버 연결이 필요합니다." : "마우스로 모델의 부위를 선택할 수 있어요.", 21, Muted);
+            Button("MeetingErase", 623, 478, 149, 52, "지우기", RemoveMeetingDigit);
+            Button("MeetingJoin", 783, 478, 362, 52, "회의 참가", () => BeginMeetingSession(true), meetingJoinCode.Length == 6);
+            Button("MeetingHideCode", 623, 541, 149, 44, "돌아가기", () => { showJoinKeypad = false; Draw(); });
         }
 
         void DrawMeetingParameters(JObject version)

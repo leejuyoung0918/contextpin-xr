@@ -4,37 +4,33 @@ using System.IO;
 using System.Text;
 using Meta.XR;
 using UnityEngine;
-using UnityEngine.Networking;
+using UnityEngine.Rendering;
 
 namespace ContextPin
 {
     [Serializable] public sealed class RelayConfig
     {
-        public string serverUrl="http://127.0.0.1:8787";
-        public string meetingServerUrl="http://127.0.0.1:8788";
+        public string replayServerUrl="http://127.0.0.1:8788";
+        public string meetingServerUrl="http://127.0.0.1:8789";
         public float meetingPanelWidthMeters=.32f, meetingPanelDistanceMeters=1.15f, meetingPanelTextScale=1f;
-        // Optional for providers without speech recognition. Never put an API key here.
-        public string suppliedTranscript="";
     }
-    [Serializable] public sealed class CaptureRequest
-    {
-        public string sourceBoardId, sourceObjectId, targetRole, intent, imageKind;
-        public string imageBase64, audioBase64, transcript;
-        public float u, v;
-        public bool consent;
-    }
-
     public sealed class RelayEvidence : MonoBehaviour
     {
         public bool Recording => _clip != null;
         public bool CameraReady => _camera != null && _camera.IsPlaying;
         public AudioClip RecordingClip => _clip;
         public PassthroughCameraAccess CameraSource => _camera;
+        public bool TryRecentCameraFrame(long selectedAtMs, out long capturedAtMs)
+        {
+            capturedAtMs = 0;
+            if (!CameraReady || _camera.Timestamp == default) return false;
+            capturedAtMs = new DateTimeOffset(_camera.Timestamp.ToUniversalTime()).ToUnixTimeMilliseconds();
+            return capturedAtMs <= selectedAtMs && selectedAtMs - capturedAtMs <= 150;
+        }
         MicrophoneBuffer _buffer;
         AudioClip _clip;
         PassthroughCameraAccess _camera;
         GameObject _cameraObject;
-        UnityWebRequest _pending;
         int _micEpoch, _cameraEpoch;
         public RelayConfig config = new RelayConfig();
 
@@ -72,7 +68,7 @@ namespace ContextPin
             _clip=Microphone.Start(null,true,ringSeconds,16000);
             if (_clip==null) { done("마이크를 시작하지 못했습니다."); yield break; }
             _buffer=new MicrophoneBuffer(_clip,Time.realtimeSinceStartup);
-            done("녹음 중 · 핀치 직전 최대 12초만 분석합니다.");
+            done("회의 마이크에서 음성을 받고 있습니다.");
         }
 
         public byte[] AudioSnapshot(bool mono=false)
@@ -106,14 +102,93 @@ namespace ContextPin
             until=Time.realtimeSinceStartup+12;
             while (!CameraReady && Time.realtimeSinceStartup<until && epoch==_cameraEpoch) yield return null;
             if(epoch!=_cameraEpoch)yield break;
-            done(CameraReady?"실물 카메라 준비됨 · 보드 정렬을 확인하세요.":"카메라가 준비되지 않았습니다. 가상 보드 모드를 사용하거나 권한을 확인하세요.");
+            done(CameraReady?"실물 RGB 카메라 준비됨":"실물 RGB 카메라가 준비되지 않았습니다. 카메라 권한을 확인하고 다시 시도하세요.");
         }
         public void StopCamera() { _cameraEpoch++; if (_cameraObject!=null) Destroy(_cameraObject); _cameraObject=null; _camera=null; }
-        public void Cancel() { _pending?.Abort(); StopMicrophone(); StopCamera(); }
+        public void Cancel() { StopMicrophone(); StopCamera(); }
         void OnDestroy() { Cancel(); }
 
+        internal readonly struct SelectionImage
+        {
+            public readonly byte[] Jpeg;
+            public readonly Vector2 Uv;
+            public readonly Pose CameraPose;
+            public readonly long CapturedAtMs;
+            public readonly long? SensorTimestampUs;
+            public readonly string FallbackReason;
+            public bool ActualRgb => SensorTimestampUs.HasValue;
+
+            public SelectionImage(byte[] jpeg, Vector2 uv, Pose pose, long timeMs, long? sensorUs, string fallbackReason)
+            {
+                Jpeg = jpeg;
+                Uv = uv;
+                CameraPose = pose;
+                CapturedAtMs = timeMs;
+                SensorTimestampUs = sensorUs;
+                FallbackReason = fallbackReason;
+            }
+        }
+
+        internal SelectionImage CaptureSelectionImage(Camera view, Vector3 worldPoint, long selectedAtMs, bool useSensor)
+        {
+            var debugPose = new Pose(view.transform.position, view.transform.rotation);
+            string reason = useSensor ? "no_recent_rgb_frame" : "simulator";
+            if (useSensor && TryRecentCameraFrame(selectedAtMs, out long capturedAtMs))
+            {
+                try
+                {
+                    var timestamp = _camera.Timestamp;
+                    var pose = _camera.GetCameraPose();
+                    var uv = PhysicalViewportPoint(worldPoint, pose);
+                    if (!InViewport(uv)) throw new InvalidOperationException("target_outside_rgb_image");
+                    // The SDK schedules the newest texture on the render thread. A Blit here
+                    // can read the previous frame. Queue and finish this readback on the A event.
+                    var source = _camera.GetTexture();
+                    if (source == null || source.width <= 0 || source.height <= 0)
+                        throw new InvalidOperationException("rgb_texture_unavailable");
+                    var readback = AsyncGPUReadback.Request(source, 0, TextureFormat.RGBA32);
+                    readback.WaitForCompletion();
+                    if (readback.hasError || _camera.Timestamp != timestamp)
+                        throw new InvalidOperationException("rgb_frame_readback_failed");
+                    var texture = new Texture2D(source.width, source.height, TextureFormat.RGBA32, false);
+                    try
+                    {
+                        texture.SetPixelData(readback.GetData<Color32>(), 0);
+                        texture.Apply(false, false);
+                        uv.y = 1 - uv.y;
+                        long sensorUs = (timestamp.ToUniversalTime().Ticks - DateTime.UnixEpoch.Ticks) / 10;
+                        return new SelectionImage(texture.EncodeToJPG(80), uv, pose, capturedAtMs, sensorUs, null);
+                    }
+                    finally { Destroy(texture); }
+                }
+                catch (Exception error)
+                {
+                    reason = "rgb_capture_failed";
+                    Debug.LogWarning("ContextPin capture: using a debug render · " + error.Message);
+                }
+            }
+            var jpeg = Snapshot(view, worldPoint, false, out var renderUv, debugPose);
+            return new SelectionImage(jpeg, renderUv, debugPose, selectedAtMs, null, reason);
+        }
+
+        static bool InViewport(Vector2 uv) => float.IsFinite(uv.sqrMagnitude) && uv.x >= 0 &&
+            uv.x <= 1 && uv.y >= 0 && uv.y <= 1;
+
+        Vector2 PhysicalViewportPoint(Vector3 worldPoint, Pose pose)
+        {
+            float norm = Quaternion.Dot(pose.rotation, pose.rotation);
+            if (!float.IsFinite(pose.position.sqrMagnitude) || !float.IsFinite(norm) || Mathf.Abs(norm - 1f) > .02f)
+                throw new InvalidOperationException("촬영 프레임의 카메라 위치를 확인할 수 없습니다.");
+            if (Vector3.Dot(worldPoint - pose.position, pose.rotation * Vector3.forward) <= 0)
+                throw new InvalidOperationException("대상이 카메라 뒤에 있습니다.");
+            return _camera.WorldToViewportPoint(worldPoint, pose);
+        }
+
         // Capture and coordinates are calculated from the same camera source.
-        public byte[] Snapshot(Camera view, Vector3 worldPoint, bool physical, out Vector2 uv)
+        public byte[] Snapshot(Camera view, Vector3 worldPoint, bool physical, out Vector2 uv) =>
+            Snapshot(view, worldPoint, physical, out uv, new Pose(view.transform.position, view.transform.rotation));
+
+        byte[] Snapshot(Camera view, Vector3 worldPoint, bool physical, out Vector2 uv, Pose renderPose)
         {
             Texture source;
             RenderTexture rendered=null;
@@ -121,25 +196,27 @@ namespace ContextPin
             if (physical)
             {
                 if (!CameraReady) throw new InvalidOperationException("실물 카메라가 준비되지 않았습니다.");
-                if (Vector3.Dot(worldPoint-_camera.GetCameraPose().position, _camera.GetCameraPose().rotation*Vector3.forward)<=0)
-                    throw new InvalidOperationException("대상이 카메라 뒤에 있습니다.");
-                uv=_camera.WorldToViewportPoint(worldPoint);
+                uv = PhysicalViewportPoint(worldPoint, _camera.GetCameraPose());
                 source=_camera.GetTexture();
             }
             else
             {
                 var obj=new GameObject("Snapshot camera"); captureCamera=obj.AddComponent<Camera>();
-                captureCamera.CopyFrom(view); captureCamera.transform.SetPositionAndRotation(view.transform.position,view.transform.rotation);
+                captureCamera.CopyFrom(view); captureCamera.transform.SetPositionAndRotation(renderPose.position, renderPose.rotation);
                 captureCamera.enabled=false; captureCamera.stereoTargetEye=StereoTargetEyeMask.None;
                 captureCamera.aspect=1.6f;
                 rendered=RenderTexture.GetTemporary(960,600,24,RenderTextureFormat.ARGB32);
                 captureCamera.targetTexture=rendered;
-                uv=captureCamera.WorldToViewportPoint(worldPoint);
-                captureCamera.Render(); source=rendered;
+                var projected = captureCamera.WorldToViewportPoint(worldPoint);
+                uv = projected.z > 0 ? (Vector2)projected : new Vector2(-1, -1);
+                source = rendered;
             }
             try
             {
-                if (uv.x<0 || uv.x>1 || uv.y<0 || uv.y>1) throw new InvalidOperationException("대상이 캡처 이미지 밖입니다. 대상을 다시 조준하세요.");
+                if (source == null || source.width <= 0 || source.height <= 0)
+                    throw new InvalidOperationException("캡처할 이미지 프레임이 없습니다.");
+                if (captureCamera != null) captureCamera.Render();
+                if (!InViewport(uv)) throw new InvalidOperationException("대상이 캡처 이미지 밖입니다. 대상을 다시 조준하세요.");
                 // JSON image coordinates use top-left, unlike Unity's bottom-left viewport.
                 uv.y=1-uv.y;
                 var copy=RenderTexture.GetTemporary(960,Mathf.RoundToInt(960f*source.height/source.width),0,RenderTextureFormat.ARGB32);
@@ -161,24 +238,7 @@ namespace ContextPin
             }
         }
 
-        public IEnumerator Analyze(CaptureRequest request, Action<Experience,string> done)
-        {
-            var url=config.serverUrl.TrimEnd('/')+"/capture";
-            using (var web=new UnityWebRequest(url,"POST"))
-            {
-                _pending=web; web.timeout=100;
-                web.uploadHandler=new UploadHandlerRaw(Encoding.UTF8.GetBytes(JsonUtility.ToJson(request)));
-                web.downloadHandler=new DownloadHandlerBuffer(); web.SetRequestHeader("Content-Type","application/json");
-                yield return web.SendWebRequest(); _pending=null;
-                if (web.result!=UnityWebRequest.Result.Success) { done(null,"AI 연결 실패 ("+web.responseCode+"). 서버 실행·모델 설정·USB 연결을 확인하세요. "+web.downloadHandler.text); yield break; }
-                Experience card=null; string error="";
-                try { card=JsonUtility.FromJson<Experience>(web.downloadHandler.text); if(card==null)error="AI 응답이 비어 있습니다."; }
-                catch (Exception e) { error="AI 응답 형식 오류: "+e.Message; }
-                done(card,error);
-            }
-        }
     }
-
     public sealed class MicrophoneBuffer
     {
         readonly AudioClip clip;

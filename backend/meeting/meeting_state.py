@@ -8,7 +8,11 @@ TERMINAL = {"finalizing", "completed", "save_error"}
 
 
 def initialize(state):
-    if not state.get("assembly") or "session_status" in state:
+    if not state.get("assembly"):
+        return
+    from . import shared_workflows
+    shared_workflows.initialize(state)
+    if "session_status" in state:
         return
     state.update(session_status="ready" if state["status"] == "active" else "completed",
                  adopted_revision=sum(d.get("selected_model_version_id") is not None for d in state["decisions"]),
@@ -42,7 +46,15 @@ def snapshot_fields(state):
                "question_round_id": (actionable or {}).get("round_id") if question else None,
                "through_utterance_id": state["utterances"][-1]["utterance_id"] if state["utterances"] else None,
                "discussion_evidence": topic.get("utterance_id")}
-    return {"adopted_version_id": state["committed_version_id"], "design_status": design_status, "summary": summary}
+    result = {"design_submit_mode": state["meeting"].get("design_submit_mode", "automatic"),
+              "adopted_version_id": state["committed_version_id"], "design_status": design_status, "summary": summary}
+    if state.get("meeting", {}).get("design_submit_mode") == "explicit":
+        from . import speech_ranges
+        result["design_speech_ranges"] = speech_ranges.snapshot(state)
+    from . import cable_demo
+    if cable_demo.enabled(state) and state.get("provider_mode") == "fixture" and state["meeting"].get("mode") != "live":
+        result["cable_demo"] = cable_demo.presentation(state)
+    return result
 
 
 def decision_label(state, adopted=None):
@@ -71,7 +83,7 @@ def note_view(state, view, item, share):
         return
     view["candidate_set_id"] = item["candidate_set_id"]
     state["shared_preview"] = {k: view[k] for k in
-                               ("version_id", "round_id", "candidate_id", "candidate_set_id")}
+                               ("version_id", "round_id", "candidate_id", "candidate_set_id", "participant_id", "evidence_id")}
     state["shared_view_history"].append(view)
 
 
@@ -100,7 +112,7 @@ def state_of_capture(state, stream_id):
 def capture_missing(state):
     missing = []
     streams = state["meeting_audio"]
-    if state["meeting"]["mode"] == "live" and not any(info["started_at"] for info in streams.values()):
+    if state["meeting"]["mode"] == "live" and state["meeting"].get("input_mode") != "manual" and not any(info["started_at"] for info in streams.values()):
         missing.append({"kind": "audio_not_started"})
     for stream_id, info in streams.items():
         if info["status"] != "eos":
@@ -130,7 +142,12 @@ def apply(coordinator, state, actor, kind, payload, stamp):
         mode = payload.get("mode", meeting["mode"] or ("live" if coordinator.mode == "live" else "replay"))
         if mode not in {"live", "replay"} or meeting["mode"] not in {None, mode}:
             raise MeetingError("이 회의의 입력 모드를 바꿀 수 없습니다.", 409)
-        if mode == "live" and (coordinator.mode != "live" or not coordinator.speech_available):
+        input_mode = payload.get("input_mode", "microphone" if mode == "live" else "replay")
+        if input_mode not in {"microphone", "manual", "replay"}:
+            raise MeetingError("회의 입력 방식을 확인하세요.")
+        if mode == "live" and coordinator.mode != "live":
+            raise MeetingError("서버를 live 모드로 실행해 주세요.", 409)
+        if mode == "live" and input_mode == "microphone" and not coordinator.speech_available:
             raise MeetingError("전사 서비스가 연결된 뒤 녹음을 시작할 수 있습니다.", 503)
         if mode == "replay" and coordinator.mode != "fixture":
             raise MeetingError("예시 입력은 PC를 재생 모드로 시작한 경우에 사용할 수 있습니다.", 409)
@@ -138,9 +155,30 @@ def apply(coordinator, state, actor, kind, payload, stamp):
         device = payload.get("audio_device_id") or meeting["audio_device_id"] or default_device
         if device not in {p["device_id"] for p in state["participants"]}:
             raise MeetingError("회의에 연결된 마이크 기기를 선택하세요.")
-        meeting.update(mode=mode, audio_device_id=device, capture_requested=mode == "live")
+        submit_mode = payload.get("design_submit_mode", meeting.get("design_submit_mode", "automatic"))
+        if submit_mode not in ("automatic", "explicit") or (submit_mode == "explicit" and mode != "live"):
+            raise MeetingError("수정 요청 방식을 확인하세요.")
+        if meeting["mode"] is not None and submit_mode != meeting.get("design_submit_mode", "automatic"):
+            raise MeetingError("시작한 회의의 수정 요청 방식을 바꿀 수 없습니다.", 409)
+        output = payload.get("edit_request_output", meeting.get("edit_request_output"))
+        if output is not None and (output != "bundle" or submit_mode != "explicit"):
+            raise MeetingError("수정 요청 저장 방식을 확인하세요.")
+        if meeting["mode"] is not None and output != meeting.get("edit_request_output"):
+            raise MeetingError("시작한 회의의 수정 요청 저장 방식을 바꿀 수 없습니다.", 409)
+        generation = payload.get("candidate_generation", meeting.get("candidate_generation"))
+        if generation is not None and (generation != "ai" or output != "bundle"):
+            raise MeetingError("AI 후보에는 수정 요청 원본을 저장하는 회의가 필요합니다.")
+        if meeting["mode"] is not None and generation != meeting.get("candidate_generation"):
+            raise MeetingError("회의 시작 시 선택한 후보 생성 방식을 유지하세요.", 409)
+        if output == "bundle":
+            meeting["edit_request_output"] = output
+            state.setdefault("edit_requests", {})
+        if generation == "ai":
+            meeting["candidate_generation"] = generation
+            state.setdefault("candidate_sets", {})
+        meeting.update(mode=mode, design_submit_mode=submit_mode, input_mode=input_mode, audio_device_id=device, capture_requested=mode == "live" and input_mode == "microphone")
         state["audio_host_device_id"] = device
-        if mode == "replay":
+        if mode == "replay" or input_mode == "manual":
             meeting["started_at"] = meeting["started_at"] or now_ms()
             state["session_status"] = "recording"
         return "meeting.started" if mode == "replay" else "meeting.microphone_selected", {
@@ -161,6 +199,8 @@ def apply(coordinator, state, actor, kind, payload, stamp):
         meeting["adopted_revision"] = state["adopted_revision"]
         # Stop future changes in the same transaction that fixes the chosen model.
         state.update(session_status="finalizing", status="ended", result={"status": "finalizing"})
+        from . import shared_workflows
+        shared_workflows.clear(coordinator, state, "회의를 종료했습니다.")
         reset_preview(state, timestamp)
         for item in state["rounds"]:
             if item["status"] in {"collecting", "generating", "building"}:

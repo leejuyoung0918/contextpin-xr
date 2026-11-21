@@ -1,5 +1,7 @@
 """Context compiler, fixture and live planner adapters, and proposal validation."""
 import json
+import copy
+import math
 import os
 import re
 import urllib.error
@@ -10,6 +12,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .contracts import MeetingError, digest, uid
+from .parameter_relations import derived_fields, effective_values, normalize_patch, validate_relations
 
 
 class StrictModel(BaseModel):
@@ -70,7 +73,7 @@ def contains(text, aliases):
 
 
 def explicit_parameters(profile, line):
-    fields = profile["parameters"]
+    fields = [*profile["parameters"], *derived_fields(profile)]
     # Prefer the most specific phrase when names overlap, e.g. 바닥 폭 and 폭.
     spans = []
     for field in fields:
@@ -98,34 +101,38 @@ def resolve_reference(utterance, view):
     return candidate_id, view.get("candidate_versions", {}).get(candidate_id)
 
 
-def compile_context(state, utterance, view, version, round_id, epoch, previous=None):
+def compile_context(state, utterance, view, version, round_id, epoch, previous=None, selected_lines=None):
     profile = state["profile"]
     params = version["parameters"]
     inherited = version.get("request_constraints", []) if version["version_id"] != state["committed_version_id"] else []
     active = [item for item in state["constraints"] if item["status"] == "active"]
-    line = utterance["text"]
+    line = "\n".join(u["text"] for u in selected_lines) if selected_lines is not None else utterance["text"]
     locked = {item["property_id"]: item for item in [*inherited, *active]}
     request_constraints = {item["property_id"]: item for item in inherited}
     # Keep a request's observed physical dimension, rather than just its parameter.
     for prop in profile.get("measured_properties", []):
         key = prop["property_id"]
         aliases = [prop["label"], *prop.get("aliases", [])]
-        if key in version["measurements"] and key not in locked and any(
-            re.search(re.escape(alias) + r"(?:은|는|을|를)?\s*(?:그대로|유지|변경하지|바꾸지)", line)
-            for alias in aliases
-        ):
+        if key not in version["measurements"] or key in locked:
+            continue
+        keep = re.compile("(?:" + "|".join(map(re.escape, aliases)) + r")(?:은|는|을|를)?\s*(?:그대로|유지|변경하지|바꾸지)")
+        sources = [u["utterance_id"] for u in (selected_lines or [utterance]) if keep.search(u["text"])]
+        if sources:
             item = {"constraint_id": uid("constraint"), "property_id": key, "operator": "eq",
                     "value": version["measurements"][key], "unit": prop["unit"], "tolerance": 0.001,
                     "scope": "request", "status": "active", "strength": "hard", "source_kind": "explicit_utterance",
-                    "reference_model_version_id": version["version_id"], "evidence_refs": [utterance["utterance_id"]]}
+                    "reference_model_version_id": version["version_id"], "evidence_refs": sources}
             locked[key] = request_constraints[key] = item
     choice_parts = view.get("part_ids", []) if view and view["version_id"] == version["version_id"] else []
     named_parts = [part["part_id"] for part in profile["semantic_parts"]
                    if contains(line, [part["label"], *part.get("aliases", [])])]
-    parts = choice_parts if contains(line, DEICTIC) else named_parts or choice_parts
-    latest_related = {item["utterance_id"]: item for item in state["utterances"] if item["utterance_id"] != utterance["utterance_id"]
-                      and 0 <= utterance["end_ms"] - item["end_ms"] <= 30_000}
-    related = sorted(latest_related.values(), key=lambda item: item["end_ms"])[-6:]
+    parts = choice_parts if selected_lines is not None or contains(line, DEICTIC) else named_parts or choice_parts
+    if selected_lines is not None:
+        related = selected_lines[:-1]
+    else:
+        latest_related = {item["utterance_id"]: item for item in state["utterances"] if item["utterance_id"] != utterance["utterance_id"]
+                          and 0 <= utterance["end_ms"] - item["end_ms"] <= 30_000}
+        related = sorted(latest_related.values(), key=lambda item: item["end_ms"])[-6:]
     if previous:
         related = [previous["utterance"], *[item for item in related
                    if item["utterance_id"] != previous["utterance"]["utterance_id"]]][:6]
@@ -135,6 +142,9 @@ def compile_context(state, utterance, view, version, round_id, epoch, previous=N
               if image["participant_id"] == utterance["participant_id"]
               and image["version_id"] == version["version_id"]
               and 0 <= utterance["end_ms"] - image["captured_session_time_ms"] <= 5000][-2:]
+    reference = (view or {}).get("reference_selection")
+    if reference:
+        images = [reference["image_id"]]
     if view:
         evidence.append(view["evidence_id"])
     evidence.extend(images)
@@ -151,6 +161,25 @@ def compile_context(state, utterance, view, version, round_id, epoch, previous=N
         "relevant_decisions": state["decisions"][-3:],
     }
     if state.get("assembly"):
+        from .openscad_geometry import adapter
+        model = adapter()
+        if model.describe()["source_hash"] != version["source_hash"]:
+            raise MeetingError("등록된 CAD 원본이 바뀌었습니다. 해당 원본 설정으로 회의를 열어 주세요.")
+        image_version = reference["reference_version_id"] if reference else version["version_id"]
+        selected_image_id = reference["image_id"] if reference else (view or {}).get("image_id")
+        selected_image = next((image for image in state.get("images", [])
+                               if selected_image_id and selected_image_id in {image.get("evidence_id"), image.get("asset_id")}
+                               and image.get("version_id") == image_version), None)
+        body.update(request_actor_id=utterance["participant_id"],
+                    scad_code=model.resolve(params).decode("utf-8"),
+                    effective_parameters=effective_values(profile, params),
+                    fixed_parameters=model.fixed_parameters,
+                    parameter_relations=derived_fields(profile),
+                    selection_snapshot=copy.deepcopy(view),
+                    selected_position_model_m=(view or {}).get("hit_point_asset_m"),
+                    screenshot=selected_image,
+                    screenshot_status="captured" if selected_image else "unavailable",
+                    edit_scope=profile.get("edit_scope"))
         adopted = next(model for model in state["versions"] if model["version_id"] == state["committed_version_id"])
         candidates = next((item for item in reversed(state["rounds"]) if item["status"] == "reviewable" or
                            (view and item["round_id"] == view.get("round_id"))), {})
@@ -163,22 +192,32 @@ def compile_context(state, utterance, view, version, round_id, epoch, previous=N
                                        for candidate in candidates.get("candidates", []) if candidate["status"] == "valid"],
                     unresolved_question=next((item.get("question") for item in reversed(state["rounds"])
                                               if item["status"] == "needs_input"), None))
+    if selected_lines is not None:
+        body.update(request_transcript=line, selected_utterances=selected_lines,
+                    source_utterance_ids=[u["utterance_id"] for u in selected_lines],
+                    source_utterance_refs=[{k: u[k] for k in ("utterance_id", "revision")} for u in selected_lines],
+                    reference_selection=reference,
+                    reference_mapping="same_model" if version["version_id"] == reference["reference_version_id"] else "semantic_part_only")
     semantic = {**body, "utterance": utterance["evidence_id"] + ":" + str(utterance["revision"]),
                 "related_utterances": [[item["evidence_id"], item["revision"]] for item in related],
                 "constraints": [{k: v for k, v in item.items() if k != "constraint_id"}
                                 for item in locked.values()],
                 "request_constraints": list(request_constraints)}
-    return {**body, "context_id": uid("context"), "context_hash": digest(semantic),
-            "round_id": round_id, "request_id": uid("req"), "generation_epoch": epoch}
+    return copy.deepcopy({**body, "context_id": uid("context"), "context_hash": digest(semantic),
+                          "round_id": round_id, "request_id": uid("req"), "generation_epoch": epoch})
 
 
 def fixture_plan(context):
+    return parameter_plan(context, allow_demo=True)
+
+
+def parameter_plan(context, *, allow_demo=False):
     line = context["utterance"]["text"]
     combined = (context["clarification_of"] + " " + line).strip()
     profile = context["profile"]
     assembly = profile.get("assembly")
-    fields = profile["parameters"]
-    params = context["parameters"]
+    fields = [*profile["parameters"], *derived_fields(profile)]
+    params = effective_values(profile, context["parameters"])
     parts = context["part_ids"]
     result = {"schema_version": 1, **{k: context[k] for k in IDENTITY}, "action": "no_op",
               "question": None, "options": [], "evidence_ids": context["evidence_ids"]}
@@ -253,7 +292,7 @@ def fixture_plan(context):
     base_changes = context.get("changed_base_parameters", [])
     if refinement and not base_changes:
         return ask("조금 더 수정할 후보를 먼저 열어 주세요.")
-    if refinement or contains(combined, profile.get("demo_ambiguity_aliases", [])):
+    if allow_demo and (refinement or contains(combined, profile.get("demo_ambiguity_aliases", []))):
         by_id = {f["parameter_id"]: f for f in fields}
         for entry in profile.get("demo_interpretations", []):
             key = entry["parameter_id"]
@@ -276,6 +315,85 @@ def fixture_plan(context):
     return result
 
 
+def registered_plan(context):
+    """Interpret only the registered organizer dimensions. All models use the normal CAD build."""
+    from .shared_workflows import cue_text, AGREEMENT, mentions_loose_fit
+    line = context["utterance"]["text"]
+    topic = cue_text(line)
+    if topic:
+        line = AGREEMENT.sub("", topic).strip()
+    context = {**context, "utterance": {**context["utterance"], "text": line}}
+    plan = parameter_plan(context)
+    def ask(question):
+        return {**plan, "action": "ask_clarification", "question": question, "options": []}
+    profile = context["profile"]
+    selected_parts = set(context["part_ids"])
+    if selected_parts and not any(selected_parts.intersection(f["affected_part_ids"]) for f in profile["parameters"]):
+        return ask("선택한 부위는 고정 영역입니다. 수정할 외형 부위를 선택하세요.")
+    if profile.get("adapter_id") != "openscad_cable_organizer" or plan["action"] == "unsupported":
+        return plan
+    if re.search(r"그대로\s*(?:놔?두자|두세요|둡시다|두죠|둬요?|유지하자)[.!。！]?\s*$", line):
+        return {**plan, "action": "no_op", "question": None, "options": []}
+    # "선이 빠지지 않도록" specifies the desired fit. Only this cable-retention goal
+    # is excluded from the veto check; a second clause may still forbid changing a dimension.
+    directive = re.sub(r"(?:충전\s*선|케이블|선)(?:이|가|은|는)?\s*(?:(?:쉽게|잘|자꾸)\s*)?"
+                       r"빠지지\s*않(?:도록|게)(?=\s|[,.!?。！]|$)", "", line)
+    if re.search(r"지\s*(?:말|마|않)|마세요|말자|규칙.*무시", directive):
+        return ask("유지할 치수와 실제로 바꿀 치수를 알려 주세요.")
+    if NUMBER.search(line):
+        return plan
+    if re.search(r"결합|장착|바닥|받침|높이|깊이|우측|좌측|오른쪽|왼쪽", line):
+        return ask("이 모델에서 변경할 수 있는 홈 입구·내부 지름 또는 전체 길이 중 어느 치수를 바꿀까요?")
+    if plan["action"] in {"resolve_decision_request", "answer_question"}:
+        return plan
+    grow = bool(re.search(r"키워|키우|넓|늘[려리]|확대|크게", line))
+    shrink = bool(re.search(r"좁|축소|줄[여이일]|짧|작게|줄자", line)) or mentions_loose_fit(line)
+    if grow == shrink:
+        return ask("어느 치수를 넓히거나 좁힐까요? 홈 입구, 내부 지름 또는 전체 길이를 지정해 주세요.")
+    base = context["parameters"]
+    fields = {f["parameter_id"]: f for f in profile["parameters"]}
+    if re.search(r"길이|전체\s*크기", line):
+        lengths = (60, 66, 84) if grow else (66, 60, 54)
+        current = effective_values(profile, base)["body_length"]
+        sets = [(f"전체 {length} mm", "이전 홈 치수를 유지하고 전체 길이를 조정합니다.",
+                 normalize_patch(profile, {"body_length": length})) for length in lengths
+                if (length > current if grow else length < current)]
+    elif mentions_loose_fit(line) or re.search(r"입구|내부|안쪽|홈|직경|지름", line):
+        # Ignore dimensions explicitly preserved by the speaker when interpreting the target.
+        mutable = re.sub(r"(?:입구|내부|안쪽|지름|직경)(?:\s*(?:폭|공간|크기|직경|지름))?(?:은|는|을|를)?\s*(?:그대로|유지)", "", line)
+        entrance = bool(re.search(r"입구", mutable))
+        inside = bool(re.search(r"내부|안쪽|직경|지름", mutable))
+        direction = "확대" if grow else "축소"
+        alternatives = [("입구만", ["throat_width", "mouth_width"]), ("홈 내부만", ["groove_diameter"]),
+                        ("입구와 내부", ["throat_width", "mouth_width", "groove_diameter"])]
+        if entrance or inside:
+            alternatives = [alternatives[2 if entrance and inside else 0 if entrance else 1]]
+        # The step sizes are suggested comparisons. Always derive them from the currently viewed model.
+        deltas = {"throat_width": 1.2, "mouth_width": 1.6, "groove_diameter": 1.6} if grow else {
+            "throat_width": -.8, "mouth_width": -.8, "groove_diameter": -.8}
+        sets = []
+        for title, keys in alternatives:
+            patch = {k: round(min(fields[k]["max_value"], max(fields[k]["min_value"], base[k] + deltas[k])), 3) for k in keys}
+            if any(patch[k] == base[k] for k in keys):
+                continue
+            measurements = ", ".join(f'{fields[k]["label"]} {base[k]:g} → {patch[k]:g} mm' for k in keys)
+            sets.append((f"{title} {direction}", measurements, patch))
+    else:
+        return ask("어느 치수를 바꿀까요? 홈 입구, 내부 지름 또는 전체 길이를 지정해 주세요.")
+    options = []
+    for title, description, patch in sets:
+        try:
+            validate_relations(profile, {**base, **patch})
+        except MeetingError:
+            continue
+        ops = [{"operation_id": "set_parameter", "parameter_id": key, "part_id": fields[key]["affected_part_ids"][0],
+                "value": value, "unit": fields[key]["unit"], "source": "AI_PROPOSAL"} for key, value in patch.items()]
+        options.append({"title": title, "interpretation": description + " (비교용 제안값)", "operations": ops})
+    if not options:
+        return ask("현재 모델과 등록된 범위에서는 이 방향으로 바꿀 수 없습니다. 다른 치수를 지정해 주세요.")
+    return {**plan, "action": "propose_candidates" if len(options) > 1 else "propose_preview", "question": None, "options": options}
+
+
 def gateway_request(path, payload):
     base = os.environ.get("AI_GATEWAY_URL", "").rstrip("/")
     if not base:
@@ -294,17 +412,37 @@ def gateway_request(path, payload):
 
 
 def validated_plan(context, mode):
+    if context.get("request_transcript"):
+        # The evidence records retain their individual transcription and revision.
+        context = {**context, "utterance": {**context["utterance"], "text": context["request_transcript"]}}
+    scope = context.get("edit_scope") or {}
+    if scope.get("individual_slot_editing") is False and re.search(
+            r"(?:우측|좌측|오른쪽|왼쪽)\s*(?:상단|하단|위|아래)|(?:이|한)\s*홈만|(?:첫|두|세|네|다섯|\d+)\s*(?:번\s*째|번째|번)\s*(?:홈|구멍)|(?:왼쪽|오른쪽|가운데|중앙|마지막)\s*(?:홈|구멍)(?:만|을|의)", context["utterance"]["text"]):
+        raw = parameter_plan(context)
+        raw.update(action="ask_clarification", options=[],
+                   question="이 모델의 홈 치수는 다섯 곳에 공통 적용됩니다. 홈 전체의 입구·내부 치수 또는 전체 길이를 바꿀까요?")
+        return {**Plan.model_validate(raw).model_dump(), "proposal_provenance": {"source": "server_guard"}}
     if context["profile"].get("assembly") and assembly_remark(context["utterance"]["text"]):
-        return Plan.model_validate(fixture_plan(context)).model_dump()
+        return {**Plan.model_validate(parameter_plan(context)).model_dump(),
+                "proposal_provenance": {"source": "server_guard"}}
     if context.get("reference_missing") or (
             contains(context["utterance"]["text"], DEICTIC) and context["target_resolution"] == "missing"):
-        raw = fixture_plan(context)
+        raw = parameter_plan(context)
         raw.update(action="ask_clarification", options=[],
                    question=raw["question"] or "발화 당시의 대상을 선택해 주세요.")
-        return Plan.model_validate(raw).model_dump()
+        return {**Plan.model_validate(raw).model_dump(), "proposal_provenance": {"source": "server_guard"}}
+    provenance = {"source": "fixture" if mode == "fixture" else "provider"}
     try:
-        raw = fixture_plan(context) if mode == "fixture" else gateway_request("/v1/plans", context)
+        if mode == "live" and os.environ.get("MEETING_PLAN_BACKEND") == "registered":
+            raw = registered_plan(context)
+            provenance = {"source": "registered_rules", "model": "등록 치수 비교"}
+        else:
+            raw = fixture_plan(context) if mode == "fixture" else gateway_request("/v1/plans", context)
+        raw = dict(raw)
+        provenance.update(raw.pop("proposal_provenance", {}))
         plan = Plan.model_validate(raw)
+    except MeetingError:
+        raise
     except (ValidationError, urllib.error.URLError, OSError, ValueError) as error:
         raise MeetingError("후보 계획을 받지 못했습니다. 수동 치수 수정은 계속할 수 있습니다.", 502) from error
     if any(getattr(plan, key) != context[key] for key in IDENTITY):
@@ -322,10 +460,45 @@ def validated_plan(context, mode):
     if plan.action == "ask_clarification" and not plan.question:
         raise MeetingError("확인 질문이 비어 있습니다.")
     spoken = NUMBER.findall(context["clarification_of"] + " " + context["utterance"]["text"])
+    derived = {field["parameter_id"]: field for field in derived_fields(context["profile"])}
     for option in plan.options:
+        changed = set()
         for op in option.operations:
-            if contains(context["utterance"]["text"], DEICTIC) and op.part_id not in context["part_ids"]:
+            if (context.get("reference_selection") or contains(context["utterance"]["text"], DEICTIC)) and op.part_id not in context["part_ids"]:
                 raise MeetingError("발화 당시 지정한 부위와 후보의 적용 부위가 다릅니다.")
             if mode == "live" and op.source == "EXPLICIT_USER" and op.value not in {float(v) for v in spoken}:
                 op.source = "AI_PROPOSAL"
-    return plan.model_dump()
+            if op.parameter_id in derived:
+                field = derived[op.parameter_id]
+                if op.unit != field["unit"] or op.part_id not in field["affected_part_ids"]:
+                    raise MeetingError("계산 치수의 단위 또는 적용 부위가 다릅니다.")
+                patch = normalize_patch(context["profile"], {op.parameter_id: op.value})
+                op.parameter_id, op.value = next(iter(patch.items()))
+            if op.parameter_id in changed:
+                raise MeetingError("같은 후보에서 하나의 매개변수를 여러 번 변경했습니다.")
+            changed.add(op.parameter_id)
+        from .geometry import validate_patch, GeometryError
+        try:
+            final = validate_patch(context["profile"], context["parameters"],
+                                   [operation.model_dump(exclude={"source"}) for operation in option.operations],
+                                   context["constraints"])
+        except GeometryError as error:
+            raise MeetingError(str(error)) from error
+        # A clearly named absolute length is checked after server-side conversion.
+        for field in derived.values():
+            aliases = [field["label"], *field.get("aliases", [])]
+            match = next((found for alias in aliases if (found := re.search(
+                re.escape(alias) + r"(?:을|를|은|는)?\s*(?:정확히\s*)?(-?\d+(?:\.\d+)?)\s*(?:mm|밀리미터)",
+                context["utterance"]["text"], re.IGNORECASE))), None)
+            incremental = re.search(r"(?:mm|밀리미터)\s*(?:만큼|정도)?\s*(?:더\s*)?(?:늘려|줄여)", context["utterance"]["text"])
+            if match and not incremental:
+                actual = effective_values(context["profile"], final)[field["parameter_id"]]
+                if len(plan.options) != 1 or not math.isclose(actual, float(match.group(1)), abs_tol=1e-6):
+                    raise MeetingError("명시한 길이와 AI 후보가 다릅니다. 요청한 수치를 그대로 적용해 다시 요청해 주세요.")
+    validated = plan.model_dump()
+    if provenance["source"] == "registered_rules":
+        for option in validated["options"]:
+            for operation in option["operations"]:
+                if operation["source"] == "AI_PROPOSAL":
+                    operation["source"] = "REGISTERED_COMPARISON"
+    return {**validated, "proposal_provenance": provenance}

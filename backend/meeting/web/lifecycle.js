@@ -20,6 +20,7 @@ function preservedText(values) {
 export class MeetingLifecycle {
   constructor(deviceId, { edge, caps, beforeUtterance, pendingDecision, notice, errorMessage, download }) {
     Object.assign(this, { deviceId, edge, caps, beforeUtterance, pendingDecision, notice, errorMessage, download });
+    byId("meeting-manual").addEventListener("click", () => this.send("meeting_start", { mode: "live", input_mode: "manual" }));
     byId("meeting-main").addEventListener("click", () => this.main());
     byId("meeting-pause").addEventListener("click", () =>
       this.end(this.snapshot?.session_status === "paused" ? "meeting_end" : "meeting_pause"));
@@ -28,6 +29,10 @@ export class MeetingLifecycle {
     byId("result-close").addEventListener("click", () => {
       show("meeting-result", false);
       byId("meeting-main").focus();
+    });
+    byId("result-minutes").addEventListener("click", () => {
+      const revision = this.result?.manifest?.revision;
+      if (revision) this.download(this.edge().path + "/minutes.txt?revision=" + revision, this.snapshot.session_id + "-r" + revision + "-minutes.txt");
     });
     byId("result-download").addEventListener("click", () => {
       if (!this.result?.zip_url) return;
@@ -90,6 +95,7 @@ export class MeetingLifecycle {
     const replay = snapshot.meeting?.mode === "replay";
     const noVoice = !this.micAvailable() && !snapshot.meeting?.mode;
     const replayAvailable = snapshot.provider_mode === "fixture";
+    const manual = snapshot.meeting?.input_mode === "manual";
     const ready = status === "ready" || status === "paused";
     const stateTitle = {
       ready: this.beginning ? "마이크 연결 중" : this.busy === "meeting_start" ? "회의 시작 처리 중" : "회의 준비",
@@ -108,14 +114,15 @@ export class MeetingLifecycle {
             (noVoice ? (replayAvailable ? "직접 입력과 예시 발화로 회의를 시작할 수 있습니다." :
               "전사 서비스 또는 지정 마이크를 확인한 뒤 회의를 시작하세요.") :
               "회의 중 한 대의 지정 마이크만 사용합니다."),
-        recording: replay ? "직접 입력과 예시 발화를 기록합니다." : "회의를 종료하면 현재 채택본과 전체 전사를 저장합니다.",
+        recording: replay ? "예시 입력 모드 · 대본과 직접 입력의 출처를 기록합니다." : manual ? "직접 입력 모드 · 발언을 기록하고 수정안 요청을 눌러 후보를 만듭니다." : "부위를 선택하고 대화를 이어가세요. 비교할 때 “수정안 보여줘”라고 말하거나 수정안 보기를 누르세요.",
         paused: waitingForMic ? "PC 마이크를 준비하면 녹음을 재개합니다." : "현재까지의 전사와 채택 기록을 보존했습니다.",
         finalizing: "마지막 전사와 지정된 CAD 파일을 확인하고 있습니다.",
         completed: saved ? "전체 전사, 상세 요약, 최종 SCAD와 STL을 확인할 수 있습니다." :
           "아래에서 기존 회의록과 모델 파일을 확인할 수 있습니다.",
         save_error: "고정한 채택본과 확보한 기록으로 저장을 다시 시도할 수 있습니다.",
       })[status];
-    write("meeting-state-note", note || "");
+    write("meeting-state-note", snapshot.meeting?.edit_request_output === "bundle" && status === "recording"
+      ? "Quest에서 수정 요청을 녹음하고, 최종 전사를 확인한 뒤 오른쪽 앞 가상 CAD를 가리켜 A를 누르세요." : note || "");
     const buttonText = {
       ready: waitingForMic ? "PC 마이크 연결" : "회의 시작", recording: "회의 종료",
       paused: waitingForMic ? "PC 마이크 연결" : "회의 재개",
@@ -126,6 +133,8 @@ export class MeetingLifecycle {
     byId("meeting-main").disabled = Boolean(this.busy || this.preparing || this.beginning || status === "finalizing" ||
       (status === "paused" && snapshot.capture_state !== "off") ||
       (ready && !replayAvailable && this.caps().microphone !== true));
+    show("meeting-manual", ready && !replayAvailable && !snapshot.meeting?.capture_requested);
+    byId("meeting-manual").disabled = Boolean(this.busy);
     show("prepare-pc-mic", ready && this.micAvailable() && !this.prepared() && !waitingForMic);
     byId("prepare-pc-mic").disabled = Boolean(this.busy || this.preparing || this.beginning);
     show("meeting-pause", status === "recording" || status === "paused");
@@ -217,6 +226,7 @@ export class MeetingLifecycle {
     }
     const mode = meeting?.mode || (this.snapshot.provider_mode === "fixture" ? "replay" : "live");
     if (mode === "replay") return this.start("replay");
+    if (meeting?.input_mode === "manual") return this.send("meeting_start", { mode: "live", input_mode: "manual" });
     const designated = this.prepared() ? this.deviceId : meeting?.audio_device_id || this.snapshot.audio_host_device_id;
     if (designated === this.deviceId && !this.prepared()) return this.askMic(true);
     return this.start("live", designated);

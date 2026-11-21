@@ -1,6 +1,6 @@
 {
   "name":"ContextPin.Runtime",
   "rootNamespace":"ContextPin",
-  "references":["ContextPin.Core","Unity.InputSystem","UnityEngine.UI","Unity.XR.Hands","Oculus.VR","meta.xr.mrutilitykit","glTFast"],
+  "references":["Unity.InputSystem","UnityEngine.UI","Unity.XR.Hands","Oculus.VR","meta.xr.mrutilitykit","glTFast"],
   "autoReferenced":true
 }

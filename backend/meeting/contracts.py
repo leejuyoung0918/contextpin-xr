@@ -27,6 +27,10 @@ class CreateSession(Identity):
     profile_id: str | None = None
 
 
+class ContinueDesign(Identity):
+    request_id: str | None = Field(default=None, min_length=1, max_length=100)
+
+
 class JoinSession(Identity):
     join_code: str = Field(min_length=6, max_length=6)
 
@@ -39,6 +43,8 @@ class Command(BaseModel):
         "replay", "audio_host", "constraint", "ack", "printed",
         "restore", "end", "transcript_correction", "renew_code", "capabilities",
         "meeting_start", "meeting_pause", "meeting_end", "meeting_retry", "meeting_readopt",
+        "design_request", "design_target", "pointer", "edit_begin", "edit_preview", "edit_renew", "edit_cancel", "edit_commit", "verify",
+        "generate_edit_candidates", "commit_edit_candidate",
     ]
     payload: dict = Field(default_factory=dict)
 

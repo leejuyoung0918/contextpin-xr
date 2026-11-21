@@ -83,6 +83,13 @@ class AssemblyTest(unittest.TestCase):
         target = field["default_value"] + factor * (field["max_value"] - field["default_value"])
         return self.command("edit", {"base_version_id": self.initial["version_id"], "parameters": {key: target}})
 
+    def request_design(self, text, base=None):
+        note = self.command("text", {"text": text}, 200)
+        before = self.state()
+        return self.command("design_request", {"base_version_id": base or before["committed_version_id"],
+                                                "expected_adopted_revision": before["adopted_revision"],
+                                                "part_id": "outer_shell", "utterance_ids": [note["utterance_id"]]}, 200)
+
     def test_original_manual_exact_scad_stl_and_assembly_minutes(self):
         initial = self.initial
         state = self.state()
@@ -120,7 +127,7 @@ class AssemblyTest(unittest.TestCase):
         c = candidates[0]
         self.command("view", {"version_id": c["version_id"], "candidate_id": c["candidate_id"],
                               "round_id": first["round_id"], "part_ids": []}, 200)
-        next_round = self.wait(self.command("text", {"text": "이 후보에서 조금 더"}))
+        next_round = self.wait(self.request_design("이 후보에서 조금 더", c["version_id"]))
         self.assertEqual(next_round["edit_base_version_id"], c["version_id"])
         v = self.version(next_round["candidates"][0]["version_id"])
         self.assertNotEqual(v["geometry_hash"], models[0]["geometry_hash"])
@@ -128,7 +135,7 @@ class AssemblyTest(unittest.TestCase):
 
     def test_locked_change_and_old_planner_completion(self):
         self.command("edit", {"parameters": {"mounting_origin": 3}}, 400)
-        request = self.command("text", {"text": "결합 부분을 넓혀줘"})
+        request = self.request_design("결합 부분을 넓혀줘")
         blocked = self.wait(request, "needs_input")
         self.assertEqual(blocked["candidates"], [])
         entered = threading.Event()
@@ -186,8 +193,9 @@ class AssemblyTest(unittest.TestCase):
         self.assertEqual(state["adopted_version_id"], self.initial["version_id"])
         self.assertGreaterEqual(state["summary"]["proposal_count"], 2)
         self.assertGreater(state["design_revision"], 0)
-        note = self.command("text", {"text": "B가 좋네"})
-        self.wait(note, "answered")
+        note = self.command("text", {"text": "B가 좋네"}, 200)
+        self.assertNotIn("round_id", note)
+        self.assertEqual(len(self.state()["rounds"]), len(state["rounds"]))
         self.assertEqual(self.state()["design_revision"], state["design_revision"])
         a = self.show_candidate(review, 0)
         decided = self.command("decide", {"outcome": "commit", "round_id": review["round_id"], "revision": review["revision"],
@@ -230,8 +238,8 @@ class AssemblyTest(unittest.TestCase):
 
     def test_failed_publish_preserves_frozen_original_and_retries(self):
         self.command("meeting_start", {"mode": "replay"}, 200)
-        talk = self.command("text", {"text": "회의 목적을 공유했습니다"})
-        self.wait(talk, "answered")
+        talk = self.command("text", {"text": "회의 목적을 공유했습니다"}, 200)
+        self.assertNotIn("round_id", talk)
         with patch("backend.meeting.meeting_result.build_result", side_effect=OSError("disk fault")):
             self.command("meeting_end", {}, 200)
             deadline = time.monotonic() + 4
@@ -247,6 +255,119 @@ class AssemblyTest(unittest.TestCase):
         self.assertEqual(result["manifest"]["adopted_version_id"], self.initial["version_id"])
         self.assertIn("변경 채택 없음", result["summary_markdown"])
         self.assertIn("회의 목적", result["transcript_text"])
+
+    def test_design_speech_uses_only_acknowledged_pcm_between_button_edges(self):
+        import base64
+        import struct
+        import wave
+        from backend.meeting.speech_ranges import validate_refs
+        from backend.meeting.contracts import MeetingError
+
+        coordinator = self.client.app.state.coordinator
+        coordinator.mode = "live"
+        coordinator.speech_available = True
+        state = self.command("meeting_start", {"mode": "live", "design_submit_mode": "explicit"}, 200)["snapshot"]
+        sid = state["session_id"]
+        actor = state["host_id"]
+        started = threading.Event()
+        release = threading.Event()
+        chunks = []
+        def provider(path, data):
+            self.assertEqual(path, "/v1/transcriptions")
+            with wave.open(io.BytesIO(base64.b64decode(data["wav_base64"]))) as wav:
+                values = struct.unpack("<" + "h" * wav.getnframes(), wav.readframes(wav.getnframes()))
+            voiced = {v for v in values if v}
+            self.assertEqual(len(voiced), 1, "PCM from either side of the button was mixed into the selected utterance.")
+            value = voiced.pop()
+            chunks.append((value, values.count(value)))
+            if value == 4200:
+                started.set()
+                release.wait(5)
+            if value == 5500:
+                raise MeetingError("mocked STT failure")
+            return {"status": "final", "transcript": {2300: "이전 문장", 4100: "홈을 넓혀줘",
+                    4200: "수정안 보여줘", 5300: "다음 문장"}.get(value, "홈 검토")}
+
+        def wait_window(key, status):
+            deadline = time.monotonic() + 6
+            while time.monotonic() < deadline:
+                window = self.state()["design_speech_ranges"].get(key, {})
+                if window.get("status") == status:
+                    return window
+                time.sleep(.02)
+            self.fail(f"{key}: expected {status}, got {window}")
+
+        try:
+            with patch.dict(os.environ, {"VAD_END_SILENCE_MS": "120"}), patch(
+                    "backend.meeting.planner.gateway_request", side_effect=provider):
+                with self.client.websocket_connect("/v1/audio-streams/ranged") as socket:
+                    socket.send_json({"session_id": sid, "token": self.headers["Authorization"].split()[1],
+                                      "device_id": "pc", "stream_id": "ranged", "actual_sample_rate_hz": 8000,
+                                      "channels": 1, "codec": "pcm_s16le", "stream_start_sample_index": 0})
+                    self.assertEqual(socket.receive_json()["type"], "ready")
+                    sample = seq = 0
+                    def send(value, frames=1800):
+                        nonlocal seq, sample
+                        socket.send_bytes(struct.pack("<IQI", seq, sample, frames) + struct.pack("<h", value) * frames)
+                        seq += 1
+                        sample += frames
+                    def mark(key, edge):
+                        socket.send_json({"type": "design_speech_boundary", "range_id": key, "edge": edge,
+                                          "sample_index": sample})
+
+                    send(2300)
+                    mark("multiple", "start")
+                    mark("multiple", "start")  # retry of the identical boundary
+                    send(4100)
+                    send(0, 1000)
+                    send(4200)
+                    mark("multiple", "end")
+                    mark("multiple", "end")
+                    send(5300)
+                    self.assertTrue(started.wait(5))
+                    working = wait_window("multiple", "transcribing")
+                    self.assertEqual((working["start_sample"], working["end_sample"], working["received_through_sample"]),
+                                     (1800, 6400, 6400))
+                    self.assertEqual(self.state()["rounds"], [])
+                    release.set()
+                    window = wait_window("multiple", "final")
+                    self.assertEqual([u["text"] for u in window["utterances"]], ["홈을 넓혀줘", "수정안 보여줘"])
+                    self.assertCountEqual(chunks, [(2300, 1800), (4100, 1800), (4200, 1800)])
+                    refs = [{k: u[k] for k in ("utterance_id", "revision")} for u in window["utterances"]]
+                    with coordinator.lock:
+                        saved = coordinator.load(sid)
+                    self.assertEqual([u["text"] for u in validate_refs(saved, actor, "multiple", refs)],
+                                     ["홈을 넓혀줘", "수정안 보여줘"])
+                    for bad in ([], refs[:1], refs[::-1], [dict(refs[0], revision=2), refs[1]]):
+                        with self.assertRaises(MeetingError):
+                            validate_refs(saved, actor, "multiple", bad)
+                    with self.assertRaises(MeetingError):
+                        validate_refs(saved, "other-actor", "multiple", refs)
+                    mark("silent", "start")
+                    send(0)
+                    mark("silent", "end")
+                    self.assertEqual(wait_window("silent", "no_speech")["utterances"], [])
+                    mark("failed", "start")
+                    send(5500)
+                    mark("failed", "end")
+                    self.assertTrue(wait_window("failed", "failed")["error"])
+                    mark("limit", "start")
+                    for value in range(6000, 6006):
+                        send(value)
+                        send(0, 1000)
+                    mark("limit", "end")
+                    self.assertEqual(len(wait_window("limit", "failed")["utterances"]), 6)
+                    mark("missing", "start")
+                    seq += 1
+                    sample += 200
+                    send(4100)
+                    mark("missing", "end")
+                    self.assertIn("공백", wait_window("missing", "failed")["error"])
+                    socket.send_json({"type": "stop", "last_sequence": seq-1})
+                    self.assertEqual(socket.receive_json()["type"], "stopped")
+                self.assertEqual(self.state()["rounds"], [])
+        finally:
+            release.set()
 
     def test_single_continuous_audio_waits_for_eos_and_late_stt_revises_only_transcript(self):
         import struct

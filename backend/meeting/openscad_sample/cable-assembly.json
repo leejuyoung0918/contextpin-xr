@@ -1,0 +1,335 @@
+{
+  "display_name": "케이블 정리대 설계 검토",
+  "is_demo": true,
+  "scripted_demo": "cable_organizer",
+  "object_1": {
+    "display_name": "고정 기준 받침"
+  },
+  "object_2": {
+    "display_name": "5구 케이블 정리대"
+  },
+  "mounting": {
+    "position_m": [
+      0,
+      0,
+      0
+    ],
+    "rotation_xyzw": [
+      0,
+      0,
+      0,
+      1
+    ]
+  },
+  "qr_alignment": {
+    "payload": "ContextPin:assembly:demo:v1",
+    "mounting": {
+      "position_m": [
+        0.09,
+        0,
+        0
+      ],
+      "rotation_xyzw": [
+        0,
+        0,
+        0,
+        1
+      ]
+    }
+  },
+  "preserved_conditions": [
+    "홈 5개",
+    "가장자리 여유 9mm",
+    "바닥 높이 3.8mm와 본체 높이 10mm"
+  ],
+  "source_file": "cable_organizer.scad",
+  "source_files": [],
+  "comparison_maxima": {
+    "throat_width": 5.4,
+    "mouth_width": 7.6,
+    "groove_diameter": 7.2
+  },
+  "fixed_parameters": {
+    "slot_count": 5,
+    "end_margin": 9,
+    "body_depth": 18,
+    "body_height": 10,
+    "floor_thickness": 3.8,
+    "entry_chamfer_height": 1,
+    "corner_radius": 3
+  },
+  "coupling_guard": {
+    "axis": "z",
+    "side": "below",
+    "limit_mm": 3.5,
+    "tolerance_mm": 0.001,
+    "method": "clipped_solid",
+    "vary_parameters": [
+      "slot_pitch"
+    ]
+  },
+  "profile": {
+    "adapter_id": "openscad_cable_organizer",
+    "adapter_revision": 1,
+    "semantic_parts": [
+      {
+        "part_id": "outer_shell",
+        "label": "케이블 삽입구와 홈",
+        "aliases": [
+          "삽입구",
+          "홈",
+          "슬릿",
+          "위쪽"
+        ],
+        "selectable_regions": [
+          "outer_shell"
+        ]
+      },
+      {
+        "part_id": "coupling_mount",
+        "label": "바닥 받침",
+        "aliases": [
+          "바닥",
+          "받침",
+          "하단"
+        ],
+        "selectable_regions": [
+          "coupling_mount"
+        ]
+      }
+    ],
+    "parameters": [
+      {
+        "parameter_id": "throat_width",
+        "label": "홈 좁은 입구",
+        "type": "number",
+        "unit": "mm",
+        "default_value": 4.2,
+        "min_value": 3.4,
+        "max_value": 4.2,
+        "affected_part_ids": [
+          "outer_shell"
+        ],
+        "aliases": [
+          "좁은 입구",
+          "스로트"
+        ],
+        "change_aliases": [
+          "좁히기"
+        ],
+        "step": 0.1
+      },
+      {
+        "parameter_id": "mouth_width",
+        "label": "홈 맨 위 입구",
+        "type": "number",
+        "unit": "mm",
+        "default_value": 6,
+        "min_value": 5.2,
+        "max_value": 6,
+        "affected_part_ids": [
+          "outer_shell"
+        ],
+        "aliases": [
+          "맨 위 입구",
+          "입구 폭"
+        ],
+        "change_aliases": [
+          "좁히기"
+        ],
+        "step": 0.1
+      },
+      {
+        "parameter_id": "groove_diameter",
+        "label": "원형 홈 지름",
+        "type": "number",
+        "unit": "mm",
+        "default_value": 5.6,
+        "min_value": 4.8,
+        "max_value": 5.6,
+        "affected_part_ids": [
+          "outer_shell"
+        ],
+        "aliases": [
+          "홈 지름",
+          "원형 홈"
+        ],
+        "change_aliases": [
+          "줄이기"
+        ],
+        "step": 0.1
+      },
+      {
+        "parameter_id": "slot_pitch",
+        "label": "홈 중심 사이 거리",
+        "type": "number",
+        "unit": "mm",
+        "default_value": 16.5,
+        "min_value": 9,
+        "max_value": 16.5,
+        "affected_part_ids": [
+          "outer_shell"
+        ],
+        "aliases": [
+          "홈 사이 거리",
+          "홈 간격",
+          "정리대 길이"
+        ],
+        "change_aliases": [
+          "짧게",
+          "줄이기"
+        ],
+        "step": 0.01
+      }
+    ],
+    "edit_capabilities": [
+      {
+        "operation_id": "set_parameter",
+        "meaning": "등록된 홈 치수와 홈 중심 간격 변경",
+        "applicable_part_ids": [
+          "outer_shell"
+        ],
+        "input_parameter_schema": {
+          "parameter_id": "parameter_id",
+          "value": "parameter_value"
+        },
+        "allowed_ranges": "parameters",
+        "affected_properties": [
+          "width_mm"
+        ],
+        "preserved_properties": [
+          "height_mm",
+          "depth_mm"
+        ]
+      }
+    ],
+    "measured_properties": [
+      {
+        "property_id": "width_mm",
+        "axis": 0,
+        "label": "정리대 길이",
+        "unit": "mm",
+        "aliases": [
+          "길이",
+          "가로"
+        ]
+      },
+      {
+        "property_id": "height_mm",
+        "axis": 1,
+        "label": "본체 높이",
+        "unit": "mm",
+        "aliases": [
+          "높이"
+        ]
+      },
+      {
+        "property_id": "depth_mm",
+        "axis": 2,
+        "label": "본체 깊이",
+        "unit": "mm",
+        "aliases": [
+          "깊이",
+          "세로"
+        ]
+      }
+    ],
+    "default_constraints": [
+      {
+        "property_id": "height_mm",
+        "operator": "eq",
+        "value": 10,
+        "unit": "mm",
+        "tolerance": 0.001,
+        "source_kind": "object_profile"
+      },
+      {
+        "property_id": "depth_mm",
+        "operator": "eq",
+        "value": 18,
+        "unit": "mm",
+        "tolerance": 0.001,
+        "source_kind": "object_profile"
+      }
+    ],
+    "edit_scope": {
+      "part_id": "outer_shell",
+      "label": "전체 5개 홈에 공통 적용",
+      "individual_slot_editing": false
+    },
+    "derived_parameters": [
+      {
+        "parameter_id": "body_length",
+        "label": "정리대 전체 길이",
+        "aliases": [
+          "전체 길이",
+          "정리대 길이",
+          "길이"
+        ],
+        "formula": "array_span",
+        "count_parameter": "slot_count",
+        "spacing_parameter": "slot_pitch",
+        "margin_parameter": "end_margin",
+        "step": 0.1
+      }
+    ],
+    "parameter_constraints": [
+      {
+        "terms": {
+          "mouth_width": 1,
+          "throat_width": -1
+        },
+        "operator": "gte",
+        "value": 0,
+        "message": "맨 위 입구는 좁은 입구보다 작을 수 없습니다."
+      },
+      {
+        "terms": {
+          "slot_pitch": 1,
+          "groove_diameter": -1
+        },
+        "operator": "gt",
+        "value": 1,
+        "message": "홈 사이 간격은 내부 지름보다 1mm 이상 커야 합니다."
+      },
+      {
+        "terms": {
+          "slot_pitch": 1,
+          "mouth_width": -1
+        },
+        "operator": "gt",
+        "value": 1,
+        "message": "홈 사이 간격은 입구 폭보다 1mm 이상 커야 합니다."
+      },
+      {
+        "terms": {
+          "end_margin": 1,
+          "groove_diameter": -0.5
+        },
+        "operator": "gt",
+        "value": 1,
+        "message": "홈 내부와 끝 여백이 간섭합니다."
+      },
+      {
+        "terms": {
+          "end_margin": 1,
+          "mouth_width": -0.5
+        },
+        "operator": "gt",
+        "value": 1,
+        "message": "홈 입구와 끝 여백이 간섭합니다."
+      },
+      {
+        "terms": {
+          "body_height": 1,
+          "entry_chamfer_height": -1,
+          "floor_thickness": -1,
+          "groove_diameter": -0.5
+        },
+        "operator": "gt",
+        "value": 0,
+        "message": "홈 내부와 삽입구 높이가 간섭합니다."
+      }
+    ]
+  }
+}

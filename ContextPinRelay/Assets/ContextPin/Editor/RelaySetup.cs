@@ -35,7 +35,7 @@ namespace ContextPin.Editor
             Directory.CreateDirectory("Assets/ContextPin/Generated");
             AssetDatabase.Refresh();
             PlayerSettings.companyName="ContextPin";
-            PlayerSettings.productName="ContextPin Trace";
+            PlayerSettings.productName="ContextPin XR";
             PlayerSettings.bundleVersion="0.3.0";
             PlayerSettings.Android.bundleVersionCode=3;
             PlayerSettings.SetApplicationIdentifier(NamedBuildTarget.Android,"org.contextpin.relay");
@@ -53,7 +53,7 @@ namespace ContextPin.Editor
             PlayerSettings.runInBackground=true;
             PlayerSettings.allowUnsafeCode=false;
             PlayerSettings.insecureHttpOption=InsecureHttpOption.DevelopmentOnly;
-            PlayerSettings.macOS.microphoneUsageDescription="동의한 설명을 시간순으로 전사하고 회로 지점에 연결합니다.";
+            PlayerSettings.macOS.microphoneUsageDescription="회의 발화를 기록하고 합의한 설계 변경을 요청합니다.";
             var playerSettings=new SerializedObject(AssetDatabase.LoadAllAssetsAtPath("ProjectSettings/ProjectSettings.asset")[0]);
             var input=playerSettings.FindProperty("activeInputHandler");
             if(input!=null){input.intValue=1;playerSettings.ApplyModifiedPropertiesWithoutUndo();}
@@ -64,6 +64,7 @@ namespace ContextPin.Editor
             meta.handTrackingSupport=OVRProjectConfig.HandTrackingSupport.ControllersAndHands;
             meta.insightPassthroughSupport=OVRProjectConfig.FeatureSupport.Supported;
             meta.anchorSupport=OVRProjectConfig.AnchorSupport.Enabled;
+            meta.sceneSupport=OVRProjectConfig.FeatureSupport.Required;
             meta.isPassthroughCameraAccessEnabled=true;
             meta.enableNSCConfig=true;
             meta.securityXmlPath="Assets/ContextPin/Editor/network_sec_config.xml";
@@ -162,7 +163,7 @@ namespace ContextPin.Editor
         {
             Configure();
             var root=Environment.GetEnvironmentVariable("RELAY_WORKSPACE")??Path.GetFullPath(Path.Combine(Application.dataPath,"../.."));
-            var output=Path.Combine(root,"builds/ContextPinTrace.apk");
+            var output=Path.Combine(root,"builds/ContextPinXR.apk");
             Directory.CreateDirectory(Path.GetDirectoryName(output));
             var report=BuildPipeline.BuildPlayer(new BuildPlayerOptions{scenes=new[]{ScenePath},locationPathName=output,target=BuildTarget.Android,
                 options=BuildOptions.Development});

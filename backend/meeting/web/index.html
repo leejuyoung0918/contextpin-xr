@@ -47,6 +47,12 @@
           <input id="join-code" name="code" maxlength="24" autocapitalize="characters" spellcheck="false" required placeholder="진행자에게 받은 코드">
           <button class="button">참가하기</button>
         </form>
+        <form id="minutes-code-form" class="panel setup-card">
+          <h2>회의록 받기</h2>
+          <label for="minutes-code">헤드셋에 표시된 회의록 코드</label>
+          <input id="minutes-code" maxlength="10" minlength="10" autocapitalize="characters" spellcheck="false" required>
+          <button class="button">전체 회의록 다운로드</button>
+        </form>
       </div>
     </section>
 
@@ -64,6 +70,7 @@
       <section id="assembly-summary" class="assembly-summary" aria-label="조립체 설정" hidden>
         <div><strong id="assembly-target"></strong><p id="assembly-protection" class="subtle"></p></div>
         <p class="subtle">PC 미리보기 · 실제 장착 위치와 물체 간섭은 Quest와 실물에서 확인하세요.</p>
+        <a id="assembly-qr-card" class="button small" href="/meeting/assembly-qr-card.svg" target="_blank" rel="noopener" hidden>정렬 QR 카드</a>
       </section>
       <section id="meeting-controls" class="panel meeting-controls" aria-label="회의 진행" hidden>
         <div>
@@ -73,6 +80,7 @@
         <div class="file-actions">
           <button id="prepare-pc-mic" class="button small" hidden>PC 마이크 준비</button>
           <button id="meeting-pause" class="button small" hidden>일시정지</button>
+          <button id="meeting-manual" class="button small" hidden>직접 입력으로 시작</button>
           <button id="meeting-main" class="button primary">회의 시작</button>
         </div>
         <div class="meeting-summary" aria-label="회의 핵심 요약">
@@ -89,7 +97,9 @@
             <p id="result-meta" class="subtle" role="status"></p>
           </div>
           <div class="file-actions">
-            <button id="result-download" class="button primary small">회의 ZIP 다운로드</button>
+            <button id="result-minutes" class="button primary small">전체 회의록 TXT</button>
+            <button id="result-download" class="button small">CAD 포함 ZIP</button>
+            <button id="result-continue" class="button small">이 결과로 다음 작업</button>
             <button id="result-close" class="button small">닫기</button>
           </div>
         </div>
@@ -109,6 +119,19 @@
         <details>
           <summary>최종 OpenSCAD 코드</summary>
           <pre class="result-text"><code id="result-scad"></code></pre>
+        </details>
+        <details id="verification-panel">
+          <summary>다음 작업자가 이해한 내용 기록</summary>
+          <p class="subtle">실제 참가자가 직접 답한 내용을 입력합니다.</p>
+          <form id="verification-form">
+            <label for="verify-target">최종 수정 대상</label><input id="verify-target" required maxlength="300">
+            <label for="verify-method">채택한 수정 방법</label><input id="verify-method" required maxlength="600">
+            <label for="verify-dimensions">채택한 치수</label><input id="verify-dimensions" required maxlength="300">
+            <label for="verify-next">이어갈 작업</label><input id="verify-next" required maxlength="600">
+            <label for="verify-questions">추가 질문 횟수</label><input id="verify-questions" type="number" min="0" step="1">
+            <button class="button small">실제 응답 저장</button>
+          </form>
+          <p id="verification-status" class="subtle"></p>
         </details>
       </section>
       <div class="workspace">
@@ -140,6 +163,7 @@
                 <h3>부위 선택</h3>
                 <div id="parts" class="chips" role="group" aria-label="모델 부위"></div>
               </div>
+              <p id="shared-selections" class="subtle" aria-live="polite"></p>
               <p id="assembly-view-hint" class="subtle" hidden>모든 모델에 같은 장착 위치·방향·배율을 사용합니다.</p>
               <div id="model-files" class="file-actions" role="group" aria-label="현재 모델 파일" hidden>
                 <button id="download-stl" class="button small">STL</button>
@@ -164,8 +188,9 @@
           <section class="panel minutes" aria-labelledby="minutes-heading">
             <div class="panel-head">
               <h2 id="minutes-heading">회의록</h2>
-              <button class="button small" id="download-minutes">기록 JSON</button>
+              <button class="button small" id="download-minutes">전체 회의록 TXT</button>
             </div>
+            <div id="cable-design-history" hidden></div>
             <div id="minutes-list"></div>
           </section>
           <details id="print-panel" class="panel detail-panel" hidden>
@@ -195,13 +220,17 @@
             <p id="mic-note" class="subtle"></p>
             <ol id="transcripts" class="transcripts" aria-label="발화 기록" aria-live="polite"></ol>
             <form id="text-form">
+              <label id="edit-transcript-fallback" hidden>전사 보완 대상
+                <select id="edit-speech-range" aria-label="수동으로 보완할 녹음 구간"></select>
+              </label>
               <label for="speech-text" class="sr-only">회의 발언</label>
               <textarea id="speech-text" maxlength="3000" rows="2" required placeholder="변경하고 싶은 부위와 유지할 조건을 함께 적어보세요."></textarea>
               <div class="composer-actions">
                 <button id="sample-button" class="button small" type="button" hidden>예시 발화 넣기</button>
                 <label id="media-label" class="button small" for="media-input" hidden>사진 추가</label>
                 <input id="media-input" class="sr-only" type="file" accept="image/jpeg,image/png" capture="environment">
-                <button class="button primary small" id="text-submit">발언 보내기</button>
+                <button class="button small" id="text-submit">발언 기록</button>
+                <button class="button primary small" id="design-request" type="button">수정안 보기</button>
               </div>
             </form>
           </section>
@@ -214,6 +243,17 @@
             </div>
             <p id="round-status" class="subtle" role="status"></p>
             <div id="round-content"></div>
+            <section id="draft-editor" class="draft-editor" hidden>
+              <h3>후보 치수 조정</h3>
+              <p id="draft-status" class="subtle" aria-live="polite"></p>
+              <div id="draft-sliders"></div>
+              <label for="draft-reason">채택 이유</label><input id="draft-reason" maxlength="600" placeholder="선택 사항">
+              <div class="file-actions">
+                <button id="draft-begin" class="button small">이 후보 조정</button>
+                <button id="draft-commit" class="button primary small" hidden>표시된 조정안 채택</button>
+                <button id="draft-cancel" class="button small" hidden>조정 취소</button>
+              </div>
+            </section>
           </section>
           <details class="panel detail-panel">
             <summary>기기 및 요청 정보</summary>
@@ -230,6 +270,9 @@
       <form method="dialog"><button class="button small">닫기</button></form>
     </div>
     <p id="invite-hint">검토자가 이 화면의 주소를 열고 아래 코드를 입력하면 같은 모델을 볼 수 있습니다.</p>
+    <p id="invite-address" class="subtle"></p>
+    <img id="invite-qr" alt="같은 회의 참가 QR" hidden>
+    <p id="invite-spatial" class="subtle">Quest에서는 참가한 뒤 고정된 정렬 QR도 확인합니다.</p>
     <p id="invite-code" class="join-code"></p>
     <button class="button primary" id="copy-code">코드 복사</button>
   </dialog>

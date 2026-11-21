@@ -28,8 +28,15 @@ namespace ContextPin
         static string TextValue(JToken value, string key) => (value as JObject)?.Value<string>(key) ?? "";
         JObject MeetingVersion(string id) => Values(meetingSnapshot, "versions").OfType<JObject>().FirstOrDefault(v => TextValue(v, "version_id") == id);
         JObject MeetingLatestRound => Values(meetingSnapshot, "rounds").OfType<JObject>().LastOrDefault();
-        JObject RequestedMeetingVersion() => MeetingVersion(IsAssemblyMeeting && (AssemblySampling || assemblyAlignment == AssemblyAlignment.Preview)
-            ? AssemblyOriginalId : meetingViewedVersion ?? assemblyAdoptedTakesEffect ?? TextValue(meetingSnapshot, "committed_version_id"));
+        JObject RequestedMeetingVersion()
+        {
+            if (SpatialAssembly && (ExplicitDesignMeeting || A4PointSampling || A4PreviewActive))
+                return MeetingVersion(AssemblyAdoptedId);
+            if (IsAssemblyMeeting && (AssemblySampling || AssemblyQrScanning || assemblyAlignment == AssemblyAlignment.Preview))
+                return MeetingVersion(AssemblyOriginalId);
+            if (SpatialAssembly) return MeetingVersion(AssemblyAdoptedId);
+            return MeetingVersion(meetingViewedVersion ?? TextValue(meetingSnapshot, "committed_version_id"));
+        }
         JToken MeetingCandidate(string version) => Values(MeetingLatestRound, "candidates").LastOrDefault(c => TextValue(c, "version_id") == version);
         string MeetingVersionLabel(string value) => string.IsNullOrEmpty(value) ? "" : "v·" + value.Substring(Math.Max(0, value.Length - 7));
         string MeetingPartLabel(string id) => Values(meetingSnapshot?["profile"], "semantic_parts")
@@ -38,6 +45,7 @@ namespace ContextPin
         void EnterMeeting()
         {
             CloseMeeting();
+            meetingServerOverride = null;
             notice = "";
             meetingPage = MeetingPage.Model;
             meetingLocalPlacement = meetingRealSize = false;
@@ -51,7 +59,7 @@ namespace ContextPin
                 meetingDeviceId = "unity-" + Guid.NewGuid().ToString("N");
                 PlayerPrefs.SetString("ContextPinMeetingDevice", meetingDeviceId);
             }
-            Go(ScreenState.Meeting);
+            Draw();
         }
 
         string MeetingAddress()
@@ -60,12 +68,19 @@ namespace ContextPin
             var address = Environment.GetEnvironmentVariable("MEETING_EDGE_URL");
             if (!string.IsNullOrWhiteSpace(address)) return address;
 #endif
-            return RelayEvidence.LoadConfig().meetingServerUrl ?? "http://127.0.0.1:8788";
+            return meetingServerOverride ?? RelayEvidence.LoadConfig().meetingServerUrl ?? "http://127.0.0.1:8789";
         }
 
-        void BeginMeetingSession(bool join)
+        void BeginExampleMeeting()
+        {
+            meetingServerOverride = RelayEvidence.LoadConfig().replayServerUrl;
+            BeginMeetingSession(false);
+        }
+
+        void BeginMeetingSession(bool join, bool startOnCreate = false)
         {
             if (meetingBusy || (join && meetingJoinCode.Length != 6)) return;
+            StopJoinQr();
             try { meetingTransport = new MeetingTransport(MeetingAddress()); }
             catch (ArgumentException error) { notice = error.Message; Draw(); return; }
             var transport = meetingTransport;
@@ -89,19 +104,24 @@ namespace ContextPin
                     notice = error ?? "초기 회의 상태를 받지 못했습니다.";
                     meetingTransport.Dispose();
                     meetingTransport = null;
+                    meetingServerOverride = null;
                     Draw();
                     return;
                 }
                 transport.SessionId = TextValue(reply, "session_id");
                 transport.Token = TextValue(reply, "token");
                 meetingParticipant = TextValue(reply, "participant_id");
+                SaveMeetingResume(transport, snapshot);
                 meetingHttpAvailable = true;
                 notice = "회의에 연결했습니다.";
                 AcceptMeetingSnapshot(snapshot);
+                if (join) RestoreLocalCandidateReview();
                 transport.StartEvents(snapshot.Value<long?>("last_seq") ?? 0);
                 StartCoroutine(SyncMeetingClock(transport));
                 meetingRefreshAt = Time.unscaledTime + 2;
                 Draw();
+                if (!join && startOnCreate && SpatialAssembly && TextValue(snapshot, "provider_mode") == "live")
+                    StartSpatialMeetingWithMode(true);
             }));
         }
 
@@ -110,6 +130,7 @@ namespace ContextPin
             var transport = meetingTransport;
             if (meetingSnapshot == null)
             {
+                UpdateJoinQr();
                 if (!xr && !meetingBusy && Keyboard.current != null) ReadMeetingCodeKeys();
                 return;
             }
@@ -122,9 +143,16 @@ namespace ContextPin
             if (!connected && !meetingRefresh && !meetingBusy && Time.unscaledTime >= meetingRefreshAt) RefreshMeetingSnapshot();
             if (SpatialAssembly) UpdateSpatialMicrophone();
             else if (meetingCapture != null && meetingCapture.Recording && Time.unscaledTime >= meetingAutoSendAt) SendMeetingAudio();
+            if (SpatialAssembly && ExplicitDesignMeeting && AssemblyActive && !assemblyStarting && !assemblyPrepOpened)
+            {
+                assemblyPrepOpened = true;
+                if (assemblyAlignment == AssemblyAlignment.Unaligned) BeginA4Alignment();
+                if (assemblyAlignment == AssemblyAlignment.Confirmed) PrepareExplicitCamera();
+            }
             UpdateAssemblyTracking();
             UpdateSpatialPanelPosition();
             PositionMeetingModel();
+            UpdateMeetingCollaboration();
         }
 
         void ReadMeetingCodeKeys()
@@ -176,17 +204,40 @@ namespace ContextPin
         {
             long seq = snapshot.Value<long?>("last_seq") ?? 0;
             if (meetingSnapshot != null && seq <= (meetingSnapshot.Value<long?>("last_seq") ?? 0)) return false;
+            bool ongoingSession = meetingSnapshot != null;
+            var previousRound = MeetingLatestRound;
             var oldCommitted = TextValue(meetingSnapshot, "committed_version_id");
             meetingSnapshot = snapshot;
             if (IsAssemblyMeeting) ReadAssemblyMount();
             SpatialSnapshotUpdated();
-            if (oldCommitted != TextValue(meetingSnapshot, "committed_version_id")) SetMeetingViewedVersion(null);
+            ReceiveSharedComparison();
+            ReceiveCollaborativeDraft();
+            if (oldCommitted != TextValue(meetingSnapshot, "committed_version_id"))
+            {
+                if (oldCommitted.Length > 0 && IsAssemblyMeeting)
+                {
+                    targetSelectionRevision++;
+                    selectedTargetVersion = selectedTargetPart = selectedTargetImage = null;
+                    targetSnapshotPending = false;
+                }
+                if (SpatialAssembly)
+                {
+                    assemblyCompare = assemblyClarify = false;
+                    assemblyCompareRound = null;
+                }
+                SetMeetingViewedVersion(null);
+            }
             if (meetingFailureDisplayed != null)
             {
                 meetingFailureDisplayed = null;
                 notice = "회의 상태를 다시 받았습니다.";
             }
             QueueMeetingModel(RequestedMeetingVersion());
+            // A new server result opens review. Alignment changes and unrelated snapshots never open it.
+            var round = MeetingLatestRound;
+            if (ongoingSession && round != null && (TextValue(previousRound, "round_id") != TextValue(round, "round_id") ||
+                TextValue(previousRound, "status") != TextValue(round, "status")))
+                PresentReadyProposal(round);
             return true;
         }
 
@@ -221,21 +272,29 @@ namespace ContextPin
 
         void ReportMeetingView()
         {
-            if (string.IsNullOrEmpty(meetingLoadedVersion) || meetingLoadedVersion != TextValue(RequestedMeetingVersion(), "version_id")) return;
-            var nonSpatialCandidate = SpatialAssembly ? null : MeetingCandidate(meetingLoadedVersion);
-            var round = SpatialViewingShared ? SpatialRound() : !SpatialAssembly &&
+            var comparison = RequestedSpatialComparison();
+            var shown = comparison != null ? SpatialComparisonLoadedVersion : meetingLoadedVersion;
+            var requested = comparison ?? RequestedMeetingVersion();
+            if (string.IsNullOrEmpty(shown) || shown != TextValue(requested, "version_id")) return;
+            if (comparison != null && !SpatialComparisonModelVisible) return;
+            if (comparison == null && (A4PointSampling || A4PoseApplied) &&
+                (meetingModel == null || !meetingModel.activeInHierarchy)) return;
+            var nonSpatialCandidate = SpatialAssembly ? null : MeetingCandidate(shown);
+            var round = comparison != null ? SpatialRound() : !SpatialAssembly &&
                 (meetingPage == MeetingPage.Candidates || nonSpatialCandidate != null) ? MeetingLatestRound : null;
-            var candidate = !SpatialAssembly || SpatialViewingShared ? Values(round, "candidates").LastOrDefault(c => TextValue(c, "version_id") == meetingLoadedVersion) : null;
-            var displayed = Values(round, "candidates").Where(c => !string.IsNullOrEmpty(TextValue(c, "version_id")))
+            var candidate = Values(round, "candidates").LastOrDefault(c => TextValue(c, "version_id") == shown);
+            var displayed = Values(round, "candidates").Where(c => !string.IsNullOrEmpty(TextValue(c, "version_id")) &&
+                    (!UsingLocalCandidatePreview || IsLocalCandidateVisible(TextValue(c, "version_id"))))
                 .Select(c => TextValue(c, "candidate_id"));
             SendMeetingCommand("view", new JObject
             {
-                ["version_id"] = meetingLoadedVersion,
+                ["version_id"] = shown,
                 ["part_ids"] = new JArray(meetingPartId == null ? Array.Empty<string>() : new[] { meetingPartId }),
                 ["round_id"] = round == null ? null : TextValue(round, "round_id"),
                 ["candidate_id"] = candidate == null ? null : TextValue(candidate, "candidate_id"),
                 ["display_order_candidate_ids"] = new JArray(displayed),
-                ["share"] = SpatialViewingShared || SpatialSharesCommitted,
+                ["tracking_state"] = UsingLocalCandidatePreview ? "local_preview" : null,
+                ["share"] = (comparison != null && SpatialViewingShared) || SpatialSharesCommitted,
             }, false);
         }
 
@@ -351,6 +410,7 @@ namespace ContextPin
 
         void CloseMeeting()
         {
+            ReleaseMeetingCollaboration();
             ReleaseMeetingCapture();
             var transport = meetingTransport;
             meetingTransport = null;
@@ -363,6 +423,6 @@ namespace ContextPin
             meetingBusy = meetingRefresh = meetingEventsConnected = meetingHttpAvailable = false;
         }
 
-        void LeaveMeeting() { CloseMeeting(); Home(); }
+        void LeaveMeeting() { EnterMeeting(); Recenter(); }
     }
 }

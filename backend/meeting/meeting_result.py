@@ -75,21 +75,72 @@ def save_model(folder, models, version, final=False):
     (folder / "parameters.json").write_bytes(raw_parameters)
     write_json(folder / "parameter_provenance.json", {"units": version["parameter_units"],
                                                         "sources": version.get("parameter_sources", {})})
-    write_json(folder / "version.json", {"version_id": version["version_id"], "parent_version_id": version["parent_version_id"],
-                                         "entry": direct.relative_to(folder).as_posix()})
+    metadata = {key: version[key] for key in ("version_id", "parent_version_id", "source_request_id",
+                "candidate_set_id", "candidate_id", "candidate_interpretation", "full_parameters", "parameter_diff",
+                "evidence", "reason") if key in version}
+    write_json(folder / "version.json", {**metadata, "entry": direct.relative_to(folder).as_posix()})
     return direct
 
 
 def transcript_views(state):
     rows = sorted(state["utterances"], key=lambda u: (u["start_ms"], u["end_ms"], u["utterance_id"], u["revision"]))
-    origin = state["meeting"]["started_at"]
+    origin = state["meeting"]["started_at"] or (rows[0]["start_ms"] if rows else 0)
     lines = []
     for item in rows:
-        label = "예시" if item["source_mode"] == "replay" else "직접 입력" if item["source_mode"] == "manual" else "화자 미상"
+        label = "예시" if item["source_mode"] == "replay" else "직접 입력" if item["source_mode"] == "manual" or item.get("source_kind") == "manual_input" else "화자 미상"
+        if item.get("speaker_label"):
+            label += " " + item["speaker_label"]
         ms = max(0, item["start_ms"] - origin)
         offset = f"{ms // 60000:02}:{ms // 1000 % 60:02}.{ms % 1000:03}"
         lines.append(f'[{offset}] [{item["utterance_id"]} r{item["revision"]}] {label} · {item["text"]}')
     return rows, "\n".join(lines) + ("\n" if lines else "")
+
+
+def readable_minutes(sid, mode, decisions, transcript, missing, revision=None, latest_id=None, latest_label=None):
+    lines = ["3D 설계 회의록", "회의 " + sid,
+             "자료 · " + ("예시 시연" if mode == "replay" else "실제 입력"),
+             "저장본 " + str(revision) if revision else "진행 중인 기록", "", "설계 결정"]
+    if latest_id:
+        lines[4:4] = [f"Latest · {latest_label or '채택 모델'} · {latest_id}"]
+    for index, decision in enumerate(decisions, 1):
+        action = {"commit": "채택", "defer": "보류", "reject": "반려"}.get(decision.get("outcome"), "기록")
+        title = decision.get("candidate_title") or decision.get("design_version") or ""
+        lines.append(f"{index}. {action} · {title}".rstrip(" ·"))
+        if decision.get("selected_model_version_id"):
+            lines.append("   선택 모델 · " + decision["selected_model_version_id"])
+        for item in decision.get("parameter_changes", []):
+            lines.append(f'   {item["label"]} · {item["before"]} → {item["after"]} {item["unit"]}')
+        reason = decision.get("rationale_text")
+        lines.append("   이유 · " + (reason or "미기록"))
+        for u in decision.get("evidence_utterances", []):
+            lines.append(f'   근거 [{u["utterance_id"]} r{u["revision"]}] {u["text"]}')
+        ref = decision.get("reference_selection")
+        if ref:
+            lines.append(f'   요청 · {decision["client_request_id"]} · 기준 {decision["base_version_id"]}')
+            lines.append(f'   선택 부위 · {ref["part_id"]} · 참조 {ref["reference_version_id"]} · 사진 {ref["image_id"]}')
+        if decision.get("trigger_utterance_id"):
+            lines.append("   수정안 요청 발화 · " + decision["trigger_utterance_id"])
+    if not decisions:
+        lines.append("저장된 결정 없음")
+    lines.extend(["", "전체 전사 (시간순 · 정정 이력 포함)", transcript.rstrip() or "확정된 발화 없음"])
+    if missing:
+        lines.extend(["", "수집 누락 및 미확인 항목"])
+        for item in missing:
+            lines.append(" · ".join(str(v) for v in item.values() if v is not None))
+    return "\n".join(lines) + "\n"
+
+
+def saved_minutes(folder):
+    path = folder / "minutes.txt"
+    if path.is_file():
+        return path.read_text(encoding="utf-8")
+    # Older saved revisions have the same immutable decisions and full transcript.
+    manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+    return readable_minutes(manifest["meeting_id"], manifest["mode"],
+                            json.loads((folder / "decisions.json").read_text(encoding="utf-8")),
+                            (folder / "transcript.txt").read_text(encoding="utf-8"),
+                            manifest.get("missing", []), manifest["revision"], manifest.get("adopted_version_id"),
+                            manifest.get("adopted_version_label"))
 
 
 def summary_markdown(state, version, unused):
@@ -118,6 +169,75 @@ def summary_markdown(state, version, unused):
     questions = [item["question"] for item in state["rounds"] if item["status"] == "needs_input" and item.get("question")]
     lines += ["", "## 미해결 사항", "", *(questions or ["기록된 확인 질문 없음"])]
     return "\n".join(lines) + "\n"
+
+
+def export_design_requests(root, folder, state, missing):
+    """Archive the exact utterance revisions and reference image for explicit decisions."""
+    images = {image["evidence_id"]: image for image in state.get("images", [])}
+    decisions = {item["round_id"]: item for item in state["decisions"] if item.get("round_id")}
+    adopted_by_request = {item["client_request_id"]: item for item in state["decisions"]
+                          if item.get("client_request_id") and item.get("selected_model_version_id")}
+    requests = []
+    for round_ in state["rounds"]:
+        context = round_.get("context") or {}
+        if not context.get("client_request_id"):
+            continue
+        selection = dict(context["reference_selection"])
+        image_id = selection["image_id"]
+        image = images.get(image_id)
+        if image and re.fullmatch(r"[A-Za-z0-9_-]+", image_id):
+            suffix = {"image/jpeg": ".jpg", "image/png": ".png"}.get(image["mime"])
+            source = root / "media" / image_id
+            if suffix and source.is_file():
+                content = source.read_bytes()
+                if digest(content) == image["sha256"]:
+                    target = folder / "evidence" / (image_id + suffix)
+                    target.parent.mkdir(exist_ok=True)
+                    if not target.exists():
+                        target.write_bytes(content)
+                    selection["file"] = target.relative_to(folder).as_posix()
+                    selection["sha256"] = image["sha256"]
+                    selection["source_mode"] = image["source_mode"]
+        if "file" not in selection:
+            missing.append({"kind": "reference_photo", "image_id": image_id})
+        decision = adopted_by_request.get(context["client_request_id"]) or decisions.get(round_["round_id"]) or {}
+        requests.append({
+            "client_request_id": context["client_request_id"], "request_id": context.get("request_id"),
+            "round_id": round_["round_id"], "base_version_id": round_["edit_base_version_id"],
+            "speech_range_id": context.get("speech_range_id"), "utterances": context.get("source_utterance_refs", []),
+            "reference_selection": selection, "status": round_["status"],
+            "proposal_provenance": round_.get("proposal_provenance"),
+            "candidates": [{k:c.get(k) for k in ("candidate_id", "title", "interpretation", "status", "version_id", "parameter_changes")}
+                           for c in round_["candidates"]],
+            "selected_candidate_id": decision.get("candidate_id") if decision.get("selected_model_version_id") else None,
+            "decision_round_id": decision.get("round_id"), "adopted_version_id": decision.get("selected_model_version_id"),
+            "adopted_changes": decision.get("parameter_changes", []),
+            "reason": decision.get("rationale_text"), "decided_at": decision.get("committed_at")})
+    for rid, item in state.get("candidate_sets", {}).items():
+        if item["status"] != "committed":
+            continue
+        bundle = state["edit_requests"][rid]
+        source = root / "edit_requests" / state["session_id"] / rid
+        dest = folder / "edit_requests" / rid
+        dest.mkdir(parents=True)
+        write_json(dest / "request.json", bundle)
+        write_json(dest / "candidate_set.json", item)
+        for evidence in (bundle["visual_evidence"], bundle["audio"]):
+            filename = evidence["file"]
+            if filename not in ("target.jpg", "target.png", "command.wav"):
+                raise GeometryError("수정 요청 근거의 파일명이 다릅니다.")
+            try:
+                raw = (source / filename).read_bytes()
+                if digest(raw) != evidence["sha256"]:
+                    raise ValueError
+                (dest / filename).write_bytes(raw)
+            except (OSError, ValueError):
+                missing.append({"kind": "edit_request_evidence", "request_id": rid, "file": filename})
+        requests.append({"request_id": rid, "base_version_id": bundle["base_version_id"],
+                         "candidate_set_id": item["candidate_set_id"], "selected_candidate_id": item["selected_candidate_id"],
+                         "adopted_version_id": item["committed_version_id"], "file": f"edit_requests/{rid}/request.json"})
+    if requests:
+        write_json(folder / "design_requests.json", requests)
 
 
 def build_result(root, models, state, revision):
@@ -152,7 +272,10 @@ def build_result(root, models, state, revision):
                           "interpretation": candidate["interpretation"], "source": item["provider_mode"],
                           "parameter_changes": candidate.get("parameter_changes", []),
                           "evidence_utterance_id": ((item.get("context") or {}).get("utterance") or {}).get("utterance_id"),
-                          "reviewed": candidate_id in reviewed}
+                          "reviewed": candidate_id in reviewed,
+                          "proposal_provenance": item.get("proposal_provenance", {"source": item["provider_mode"]}),
+                          "geometry_provenance": versions[vid].get("geometry_provenance"),
+                          "parameters": versions[vid]["parameters"]}
                 if vid != final_id:
                     unused.append(record)
                 if not record["reviewed"]:
@@ -171,8 +294,30 @@ def build_result(root, models, state, revision):
                                                   encoding="utf-8")
         (folder / "transcript.txt").write_text(readable, encoding="utf-8")
         (folder / "summary.md").write_text(summary_markdown(state, selected, unused), encoding="utf-8")
+        export_design_requests(root, folder, state, missing)
         write_json(folder / "decisions.json", state["decisions"])
+        write_json(folder / "verification.json", {"status": "recorded" if state.get("verification_records") else "not_performed",
+                                                  "records": state.get("verification_records", [])})
+        if state.get("transfer"):
+            write_json(folder / "transfer.json", state["transfer"])
+        design_history = []
+        adopted_ids = [state["original_version_id"], *[d["selected_model_version_id"] for d in state["decisions"] if d.get("selected_model_version_id")]]
+        for position, vid in enumerate(dict.fromkeys(adopted_ids)):
+            model = versions[vid]
+            decision = next((d for d in reversed(state["decisions"]) if d.get("selected_model_version_id") == vid), None)
+            target = folder / "adopted_versions" / vid
+            save_model(target, models, {**model, "parameter_units": fields})
+            design_history.append({"label": model.get("design_version", f"V{position + 1}"), "version_id": vid,
+                "parent_version_id": model.get("parent_version_id"), "parameters": model["parameters"],
+                "reason": (decision or {}).get("rationale_text"), "reason_source": (decision or {}).get("rationale_source", "not_stated"),
+                "stl_sha256": model["assets"]["print.stl"]["sha256"], "stage_directory": str(target.relative_to(folder)),
+                "width_mm": round(model["measurements"]["width_mm"], 3)})
+        write_json(folder / "design_history.json", design_history)
         write_json(folder / "reviewed_candidates.json", reviewed_records)
+        sets = [{k:v for k,v in item.items() if k != "context"} for item in state["rounds"]]
+        write_json(folder / "candidate_sets.json", [*sets, *state.get("candidate_sets", {}).values()])
+        (folder / "minutes.txt").write_text(readable_minutes(sid, state["meeting"]["mode"], state["decisions"],
+                                                              readable, missing, revision, final_id, selected.get("design_version")), encoding="utf-8")
         entry_path = entry.relative_to(folder).as_posix()
         (folder / "README.md").write_text(
             f"# ContextPin 결과\n\n최종 채택 버전 `{final_id}`\n\n"
@@ -184,8 +329,10 @@ def build_result(root, models, state, revision):
                  for path in sorted(folder.rglob("*")) if path.is_file()}
         manifest = {"schema_version": 1, "meeting_id": sid, "revision": revision,
                     "started_at": state["meeting"]["started_at"], "ended_at": state["meeting"]["ended_at"],
-                    "mode": state["meeting"]["mode"], "status": "partial" if missing else "complete",
-                    "adopted_version_id": final_id, "adopted_revision": state["meeting"]["adopted_revision"],
+                    "mode": state["meeting"]["mode"], "data_label": "예시 데이터" if state["meeting"]["mode"] == "replay" else "실제 입력",
+                    "input_mode": state["meeting"].get("input_mode"), "parent_session_id": (state.get("transfer") or {}).get("source_session_id"),
+                    "geometry_provenance": selected.get("geometry_provenance"), "status": "partial" if missing else "complete",
+                    "adopted_version_label": selected.get("design_version"), "adopted_version_id": final_id, "adopted_revision": state["meeting"]["adopted_revision"],
                     "original_version_id": original["version_id"], "final_scad": entry_path,
                     "final_stl": "cad/final.stl", "stl_sha256": selected["assets"]["print.stl"]["sha256"],
                     "utterance_count": len(rows), "files": files, "missing": missing}

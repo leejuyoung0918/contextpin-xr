@@ -4,6 +4,10 @@
   "object_1": {"display_name": "기준 물체 1"},
   "object_2": {"display_name": "외형 수정 부품 2"},
   "mounting": {"position_m": [0, 0, 0], "rotation_xyzw": [0, 0, 0, 1]},
+  "qr_alignment": {
+    "payload": "ContextPin:assembly:demo:v1",
+    "mounting": {"position_m": [0.09, 0, 0], "rotation_xyzw": [0, 0, 0, 1]}
+  },
   "preserved_conditions": ["결합부 바닥 형상", "두 결합 구멍과 슬롯", "CAD 원점과 장착 방향"],
   "source_file": "object_2.scad",
   "source_files": [],

@@ -36,6 +36,7 @@ function arrayText(values) {
 export function markResultLoading() {
   byId("result-meta").textContent = "저장된 결과를 불러오는 중입니다.";
   byId("result-missing").hidden = true;
+  byId("result-minutes").disabled = true;
   byId("result-download").disabled = true;
   byId("result-summary").replaceChildren();
   byId("result-decisions").replaceChildren();
@@ -46,7 +47,7 @@ export function markResultLoading() {
 export function paintMeetingResult(data) {
   const manifest = data.manifest || {};
   const date = Number.isFinite(manifest.ended_at) ? new Date(manifest.ended_at).toLocaleString("ko-KR") : "";
-  const meta = [date, manifest.adopted_version_id || manifest.final_version_id, manifest.revision &&
+  const meta = [manifest.mode === "replay" || manifest.input_mode === "replay" ? "예시 데이터" : "", date, manifest.adopted_version_id || manifest.final_version_id, manifest.revision &&
     "저장본 " + manifest.revision].filter(Boolean);
   byId("result-meta").textContent = meta.join(" · ");
   const missing = manifest.missing || data.missing || [];
@@ -68,5 +69,6 @@ export function paintMeetingResult(data) {
     decisions.append(row);
   }
   byId("result-scad").textContent = data.final_scad || "이 저장본에서 최종 SCAD를 찾을 수 없습니다.";
+  byId("result-minutes").disabled = !manifest.revision;
   byId("result-download").disabled = !data.zip_url;
 }

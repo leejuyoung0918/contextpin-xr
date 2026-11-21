@@ -43,6 +43,7 @@ namespace ContextPin
                 ["device_id"] = meetingDeviceId,
                 ["platform"] = Application.platform.ToString(),
                 ["app_version"] = Application.version,
+                ["runtime"] = ExplicitSimulator ? "simulator" : xr ? "xr" : "desktop",
                 ["microphone"] = microphone,
                 ["frame_capture"] = camera,
                 ["spatial_tracking"] = spatial,

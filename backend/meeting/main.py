@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import secrets
 import time
 import zipfile
 from collections import defaultdict, deque
@@ -17,9 +18,10 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import geometry
+from . import geometry, meeting_result, meeting_state
 from .audio import AudioCapture, MAX_WAV, inspect_wav
-from .contracts import Command, CreateSession, JoinSession, MeetingError, clock_stamp, now_ms, uid
+from .bundle_provider import configure_pc
+from .contracts import ContinueDesign, Command, CreateSession, JoinSession, Identity, MeetingError, clock_stamp, now_ms, uid
 from .coordinator import SessionCoordinator
 from .gateway import provider_ready
 
@@ -30,12 +32,18 @@ STRICT_CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; "
               "object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 
 
-def create_app(root=None, planner=None):
+def create_app(root=None, planner=None, *, local_inference=False):
     @asynccontextmanager
     async def lifecycle(app):
+        if local_inference:
+            configure_pc(os.environ)
         app.state.coordinator = SessionCoordinator(root, planner)
         app.state.join_attempts = defaultdict(deque)
+        app.state.minutes_codes = {}
         try:
+            if os.environ.get("CABLE_DEMO_PREWARM") == "1":
+                from . import cable_demo
+                await run_in_threadpool(cable_demo.warm, app.state.coordinator)
             yield
         finally:
             await run_in_threadpool(app.state.coordinator.close)
@@ -81,16 +89,22 @@ def create_app(root=None, planner=None):
     def landing():
         return RedirectResponse("/meeting/")
 
+    def capture_backends():
+        if edge().mode == "fixture":
+            return {"speech_backend": "replay", "planner_backend": "fixture"}
+        return {"speech_backend": os.environ.get("MEETING_STT_BACKEND", "provider"),
+                "planner_backend": os.environ.get("MEETING_PLAN_BACKEND", "provider")}
+
     @app.get("/healthz")
     def health():
         return {"service": "contextpin-meeting-edge", "status": "ready", "provider_mode": edge().mode,
                 "advertised_url": os.environ.get("EDGE_ADVERTISED_URL"), "observer_url": "/meeting/",
-                "assembly_demo": bool(edge().profile.get("assembly"))}
+                **capture_backends(), "assembly_demo": bool(edge().profile.get("assembly"))}
 
     @app.get("/v1/capabilities")
     def capabilities():
         remote = bool(os.environ.get("AI_GATEWAY_URL"))
-        return {"provider_mode": edge().mode, "microphone": edge().mode == "live" and (remote or provider_ready("speech")),
+        return {"provider_mode": edge().mode, **capture_backends(), "microphone": edge().mode == "live" and (remote or provider_ready("speech")),
                 "planner": edge().mode == "live" and (remote or provider_ready("planner")),
                 "frame_capture": "device_reported", "raw_audio_saved": os.environ.get("STORE_RAW_AUDIO") == "true"}
 
@@ -112,9 +126,8 @@ def create_app(root=None, planner=None):
     def create(body: CreateSession):
         return edge().create(body)
 
-    @app.post("/v1/join")
-    def join(request: Request, body: JoinSession):
-        address = request.client.host if request.client else "local"
+    def limit_attempt(request, purpose):
+        address = (purpose, request.client.host if request.client else "local")
         with edge().lock:
             now = time.monotonic()
             attempts = app.state.join_attempts
@@ -130,6 +143,10 @@ def create_app(root=None, planner=None):
             if len(queue) >= 12:
                 raise MeetingError("참가 요청이 많습니다. 잠시 후 다시 시도해 주세요.", 429)
             queue.append(now)
+
+    @app.post("/v1/join")
+    def join(request: Request, body: JoinSession):
+        limit_attempt(request, "join")
         return edge().join(body)
 
     def bearer(authorization):
@@ -139,6 +156,42 @@ def create_app(root=None, planner=None):
     @app.get("/v1/sessions/{sid}/snapshot")
     def snapshot(sid: str, authorization: str = Header(default="")):
         return edge().snapshot(sid, bearer(authorization))
+
+    @app.post("/v1/sessions/{sid}/continue", status_code=201)
+    def continue_meeting(sid: str, body: Identity, authorization: str = Header(default="")):
+        return edge().continue_session(sid, bearer(authorization), body)
+
+    @app.post("/v1/sessions/{sid}/continue-design", status_code=201)
+    def continue_design(sid: str, body: ContinueDesign, authorization: str = Header(default="")):
+        return edge().continue_session(sid, bearer(authorization), body, design=True)
+
+    @app.get("/v1/sessions/{sid}/join-info")
+    def join_info(sid: str, request: Request, authorization: str = Header(default="")):
+        from urllib.parse import urlparse, urlencode
+        import ipaddress
+        import qrcode
+        from qrcode.image.svg import SvgPathImage
+        actor, state = edge().authenticated(sid, bearer(authorization))
+        edge().host(state, actor)
+        if now_ms() >= state["join_expires_at"]:
+            raise MeetingError("참가 코드를 갱신한 뒤 QR를 열어 주세요.", 409)
+        base = os.environ.get("EDGE_ADVERTISED_URL", "").rstrip("/")
+        parsed = urlparse(base)
+        invalid = not parsed.hostname or parsed.scheme not in {"http", "https"} or bool(parsed.username or parsed.password or parsed.query or parsed.fragment)
+        if parsed.hostname:
+            try:
+                address = ipaddress.ip_address(parsed.hostname)
+                invalid = invalid or address.is_loopback or address.is_unspecified
+            except ValueError:
+                invalid = invalid or parsed.hostname == "localhost"
+        if invalid:
+            raise MeetingError("EDGE_ADVERTISED_URL에 Quest가 접속할 수 있는 PC의 LAN 주소를 설정하세요.", 409)
+        link = base + "/meeting/?" + urlencode({"join": state["join_code"]})
+        raw = io.BytesIO()
+        qrcode.make(link, image_factory=SvgPathImage).save(raw)
+        return {"join_url": link, "payload": link, "server_url": base,
+                "spatial_reference_id": (state.get("assembly", {}).get("qr_alignment") or {}).get("payload"),
+                "qr_svg": raw.getvalue().decode(), "expires_at": state["join_expires_at"]}
 
     @app.get("/v1/sessions/{sid}/clock")
     def clock(sid: str, authorization: str = Header(default="")):
@@ -172,6 +225,55 @@ def create_app(root=None, planner=None):
                 "decisions": state["decisions"], "utterances": state["utterances"],
                 "rounds": state["rounds"], "print_results": state["print_results"]}
 
+    def minutes_file(text, sid, revision=None):
+        suffix = f"-r{revision}" if revision else ""
+        return Response(text, media_type="text/plain; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="contextpin-{sid}{suffix}-minutes.txt"'})
+
+    @app.get("/v1/sessions/{sid}/minutes.txt")
+    def download_minutes(sid: str, revision: int | None = None, authorization: str = Header(default="")):
+        token = bearer(authorization)
+        _, state = edge().authenticated(sid, token)
+        if revision or state.get("session_status") == "completed":
+            folder, result = edge().result_folder(sid, token, revision)
+            return minutes_file(meeting_result.saved_minutes(folder), sid, result["revision"])
+        if not state.get("meeting"):
+            raise MeetingError("3D 설계 회의에서 사용할 수 있습니다.", 409)
+        _, transcript = meeting_result.transcript_views(state)
+        return minutes_file(meeting_result.readable_minutes(sid, state["meeting"].get("mode"),
+                            state["decisions"], transcript, meeting_state.capture_missing(state),
+                            latest_id=state["committed_version_id"],
+                            latest_label=edge().version(state, state["committed_version_id"]).get("design_version")), sid)
+
+    @app.get("/v1/sessions/{sid}/minutes-code")
+    def minutes_code(sid: str, revision: int | None = None, authorization: str = Header(default="")):
+        folder, result = edge().result_folder(sid, bearer(authorization), revision)
+        now = now_ms()
+        with edge().lock:
+            codes = app.state.minutes_codes
+            for code, record in list(codes.items()):
+                if record["expires_at"] <= now:
+                    del codes[code]
+                elif record["folder"] == folder:
+                    return {"code": code, "expires_at": record["expires_at"]}
+            while True:
+                code = "".join(secrets.choice("23456789ABCDEFGHJKMNPQRSTUVWXYZ") for _ in range(10))
+                if code not in codes:
+                    break
+            expiry = now + 10 * 60 * 1000
+            codes[code] = {"folder": folder, "sid": sid, "revision": result["revision"], "expires_at": expiry}
+            return {"code": code, "expires_at": expiry}
+
+    @app.post("/v1/minutes-download")
+    def redeem_minutes(request: Request, body: dict):
+        limit_attempt(request, "minutes")
+        code = body.get("code")
+        with edge().lock:
+            record = app.state.minutes_codes.get(code.strip().upper()) if isinstance(code, str) else None
+            if not record or record["expires_at"] <= now_ms():
+                raise MeetingError("회의록 받기 코드를 확인하거나 헤드셋에서 새로 발급하세요.", 403)
+        return minutes_file(meeting_result.saved_minutes(record["folder"]), record["sid"], record["revision"])
+
     @app.get("/v1/sessions/{sid}/result")
     def meeting_review(sid: str, revision: int | None = None, authorization: str = Header(default="")):
         folder, result = edge().result_folder(sid, bearer(authorization), revision)
@@ -182,7 +284,7 @@ def create_app(root=None, planner=None):
                     "transcript_text": (folder / "transcript.txt").read_text(encoding="utf-8"),
                     "summary_markdown": (folder / "summary.md").read_text(encoding="utf-8"),
                     "decisions": json.loads((folder / "decisions.json").read_text(encoding="utf-8")),
-                    "final_scad": (folder / manifest["final_scad"]).read_text(encoding="utf-8"),
+                    "final_scad": (folder / manifest["final_scad"]).read_bytes().decode("utf-8"),
                     "zip_url": result["zip_url"]}
         except (OSError, ValueError, KeyError) as error:
             raise MeetingError("저장한 결과를 읽을 수 없습니다.", 409) from error
@@ -269,6 +371,8 @@ def create_app(root=None, planner=None):
     @app.post("/v1/sessions/{sid}/media", status_code=201)
     async def image(sid: str, file: UploadFile = File(...), version_id: str = Form(...),
                     part_id: str | None = Form(default=None), source_mode: str = Form(default="manual"),
+                    client_request_id: str | None = Form(default=None), selection_id: str | None = Form(default=None),
+                    captured_at_ms: int | None = Form(default=None),
                     source_monotonic_ms: float | None = Form(default=None), clock_offset_ms: float | None = Form(default=None),
                     clock_uncertainty_ms: float | None = Form(default=None), authorization: str = Header(default="")):
         token = bearer(authorization)
@@ -279,12 +383,12 @@ def create_app(root=None, planner=None):
         signature = b"\x89PNG\r\n\x1a\n" if file.content_type == "image/png" else b"\xff\xd8\xff" if file.content_type == "image/jpeg" else None
         if signature is None or not raw.startswith(signature):
             raise MeetingError("JPEG 또는 PNG 사진을 사용해 주세요.", 415)
-        if source_mode not in {"live_capture", "manual"}:
+        if source_mode not in {"live_capture", "manual", "xr_render", "desktop_render"}:
             raise MeetingError("사진 출처를 확인해 주세요.")
         stamp = clock_stamp({"source_monotonic_ms": source_monotonic_ms, "clock_offset_ms": clock_offset_ms,
                              "clock_uncertainty_ms": clock_uncertainty_ms}, now_ms())
         return await run_in_threadpool(edge().record_image, sid, token, raw, file.content_type, version_id, part_id or None,
-                                       stamp, source_mode)
+                                       stamp, source_mode, client_request_id, selection_id, captured_at_ms)
 
     @app.get("/v1/sessions/{sid}/media/{asset_id}")
     def get_media(sid: str, asset_id: str, authorization: str = Header(default="")):
@@ -336,11 +440,14 @@ def create_app(root=None, planner=None):
 
     @app.websocket("/v1/sessions/{sid}/events")
     async def event_stream(socket: WebSocket, sid: str):
+        connected_actor = None
         try:
             hello = await handshake(socket, "token")
             if hello is None:
                 return
             actor, state = await run_in_threadpool(edge().authenticated, sid, hello["token"])
+            await run_in_threadpool(edge().event_connected, sid, actor)
+            connected_actor = actor
             initial = edge().public(state, actor)
             await socket.send_json({"type": "snapshot", "snapshot": initial})
             after = hello.get("after_seq")
@@ -369,6 +476,10 @@ def create_app(root=None, planner=None):
         except MeetingError:
             await socket.close(code=1008)
 
+        finally:
+            if connected_actor is not None:
+                await run_in_threadpool(edge().event_disconnected, sid, connected_actor)
+
     @app.websocket("/v1/audio-streams/{stream_id}")
     async def audio_stream(socket: WebSocket, stream_id: str):
         capture = None
@@ -388,7 +499,9 @@ def create_app(root=None, planner=None):
                     await run_in_threadpool(capture.add, message["bytes"])
                 elif message.get("text"):
                     packet = json.loads(message["text"])
-                    if isinstance(packet, dict) and packet.get("type") == "stop":
+                    if isinstance(packet, dict) and packet.get("type") == "design_speech_boundary":
+                        await run_in_threadpool(capture.design_boundary, packet)
+                    elif isinstance(packet, dict) and packet.get("type") == "stop":
                         last_sequence = packet.get("last_sequence")
                         if last_sequence is not None and (type(last_sequence) is not int or last_sequence < -1):
                             raise MeetingError("마지막 오디오 번호가 올바르지 않습니다.")
@@ -414,4 +527,5 @@ def create_app(root=None, planner=None):
     return app
 
 
-app = create_app()
+# The public ASGI deployment applies the same PC policy when run without the CLI.
+app = create_app(local_inference=True)

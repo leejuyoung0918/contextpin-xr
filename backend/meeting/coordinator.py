@@ -1,5 +1,7 @@
 """Authoritative design state. Each command and its event commit in one SQLite transaction."""
+import copy
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -11,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import geometry, meeting_state, meeting_result
+from . import bundle_candidates, cable_demo, geometry, meeting_state, meeting_result, shared_workflows
 from .contracts import MeetingError, canonical, clock_stamp, digest, now_ms, text_field, uid
 from .planner import CANDIDATE_LETTER, NUMBER, ORDINAL, compile_context, contains, explicit_parameters, resolve_reference, validated_plan
 
@@ -29,8 +31,11 @@ def token_hash(token):
 
 
 class SessionCoordinator:
-    def __init__(self, root=None, planner=None):
+    def __init__(self, root=None, planner=None, *, exclusive_archive=False):
         self.root = Path(root or os.environ.get("EDGE_DATA_DIR", MEETING_ROOT)).resolve()
+        self.exclusive_archive = exclusive_archive
+        if exclusive_archive and not (self.root / "sessions.sqlite3").is_file():
+            raise MeetingError("저장된 회의 데이터베이스를 찾지 못했습니다.", 404)
         self.root.mkdir(parents=True, exist_ok=True)
         self.models = self.root / "models"
         self.models.mkdir(exist_ok=True)
@@ -47,6 +52,7 @@ class SessionCoordinator:
         self.lock = threading.RLock()
         self.changed = threading.Condition(self.lock)
         self.audio_streams = {}
+        self.event_connections = {}
         self.timers = set()
         self.stopped = False
         self.plan_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="planner")
@@ -60,6 +66,17 @@ class SessionCoordinator:
             max_workers=max(1, min(4, int(os.environ.get("CAD_WORKER_CONCURRENCY", "1")))), thread_name_prefix="geometry")
         self.db = sqlite3.connect(self.root / "sessions.sqlite3", check_same_thread=False)
         self.db.row_factory = sqlite3.Row
+        if exclusive_archive:
+            # SQLite retains this exclusive lock through subsequent commits and WAL
+            # checkpoints until close(). This also excludes older server binaries.
+            try:
+                self.db.execute("PRAGMA busy_timeout=0")
+                self.db.execute("PRAGMA locking_mode=EXCLUSIVE")
+                self.db.execute("BEGIN EXCLUSIVE")
+                self.db.commit()
+            except sqlite3.OperationalError as error:
+                self.close()
+                raise MeetingError("회의 서버를 정상 종료한 뒤 같은 PC에서 실행하세요.", 409) from error
         self.db.executescript("""
             PRAGMA journal_mode=WAL;
             PRAGMA foreign_keys=ON;
@@ -68,6 +85,11 @@ class SessionCoordinator:
             );
             CREATE TABLE IF NOT EXISTS participants (
                 token_hash TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions, participant_id TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS design_continuations (
+                source_id TEXT NOT NULL REFERENCES sessions, actor_id TEXT NOT NULL, request_id TEXT NOT NULL,
+                identity_hash TEXT NOT NULL, child_id TEXT NOT NULL REFERENCES sessions,
+                PRIMARY KEY(source_id,actor_id,request_id)
             );
             CREATE TABLE IF NOT EXISTS commands (
                 session_id TEXT NOT NULL REFERENCES sessions, command_id TEXT NOT NULL,
@@ -83,11 +105,16 @@ class SessionCoordinator:
                 PRIMARY KEY (session_id, context_id)
             );
         """)
+        if exclusive_archive:
+            return  # A local follow-up must never perform server-wide crash recovery.
         with self.transaction():
             for row in self.db.execute("SELECT state FROM sessions").fetchall():
                 state = json.loads(row["state"])
                 interrupted = []
                 meeting_state.initialize(state)
+                bundle_candidates.interrupted(self, state)
+                if state.get("edit_draft"):
+                    shared_workflows.clear(self, state, "서버가 재시작되어 편집권을 해제했습니다.")
                 if state.get("assembly"):
                     state["meeting"]["capture_requested"] = False
                     for capture in state["meeting_audio"].values():
@@ -96,7 +123,8 @@ class SessionCoordinator:
                         for segment in capture["segments"].values():
                             if segment["status"] == "pending":
                                 segment["status"] = "interrupted"
-                    if state["session_status"] == "recording" and state["meeting"]["mode"] == "live":
+                    if (state["session_status"] == "recording" and state["meeting"]["mode"] == "live"
+                            and state["meeting"].get("input_mode") != "manual"):
                         state["session_status"] = "paused"
                     if state["session_status"] == "finalizing":
                         restart_results.append(state["session_id"])
@@ -144,7 +172,9 @@ class SessionCoordinator:
         row = self.db.execute("SELECT state FROM sessions WHERE session_id = ?", (sid,)).fetchone()
         if not row:
             raise MeetingError("회의를 찾을 수 없습니다.", 404)
-        return json.loads(row["state"])
+        state = json.loads(row["state"])
+        shared_workflows.initialize(state)
+        return state
 
     def save(self, state):
         self.db.execute("UPDATE sessions SET join_code=?,state=? WHERE session_id=?",
@@ -165,10 +195,18 @@ class SessionCoordinator:
 
     @staticmethod
     def public(state, actor):
-        private = {"view_history", "audio_segments", "shared_view_history", "meeting_audio", "result_exports"}
+        private = {"explicit_design_targets", "design_target_history", "view_history", "audio_segments", "shared_view_history", "meeting_audio", "result_exports"}
         public = {k: v for k, v in state.items() if k not in private}
         if state.get("assembly"):
             public.update(meeting_state.snapshot_fields(state))
+            public["edit_draft"] = shared_workflows.public_draft(state)
+            if state.get("session_status") == "completed":
+                saved = shared_workflows.saved_design_utterance(state)
+                public["saved_design_utterance"] = {k: saved[k] for k in ("session_id", "utterance_id", "revision", "text")} if saved else None
+            elif state.get("session_status") == "recording":
+                since = max((d["committed_at"] for d in state["decisions"] if d["selected_model_version_id"]), default=0)
+                active = shared_workflows.latest_design_utterance(state, since)
+                public["active_design_utterance"] = {k: active[k] for k in ("session_id", "utterance_id", "revision", "text")} if active else None
         if actor != state["host_id"] or now_ms() >= state["join_expires_at"]:
             public["join_code"] = None
         return public
@@ -209,11 +247,11 @@ class SessionCoordinator:
             if not self.db.execute("SELECT 1 FROM sessions WHERE join_code=?", (code,)).fetchone():
                 return code
 
-    def participant(self, state, identity, role):
+    def participant(self, state, identity, role, token=None):
         participant = {"participant_id": uid("person"), "display_name": identity.display_name,
                        "device_id": identity.device_id, "role": role, "capabilities": identity.capabilities}
         state["participants"].append(participant)
-        token = secrets.token_urlsafe(32)
+        token = token or secrets.token_urlsafe(32)
         self.db.execute("INSERT INTO participants VALUES (?,?,?)",
                         (token_hash(token), state["session_id"], participant["participant_id"]))
         return participant, token
@@ -243,7 +281,7 @@ class SessionCoordinator:
         prefix = f"/v1/sessions/{sid}/versions/{version_id}"
         assets = {name: {**info, "url": f"{prefix}/assets/{name}"} for name, info in version["assets"].items()}
         return {**version, "parent_version_id": parent, "created_from_candidate_id": candidate,
-                "parameters": version["full_parameters"], "measurements": version["measured_dimensions_mm"], "assets": assets,
+                "parameters": version.get("parameters", version["full_parameters"]), "measurements": version["measured_dimensions_mm"], "assets": assets,
                 "preview_url": assets["preview.glb"]["url"], "stl_url": assets["print.stl"]["url"],
                 "export_url": prefix + "/export", "request_constraints": constraints or []}
 
@@ -263,31 +301,37 @@ class SessionCoordinator:
         except geometry.GeometryError as error:
             raise MeetingError(str(error), 422) from error
         version = self.decorate(sid, initial)
+        version["design_version"] = "V1"
         with self.transaction():
-            state = {"session_id": sid, "profile": profile, "join_code": self.code(),
-                     "join_expires_at": now_ms() + CODE_TTL, "last_seq": 0, "status": "active",
-                     "committed_version_id": version_id, "versions": [version], "participants": [],
-                     "rounds": [], "utterances": [], "decisions": [], "images": [], "view_history": {},
-                     "audio_segments": [], "constraints": [
-                         {"source_kind": "object_profile", "scope": "session", "status": "active",
-                          "strength": "hard", "constraint_id": uid("constraint"), **rule}
-                         for rule in profile.get("default_constraints", [])
-                     ],
-                     "constraint_revision": 0, "capture_state": "off", "audio_host_device_id": identity.device_id,
-                     "provider_mode": self.mode, "cloud_state": "online" if self.mode == "live" and self.configured else "offline",
-                     "raw_audio_saved": os.environ.get("STORE_RAW_AUDIO", "").lower() == "true",
-                     "require_all_ack": self.require_ack, "print_results": []}
-            if profile.get("assembly"):
-                state["assembly"] = profile["assembly"]
-                state["original_version_id"] = version_id
-                state["assembly_latest_request_at"] = 0
-                version["parameter_sources"] = {key: "SOURCE_DEFAULT" for key in version["parameters"]}
-                meeting_state.initialize(state)
-            self.db.execute("INSERT INTO sessions VALUES (?,?,?)", (sid, state["join_code"], canonical(state)))
-            actor, token = self.participant(state, identity, "host")
-            state["host_id"] = actor["participant_id"]
-            self.emit(state, "session.created", {"version_id": version_id}, actor["participant_id"])
+            state, actor, token = self._insert_session(sid, profile, version, identity)
         return self.connection(state, actor, token)
+
+    def _insert_session(self, sid, profile, version, identity, access_token=None):
+        version_id = version["version_id"]
+        state = {"session_id": sid, "profile": profile, "join_code": self.code(),
+                 "join_expires_at": now_ms() + CODE_TTL, "last_seq": 0, "status": "active",
+                 "committed_version_id": version_id, "versions": [version], "participants": [],
+                 "rounds": [], "utterances": [], "decisions": [], "images": [], "view_history": {},
+                 "audio_segments": [], "constraints": [
+                     {"source_kind": "object_profile", "scope": "session", "status": "active",
+                      "strength": "hard", "constraint_id": uid("constraint"), **rule}
+                     for rule in profile.get("default_constraints", [])
+                 ],
+                 "constraint_revision": 0, "capture_state": "off", "audio_host_device_id": identity.device_id,
+                 "provider_mode": self.mode, "cloud_state": "online" if self.mode == "live" and self.configured else "offline",
+                 "raw_audio_saved": os.environ.get("STORE_RAW_AUDIO", "").lower() == "true",
+                 "require_all_ack": self.require_ack, "print_results": []}
+        if profile.get("assembly"):
+            state["assembly"] = profile["assembly"]
+            state["original_version_id"] = version_id
+            state["assembly_latest_request_at"] = 0
+            version["parameter_sources"] = {key: "SOURCE_DEFAULT" for key in version["parameters"]}
+            meeting_state.initialize(state)
+        self.db.execute("INSERT INTO sessions VALUES (?,?,?)", (sid, state["join_code"], canonical(state)))
+        actor, token = self.participant(state, identity, "host", access_token)
+        state["host_id"] = actor["participant_id"]
+        self.emit(state, "session.created", {"version_id": version_id}, actor["participant_id"])
+        return state, actor, token
 
     def join(self, identity):
         with self.transaction():
@@ -337,6 +381,8 @@ class SessionCoordinator:
             self.emit(state, "round.superseded", {"round_id": item["round_id"], "revision": item["revision"]})
 
     def command(self, sid, token, command):
+        if any(key.startswith("_") for key in command.payload):
+            raise MeetingError("내부 명령 필드는 사용할 수 없습니다.")
         request_hash = digest({"type": command.type, "payload": command.payload})
         with self.transaction():
             actor = self.actor(sid, token)
@@ -348,7 +394,7 @@ class SessionCoordinator:
                     raise MeetingError("같은 command_id가 다른 요청에 사용되었습니다.", 409)
                 return {**json.loads(old["response"]), "snapshot": self.public(state, actor)}
             if state["status"] != "active" and not (state.get("assembly") and command.type in {
-                    "meeting_end", "meeting_retry", "transcript_correction", "capabilities"}):
+                    "meeting_end", "meeting_retry", "transcript_correction", "capabilities", "verify", "generate_edit_candidates"}):
                 raise MeetingError("종료된 회의입니다.", 409)
             stamp = clock_stamp(command.payload, now_ms())
             event_type, result, job = self.apply(state, actor, command.type, command.payload, stamp)
@@ -363,6 +409,20 @@ class SessionCoordinator:
     def apply(self, state, actor, kind, payload, stamp):
         profile = state["profile"]
         sid = state["session_id"]
+        if kind == "generate_edit_candidates":
+            request_id = text_field(payload, "request_id", 100)
+            bundle = state.get("edit_requests", {}).get(request_id)
+            if bundle and actor not in (state["host_id"], bundle["participant_id"]):
+                raise MeetingError("진행자 또는 수정 요청을 기록한 참가자가 후보 생성을 시작할 수 있습니다.", 403)
+            return bundle_candidates.queue(self, state, request_id)
+        shared_workflows.initialize(state)
+        shared_workflows.expire(self, state)
+        if kind in shared_workflows.COMMANDS:
+            return shared_workflows.apply(self, state, actor, kind, payload, stamp)
+        if state.get("edit_draft") and kind in {"edit", "decide", "restore", "meeting_readopt", "constraint", "commit_edit_candidate"} and payload.get("_lease_authorized") != state["edit_draft"]["lease_id"]:
+            raise MeetingError("현재 치수 조정을 완료하거나 취소한 뒤 변경하세요.", 409)
+        if kind == "commit_edit_candidate":
+            return bundle_candidates.commit(self, state, actor, payload)
         if kind in meeting_state.LIFECYCLE_COMMANDS or (kind == "end" and state.get("assembly")):
             return meeting_state.apply(self, state, actor, "meeting_end" if kind == "end" else kind, payload, stamp)
         participant = next(p for p in state["participants"] if p["participant_id"] == actor)
@@ -395,7 +455,7 @@ class SessionCoordinator:
                     "part_ids": list(dict.fromkeys(parts)), "candidate_id": candidate_id, "candidate_versions": versions,
                     "round_id": item["round_id"] if item else None,
                     "display_order_candidate_ids": order, "hit_point_asset_m": hits,
-                    "tracking_state": payload.get("tracking_state") if payload.get("tracking_state") in ("tracking", "lost", "limited") else "unreported"}
+                    "tracking_state": payload.get("tracking_state") if payload.get("tracking_state") in ("tracking", "lost", "limited", "desktop_view", "local_preview") else "unreported"}
             history = state["view_history"].setdefault(actor, [])
             history.append(view)
             del history[:-400]
@@ -432,6 +492,10 @@ class SessionCoordinator:
             previous = None
             reuse_round = None
             if kind == "replay":
+                if self.mode != "fixture" or state.get("meeting", {}).get("mode") == "live":
+                    raise MeetingError("실시간 회의에는 예시 발화를 넣을 수 없습니다.", 409)
+                if cable_demo.enabled(state) and payload.get("sample") in {"curves", "cable"}:
+                    return cable_demo.prepare_round(self, state, actor, stamp, payload)
                 sample = profile.get("demo_utterance")
                 if self.mode != "fixture" or payload.get("sample") != "curves" or not sample:
                     raise MeetingError("현재 모드에서는 이 예시를 열 수 없습니다.", 409)
@@ -440,6 +504,8 @@ class SessionCoordinator:
                 line = text_field(payload, "text")
             prior = None
             if kind == "clarify":
+                if state.get("meeting", {}).get("design_submit_mode") == "explicit":
+                    raise MeetingError("새 수정 발언 구간과 대상 선택을 함께 제출하세요.", 409)
                 reuse_round = self.round(state, payload.get("round_id"))
                 if reuse_round["status"] != "needs_input" or reuse_round["actor_id"] != actor:
                     raise MeetingError("이미 해결됐거나 다른 참가자의 질문입니다.", 409)
@@ -467,6 +533,24 @@ class SessionCoordinator:
             if prior and state["status"] != "active":
                 job = ("result", "", 0) if state["session_status"] == "completed" else None
                 return "transcript.corrected", utterance, job
+            if state.get("assembly") and kind in {"text", "transcript_correction"}:
+                if prior:
+                    return "transcript.corrected", utterance, None
+                if "speech_range_id" in payload:
+                    from . import edit_bundle, speech_ranges
+                    rid = text_field(payload, "speech_range_id", 100)
+                    window, _ = edit_bundle.window_for(state, rid)
+                    if (state["meeting"].get("edit_request_output") != "bundle" or
+                            state["session_status"] != "recording" or not window.get("command_audio") or
+                            rid in state["edit_requests"] or window["base_version_id"] != state["committed_version_id"] or
+                            speech_ranges.snapshot(state)[rid]["status"] not in ("failed", "no_speech")):
+                        raise MeetingError("이 수정 요청에는 수동 입력을 연결할 수 없습니다.", 409)
+                    window["manual_utterance_id"] = utterance["utterance_id"]
+                    if speech_ranges.snapshot(state)[rid]["status"] != "final":
+                        raise MeetingError("녹음한 오디오에 공백이 있습니다. 다시 녹음하세요.", 409)
+                    return "transcript.finalized", utterance, None
+                job = shared_workflows.request_from_utterance(self, state, actor, utterance, stamp)
+                return "transcript.finalized", utterance, job
             # A correction to adopted evidence is visible in minutes without applying another edit.
             if prior and any(prior["utterance_id"] in d["evidence_refs"] for d in state["decisions"]):
                 return "transcript.corrected", utterance, None
@@ -591,6 +675,9 @@ class SessionCoordinator:
         raise MeetingError("지원하지 않는 명령입니다.")
 
     def decide(self, state, actor, payload):
+        draft = state.get("edit_draft")
+        if draft and payload.get("_lease_authorized") != draft["lease_id"]:
+            raise MeetingError("현재 치수 조정을 완료하거나 취소한 뒤 채택하세요.", 409)
         item = self.round(state, payload.get("round_id"))
         if "expected_adopted_revision" in payload and payload["expected_adopted_revision"] != state.get("adopted_revision"):
             raise MeetingError("현재 채택본이 변경되었습니다.", 409)
@@ -639,15 +726,20 @@ class SessionCoordinator:
                     "parameter_changes": geometry.get_diff(state["profile"], self.version(
                         state, item["edit_base_version_id"])["parameters"], selected["parameters"]) if selected else []}
         if state.get("assembly"):
-            utterance = context.get("utterance")
-            decision["evidence_utterances"] = [utterance] if utterance else []
+            evidence_context = context
+            if item.get("adjusted_from_round_id") and not context.get("client_request_id"):
+                evidence_context = self.round(state, item["adjusted_from_round_id"]).get("context") or context
+            evidence_context = evidence_context if evidence_context.get("client_request_id") else context
+            utterance = evidence_context.get("utterance")
+            decision["evidence_utterances"] = evidence_context.get("selected_utterances") or ([utterance] if utterance else [])
+            decision["trigger_utterance_id"] = context.get("trigger_utterance_id")
             decision["reason_evidence"] = reason_evidence
             if reason_evidence:
                 decision["rationale_source"] = "transcript"
             decision["proposed_changes"] = candidate.get("operations", []) if candidate else []
             if candidate:
                 index = item["candidates"].index(candidate)
-                decision["candidate_label"] = f"후보 {chr(65 + index)}"
+                decision["candidate_label"] = "치수 조정안" if item.get("edit_lease_id") else f"후보 {chr(65 + index)}"
             decision["assembly_record"] = {
                 "request_id": context.get("request_id", item["round_id"]),
                 "base_model_id": item["edit_base_version_id"],
@@ -660,19 +752,42 @@ class SessionCoordinator:
                 "preserved_conditions": state["assembly"]["preserved_conditions"],
                 "reason": reason, "timestamp": decision["committed_at"],
             }
+            if evidence_context.get("client_request_id"):
+                provenance = {key: copy.deepcopy(evidence_context[key]) for key in (
+                    "client_request_id", "request_id", "reference_selection", "source_utterance_refs",
+                    "speech_range_id", "request_transcript", "expected_adopted_revision")}
+                provenance["base_version_id"] = evidence_context["edit_base_version_id"]
+                decision["evidence_refs"] = evidence_context["evidence_ids"]
+                referenced_round = self.round(state, evidence_context["round_id"])
+                provenance["proposal_provenance"] = referenced_round.get("proposal_provenance")
+                provenance["geometry_provenance"] = selected.get("geometry_provenance") if selected else None
+                decision.update(provenance)
+                decision["assembly_record"].update(provenance)
+        if selected and cable_demo.enabled(state) and item.get("cable_stage"):
+            cable_demo.record_choice(self, state, item, candidate, decision,
+                                     self.version(state, item["edit_base_version_id"]), selected)
+        if selected and item.get("adjusted_from_round_id"):
+            original_round = self.round(state, item["adjusted_from_round_id"])
+            if original_round.get("cable_stage"):
+                decision["cable_stage"] = original_round["cable_stage"]
         state["decisions"].append(decision)
         self.finish_round(item, {"commit": "committed", "defer": "deferred", "reject": "dismissed"}[outcome])
         if selected:
-            if state.get("assembly"):
-                active = {c["property_id"] for c in state["constraints"] if c["status"] == "active"}
-                retained = [dict(c, scope="session", adopted_decision_id=decision["decision_id"]) for c in decision["constraints"]
-                            if c["scope"] == "request" and c["property_id"] not in active]
-                if retained:
-                    state["constraints"].extend(retained)
-                    state["constraint_revision"] += 1
-            self.adopt(state, selected["version_id"])
-            self.supersede(state, exclude=item)
+            self.adopt_decision(state, decision, selected, exclude=item)
         return decision
+
+    def adopt_decision(self, state, decision, selected, exclude=None):
+        selected["design_version"] = f'V{sum(bool(d.get("selected_model_version_id")) for d in state["decisions"]) + 1}'
+        decision["design_version"] = selected["design_version"]
+        if state.get("assembly"):
+            active = {c["property_id"] for c in state["constraints"] if c["status"] == "active"}
+            retained = [dict(c, scope="session", adopted_decision_id=decision["decision_id"]) for c in decision["constraints"]
+                        if c["scope"] == "request" and c["property_id"] not in active]
+            if retained:
+                state["constraints"].extend(retained)
+                state["constraint_revision"] += 1
+        self.adopt(state, selected["version_id"])
+        self.supersede(state, exclude=exclude)
 
     def verify_model(self, version):
         try:
@@ -746,7 +861,8 @@ class SessionCoordinator:
                 "text": line, "participant_id": prior["participant_id"] if prior else actor,
                 "device_id": prior["device_id"] if prior else device, "speaker_id": None,
                 "start_ms": start, "end_ms": end, "source_mode": source,
-                "source_kind": {"live_capture": "audio", "replay": "fixture_transcript", "manual": "manual_text"}[source],
+                "source_kind": {"live_capture": "audio", "replay": "fixture_transcript", "manual": "manual_input"}[source],
+                "session_id": state["session_id"], "transcription_source": source, "is_final": True, "speaker_status": "unknown",
                 "status": "final", "received_at": now_ms(), **extra}
         if prior:
             item["prior_revision"] = prior["revision"]
@@ -758,8 +874,10 @@ class SessionCoordinator:
         return bool(NUMBER.search(line) or explicit_parameters(profile, line) or any(
             contains(line, [p["label"], *p.get("aliases", [])]) for p in profile["semantic_parts"]))
 
-    def attach_context(self, state, utterance, previous=None, reuse=None, audio_base=None):
-        actor = utterance["participant_id"]
+    def attach_context(self, state, utterance, previous=None, reuse=None, audio_base=None,
+                       request_view=None, request_base=None, request_actor=None, selected_lines=None,
+                       client_request_id=None, speech_range_id=None):
+        actor = request_actor or utterance["participant_id"]
         when = utterance["start_ms"]
         views = [view for view in state["view_history"].get(actor, [])
                  if view["captured_session_time_ms"] <= when]
@@ -771,7 +889,11 @@ class SessionCoordinator:
             view = previous["view"]
         if view and view["tracking_state"] in {"lost", "limited"}:
             view = {**view, "part_ids": [], "hit_point_asset_m": None}
+        if request_view is not None:
+            view, crossed = request_view, False
         candidate, base = resolve_reference(utterance, view)
+        if request_base is not None:
+            base = request_base
         reference_missing = bool(ORDINAL.search(utterance["text"]) and not base)
         if state.get("assembly"):
             referring = meeting_state.meeting_reference(utterance["text"])
@@ -783,7 +905,7 @@ class SessionCoordinator:
         version = self.version(state, base)
         # An ongoing correction replaces an unreviewed plan and leaves a durable transition.
         is_correction = bool(re.search(r"^\s*(아니|정정|아까 말)", utterance["text"]))
-        if is_correction and not reuse:
+        if is_correction and not reuse and selected_lines is None:
             current = next((r for r in reversed(state["rounds"]) if r["actor_id"] == actor and r["status"] in OPEN
                             and r.get("context") and r["context"]["utterance"]["device_id"] == utterance["device_id"]
                             and (actor is not None or r["context"]["utterance"].get("audio_stream_id") == utterance.get("audio_stream_id"))
@@ -800,7 +922,18 @@ class SessionCoordinator:
                         question=None, edit_base_version_id=version["version_id"])
         else:
             item = self.new_round(state, actor, version, self.mode, [], utterance["end_ms"])
-        context = compile_context(state, utterance, view, version, item["round_id"], item["generation_epoch"], previous)
+        context = compile_context(state, utterance, view, version, item["round_id"], item["generation_epoch"], previous, selected_lines)
+        context["request_user_id"] = actor
+        if selected_lines is not None:
+            context.update(client_request_id=client_request_id, speech_range_id=speech_range_id,
+                           request_actor_id=actor, requested_at=now_ms(), expected_adopted_revision=state["adopted_revision"])
+        if selected_lines is None and request_view is not None and request_view.get("image_id"):
+            image = next((i for i in state["images"] if i["evidence_id"] == request_view["image_id"] and i["version_id"] == version["version_id"]), None)
+            if image:
+                import base64
+                context["images_used"] = True
+                context["evidence_ids"] = list(dict.fromkeys([*context["evidence_ids"], image["evidence_id"]]))
+                context["screenshot_data_url"] = "data:" + image["mime"] + ";base64," + base64.b64encode((self.root / "media" / image["evidence_id"]).read_bytes()).decode()
         context["referenced_candidate_id"] = candidate
         if state.get("assembly"):
             context["context_version"] = state["design_revision"]
@@ -811,7 +944,8 @@ class SessionCoordinator:
                                                    if value != parent["parameters"][key]]
         context["reference_missing"] = reference_missing
         context["context_hash"] = digest({"semantic": context["context_hash"], "candidate": candidate,
-                                         "missing": context["reference_missing"]})
+                                         "missing": context["reference_missing"],
+                                         "client_request_id": client_request_id, "speech_range_id": speech_range_id})
         context["context_ready_at"] = now_ms()
         item["planner_job_id"] = uid("plan")
         item["context"] = context
@@ -830,6 +964,8 @@ class SessionCoordinator:
                 else:
                     self.exporting.add(sid)
                     self.result_pool.submit(self.run_result, sid)
+            elif kind == "bundle_plan":
+                self.plan_pool.submit(bundle_candidates.interpret, self, sid, rid)
             elif kind == "plan":
                 delay = max(0, min(3000, int(os.environ.get("FINAL_CONTEXT_DEBOUNCE_MS", "600")))) / 1000
                 def launch():
@@ -863,6 +999,14 @@ class SessionCoordinator:
             self.emit(state, "planner.started", {"round_id": rid, "request_id": context["request_id"],
                                                  "job_id": item["planner_job_id"]})
         try:
+            if (context.get("reference_selection") and mode == "live"
+                    and os.getenv("MEETING_PLAN_BACKEND") != "registered"):
+                import base64
+                image = context["screenshot"]
+                raw = (self.root / "media" / image["evidence_id"]).read_bytes()
+                if hashlib.sha256(raw).hexdigest() != image["sha256"]:
+                    raise MeetingError("선택 사진의 저장 상태가 변경되었습니다.", 409)
+                context = {**context, "screenshot_data_url": "data:" + image["mime"] + ";base64," + base64.b64encode(raw).decode()}
             plan = self.planner(context, mode)
             failure = None
         except Exception as error:
@@ -874,6 +1018,8 @@ class SessionCoordinator:
             item = self.round(state, rid)
             if not self.current(state, item, epoch) or self.stopped:
                 return
+            if plan:
+                item["proposal_provenance"] = plan.get("proposal_provenance", {"source": mode})
             item["planner_finished_at"] = now_ms()
             item["planner_latency_ms"] = item["planner_finished_at"] - item["planner_started_at"]
             state["cloud_state"] = ("degraded" if failure else "online") if mode == "live" else "offline"
@@ -893,7 +1039,7 @@ class SessionCoordinator:
                 event = "planner.recorded"
             else:
                 if state.get("assembly"):
-                    stamp = context["utterance"]["end_ms"]
+                    stamp = context.get("requested_at", context["utterance"]["end_ms"])
                     if stamp < state["assembly_latest_request_at"]:
                         self.finish_round(item, "superseded", "더 최근의 수정 요청이 있습니다.")
                         self.emit(state, "round.superseded", {"round_id": rid})
@@ -907,13 +1053,35 @@ class SessionCoordinator:
                         if previous is not item and previous["status"] in {"building", "needs_input"} and previous["created_at"] <= item["created_at"]:
                             self.finish_round(previous, "superseded", "더 최근에 관련 변경 요청이 들어왔습니다.")
                 item["status"] = "building"
-                item["candidates"] = [self.new_candidate(item, option) for option in plan["options"]]
+                item["candidates"] = [self.new_candidate(item, {**option, "proposal_provenance": item["proposal_provenance"]}) for option in plan["options"]]
                 event = "candidate.planned"
                 build = True
             self.emit(state, event, {"round_id": rid, "request_id": context["request_id"],
                                     "job_id": item["planner_job_id"]})
         if build:
             self.submit(sid, "build", rid, epoch)
+
+    def build_candidate(self, sid, version_id, profile, base, option, constraints, seen_parameters,
+                        seen_surfaces, cancelled, restore_parameters=None):
+        """Apply a validated patch to this exact base and register the real geometry."""
+        params = restore_parameters if restore_parameters is not None else self.check_patch(
+            profile, base["parameters"], option["operations"], constraints)
+        key = digest(params)
+        if key in seen_parameters or params == base["parameters"]:
+            raise MeetingError("이미 제시한 변경과 동일합니다.")
+        model = geometry.build_model(self.models, version_id, profile, params, constraints, cancelled=cancelled)
+        shape = model.get("surface_sha256", model["geometry_hash"])
+        if profile.get("assembly") and shape in seen_surfaces:
+            import shutil
+            shutil.rmtree(self.models / version_id)
+            raise MeetingError("이 후보의 실제 형상이 이미 표시한 모델과 같습니다.")
+        seen_parameters.add(key)
+        seen_surfaces.add(shape)
+        result = self.decorate(sid, model, base["version_id"], option["candidate_id"], constraints)
+        if profile.get("assembly"):
+            result["parameter_sources"] = {**base.get("parameter_sources", {}),
+                **{op["parameter_id"]: op["source"] for op in option["operations"]}}
+        return result
 
     def run_build(self, sid, rid, epoch):
         def cancelled():
@@ -950,19 +1118,8 @@ class SessionCoordinator:
             result = None
             error = None
             try:
-                params = restore if restore is not None else self.check_patch(
-                    profile, version["parameters"], option["operations"], constraints)
-                key = digest(params)
-                if key in used or params == version["parameters"]:
-                    raise MeetingError("이미 제시한 변경과 동일합니다.")
-                result = geometry.build_model(self.models, version_id, profile, params, constraints, cancelled=cancelled)
-                shape = result.get("surface_sha256", result["geometry_hash"])
-                if profile.get("assembly") and shape in used_geometry:
-                    import shutil
-                    shutil.rmtree(self.models / version_id)
-                    raise MeetingError("이 후보의 실제 형상이 이미 표시한 모델과 같습니다.")
-                used_geometry.add(shape)
-                used.add(key)
+                result = self.build_candidate(sid, version_id, profile, version, option, constraints,
+                                              used, used_geometry, cancelled, restore)
             except Exception as exc:
                 error = str(exc) if isinstance(exc, (MeetingError, geometry.GeometryError)) else "모델 생성에 실패했습니다."
             with self.transaction():
@@ -979,11 +1136,7 @@ class SessionCoordinator:
                 if error:
                     candidate.update(status="invalid", error=error)
                 else:
-                    result = self.decorate(sid, result, version["version_id"], candidate["candidate_id"],
-                                           item["request_constraints"])
-                    if profile.get("assembly"):
-                        result["parameter_sources"] = {**version.get("parameter_sources", {}),
-                            **{op["parameter_id"]: op["source"] for op in option["operations"]}}
+                    result["request_constraints"] = item["request_constraints"]
                     if restore is not None:
                         result["restored_from_version_id"] = item["restored_from_version_id"]
                     result["constraint_revision"] = item["constraint_revision"]
@@ -1002,10 +1155,28 @@ class SessionCoordinator:
             item["revision"] += 1
             self.emit(state, "round." + item["status"], {"round_id": rid, "revision": item["revision"]})
 
-    def record_image(self, sid, token, raw, mime, version_id, part_id, stamp, source_mode="manual"):
+    def record_image(self, sid, token, raw, mime, version_id, part_id, stamp, source_mode="manual",
+                     client_request_id=None, selection_id=None, captured_at_ms=None):
         with self.transaction():
             actor = self.actor(sid, token)
             state = self.load(sid)
+            capture = {}
+            if any(v is not None for v in (client_request_id, selection_id, captured_at_ms)):
+                from .explicit_design import capture_identity
+                capture = capture_identity(state, actor, client_request_id, selection_id, captured_at_ms, source_mode)
+                prior = next((i for i in state["images"] if i.get("selection_id") == selection_id), None)
+                if prior:
+                    if (any(prior.get(k) != v for k, v in capture.items()) or prior["participant_id"] != actor or
+                            prior["version_id"] != version_id or prior["part_ids"] != [part_id] or
+                            prior["source_mode"] != source_mode or prior["mime"] != mime or
+                            prior["sha256"] != hashlib.sha256(raw).hexdigest()):
+                        raise MeetingError("같은 선택 ID에 다른 사진을 등록할 수 없습니다.", 409)
+                    return prior
+                if state["meeting"].get("edit_request_output") == "bundle":
+                    from . import edit_bundle
+                    if version_id != state["committed_version_id"]:
+                        raise MeetingError("현재 Latest에서 사진을 다시 지정하세요.", 409)
+                    edit_bundle.check_window(state, actor, client_request_id, version_id, state["adopted_revision"])
             if state["status"] != "active" or len(state["images"]) >= 100:
                 raise MeetingError("지금은 사진을 추가할 수 없습니다.", 409)
             version = self.version(state, version_id)
@@ -1017,7 +1188,7 @@ class SessionCoordinator:
             path = directory / eid
             path.write_bytes(raw)
             device = next(p["device_id"] for p in state["participants"] if p["participant_id"] == actor)
-            evidence = {**stamp, "evidence_id": eid, "version_id": version["version_id"], "participant_id": actor,
+            evidence = {**stamp, **capture, "evidence_id": eid, "version_id": version["version_id"], "participant_id": actor,
                         "device_id": device, "part_ids": [part_id] if part_id else [], "source_mode": source_mode,
                         "revision": 1, "sha256": hashlib.sha256(raw).hexdigest(),
                         "url": f"/v1/sessions/{sid}/media/{eid}", "mime": mime}
@@ -1071,6 +1242,25 @@ class SessionCoordinator:
             if capture is not None:
                 capture["last_sample"] = sample
                 self.save(state)
+
+    def audio_boundary(self, sid, stream_id, actor, range_id, start, sample, segments_finished, command_wav=None, base_id=None):
+        from . import speech_ranges
+        with self.transaction():
+            state = self.load(sid)
+            capture = meeting_state.state_of_capture(state, stream_id)
+            bundle = state["meeting"].get("edit_request_output") == "bundle"
+            if bundle and start and base_id is not None and base_id != state["committed_version_id"]:
+                raise MeetingError("채택본이 바뀌었습니다. 현재 Latest에서 수정을 다시 시작하세요.", 409)
+            speech_ranges.boundary(state, capture, stream_id, actor, range_id, start, sample, segments_finished)
+            if bundle and not start and command_wav:
+                asset = uid("command")
+                directory = self.root / "media"
+                directory.mkdir(exist_ok=True)
+                (directory / asset).write_bytes(command_wav)
+                capture["design_ranges"][range_id]["command_audio"] = asset
+            self.emit(state, "speech.range_changed", {"range_id": range_id, "stream_id": stream_id,
+                                                     "edge": "start" if start else "end", "sample_index": sample}, actor)
+            return bundle
 
     def audio_cutoff(self, sid, stream_id):
         with self.lock:
@@ -1141,12 +1331,13 @@ class SessionCoordinator:
         try:
             result = gateway_request("/v1/transcriptions", {"wav_base64": base64.b64encode(wav).decode()})
             line = result["transcript"].strip()[:1200] if result.get("status", "final") == "final" else ""
-        except Exception:
+        except Exception as error:
             with self.transaction():
                 state = self.load(sid)
+                state["speech_error"] = str(error) if isinstance(error, MeetingError) else "전사에 실패했습니다. 다시 녹음하거나 발화를 직접 입력하세요."
                 state["cloud_state"] = "degraded"
                 self.finish_segment(state, stream_id, sequence, "failed")
-                self.emit(state, "speech.failed", {**record, "message": "전사에 실패했습니다. 발화를 직접 입력할 수 있습니다."}, actor)
+                self.emit(state, "speech.failed", {**record, "message": state["speech_error"]}, actor)
             if state.get("session_status") == "completed":
                 self.submit(sid, "result", "", 0)
             return
@@ -1162,15 +1353,20 @@ class SessionCoordinator:
         with self.transaction():
             state = self.load(sid)
             self.finish_segment(state, stream_id, sequence, "final")
+            state["speech_error"] = None
             utterance = self.utterance(state, line, start, end, view_actor, device, "live_capture",
                                        **(stamp or {}), audio_stream_id=stream_id, source_sequence=sequence,
+                                       transcription_provider=result.get("provider", "configured"),
                                        captured_by_participant_id=actor, timing_quality="segment_bounds",
                                        stt_final_received=now_ms(), speech_to_transcript_ms=max(0, now_ms() - end))
+            capture = meeting_state.state_of_capture(state, stream_id)
+            if capture is not None and str(sequence) in capture["segments"]:
+                capture["segments"][str(sequence)]["utterance_id"] = utterance["utterance_id"]
             # The audio host's screen is used only if explicitly pinned as context for this stream.
             # speaker_id stays null for a room microphone even when a screen was pinned.
             expected_head = state["versions"][0]["version_id"]
             for decision in state["decisions"]:
-                if decision["committed_at"] <= start and decision["selected_model_version_id"]:
+                if decision["committed_at"] <= utterance.get("voice_onset_ms", start) and decision["selected_model_version_id"]:
                     expected_head = decision["selected_model_version_id"]
             if state["raw_audio_saved"]:
                 path = self.root / "media"
@@ -1182,7 +1378,10 @@ class SessionCoordinator:
             newer_assembly_request = state.get("assembly") and end < state.get("assembly_latest_request_at", 0)
             if newer_assembly_request:
                 utterance["processing_notice"] = "더 최근에 제출한 수정 요청을 유지했습니다."
-            elif state["status"] == "active" and expected_head == state["committed_version_id"]:
+            elif state.get("assembly") and expected_head == state["committed_version_id"]:
+                job = shared_workflows.request_from_utterance(self, state, actor, utterance,
+                          {**(stamp or {}), "captured_session_time_ms": end, "received_at": now_ms()})
+            elif not state.get("assembly") and state["status"] == "active" and expected_head == state["committed_version_id"]:
                 try:
                     pending = next((r for r in reversed(state["rounds"]) if r["status"] == "needs_input"
                                     and r["actor_id"] == view_actor and r.get("context")
@@ -1264,3 +1463,150 @@ class SessionCoordinator:
         if not registered:
             raise MeetingError("아직 저장한 회의 결과가 없습니다.", 404)
         return self.root / "results" / sid / registered["key"], registered["result"]
+
+
+    def event_connected(self, sid, actor):
+        with self.lock:
+            key = (sid, actor)
+            self.event_connections[key] = self.event_connections.get(key, 0) + 1
+
+    def event_disconnected(self, sid, actor):
+        with self.transaction():
+            key = (sid, actor)
+            self.event_connections[key] = max(0, self.event_connections.get(key, 0) - 1)
+            if self.event_connections[key]:
+                return
+            state = self.load(sid)
+            draft = state.get("edit_draft")
+            if draft and draft["owner_id"] == actor:
+                shared_workflows.clear(self, state, "편집자의 연결이 종료되었습니다.")
+                self.emit(state, "edit.released", {"participant_id": actor})
+
+    def continue_session(self, sid, token, identity, *, design=False):
+        source_actor, source = self.authenticated(sid, token)
+        return self._continue_from_source(source, source_actor, identity, design=design, parent_token=token)
+
+    def open_archived_review(self, sid):
+        """Local archive-owner operation; unavailable to an HTTP service coordinator."""
+        if not self.exclusive_archive:
+            raise MeetingError("현장 PC에서 보관함을 단독으로 연 뒤 실행하세요.", 403)
+        from .contracts import ContinueDesign
+        identity = ContinueDesign(display_name="현장 PC 운영자", device_id="local-archive-operator")
+        source = self.load(sid)
+        child = self._continue_from_source(source, "local-archive-operator", identity, design=True)
+        with self.changed:
+            while True:
+                state = self.load(child)
+                round_state = state["rounds"][-1]["status"]
+                if round_state not in RUNNING:
+                    break
+                self.changed.wait(timeout=2)
+        with self.transaction():
+            state = self.load(child)
+            if now_ms() >= state["join_expires_at"]:
+                state["join_code"] = self.code()
+            state["join_expires_at"] = now_ms() + CODE_TTL
+            self.save(state)
+            return {"session_id": child, "join_code": state["join_code"], "status": round_state}
+
+    def _continue_from_source(self, source, source_actor, identity, *, design, parent_token=None):
+        sid = source["session_id"]
+        if source.get("session_status") != "completed":
+            raise MeetingError("회의 결과 저장이 완료된 뒤 다음 작업을 시작하세요.", 409)
+        expected_mode = "live" if self.mode == "live" else "replay"
+        if source["meeting"]["mode"] != expected_mode:
+            raise MeetingError("저장된 결과와 같은 live 또는 replay 모드에서 후속 작업을 시작하세요.", 409)
+        selected = self.version(source, source["committed_version_id"])
+        self.verify_model(selected)
+        if source["profile"]["object_id"] != self.profile["object_id"] or selected["source_hash"] != source["profile"]["source_hash"]:
+            raise MeetingError("저장된 모델의 프로필로 서버를 실행해 주세요.", 409)
+        if selected["source_hash"] != self.profile["source_hash"]:
+            if not source["profile"].get("assembly"):
+                raise MeetingError("저장된 모델의 프로필로 서버를 실행해 주세요.", 409)
+            from .openscad_geometry import adapter_for_source
+            try:
+                adapter_for_source(selected["source_hash"])
+            except geometry.GeometryError as error:
+                raise MeetingError("저장된 모델의 프로필로 서버를 실행해 주세요.", 409) from error
+        saved = shared_workflows.saved_design_utterance(source) if design else None
+        job = None
+        with self.transaction():
+            access_token = None
+            if design:
+                # Derive a retryable child credential from the authenticated caller's secret.
+                # Only its hash and a reference to the child are persisted.
+                key = identity.request_id or "default"
+                signature = digest([identity.device_id, identity.display_name, "continue-design"])
+                if parent_token is not None:
+                    access_token = hmac.new(parent_token.encode(), canonical(["continue-design",sid,key]).encode(), hashlib.sha256).hexdigest()
+                prior = self.db.execute("SELECT identity_hash,child_id FROM design_continuations "
+                                        "WHERE source_id=? AND actor_id=? AND request_id=?", (sid, source_actor, key)).fetchone()
+                if prior:
+                    if prior["identity_hash"] != signature:
+                        raise MeetingError("이 요청 ID는 다른 후속 작업에서 사용됐습니다.", 409)
+                    child = prior["child_id"]
+                    state = self.load(child)
+                    if parent_token is None:
+                        if state["status"] != "active":
+                            # This review completed. Open a fresh child on the next operator request.
+                            self.db.execute("DELETE FROM design_continuations WHERE source_id=? AND actor_id=? AND request_id=?",
+                                            (sid, source_actor, key))
+                        else:
+                            return child
+                    else:
+                        actor_id = self.actor(child, access_token)
+                        participant = next(p for p in state["participants"] if p["participant_id"] == actor_id)
+                        return self.connection(state, participant, access_token)
+                if not saved:
+                    raise MeetingError("저장된 실시간 전사에서 수정 요청을 찾지 못했습니다. 새 회의에서 변경 내용을 입력하세요.", 409)
+            child = uid("meeting")
+            initial = self.decorate(child, copy.deepcopy(selected))
+            state, participant, child_token = self._insert_session(child, source["profile"], initial, identity, access_token)
+            actor_id = participant["participant_id"]
+            state["versions"] = [self.decorate(state["session_id"], copy.deepcopy(v), v.get("parent_version_id"),
+                                               v.get("created_from_candidate_id"), v.get("request_constraints")) for v in source["versions"]]
+            state["committed_version_id"] = selected["version_id"]
+            state["original_version_id"] = source["original_version_id"]
+            state["decisions"] = copy.deepcopy(source["decisions"])
+            state["constraints"] = copy.deepcopy(source["constraints"])
+            state["constraint_revision"] = source["constraint_revision"]
+            state["adopted_revision"] = source["adopted_revision"]
+            state["rounds"] = copy.deepcopy(source["rounds"])
+            for item in state["rounds"]:
+                if item["status"] in OPEN:
+                    self.finish_round(item, "superseded", "이전 회의의 검토 기록입니다.")
+            state["transfer"] = {"source_session_id": sid, "source_version_id": selected["version_id"],
+                                 "source_result_revision": source["result"]["revision"],
+                                 "source_mode": source["meeting"]["mode"], "loaded_at": now_ms(),
+                                 "source_stl_sha256": selected["assets"]["print.stl"]["sha256"],
+                                 "prior_decisions": copy.deepcopy(source["decisions"]),
+                                 "prior_transcript": copy.deepcopy(source["utterances"])}
+            state["workspace"] = copy.deepcopy(source["workspace"])
+            if parent_token is None:
+                state["transfer"]["initiated_by"] = "local_archive_operator"
+            self.emit(state, "result.continued", state["transfer"], actor_id)
+            if design:
+                stamp = clock_stamp({}, now_ms())
+                event, data, _ = meeting_state.apply(self, state, actor_id, "meeting_start",
+                                                     {"mode": "live", "input_mode": "manual"}, stamp)
+                self.emit(state, event, data, actor_id)
+                payload = {"base_version_id": selected["version_id"], "expected_adopted_revision": state["adopted_revision"],
+                           "use_registered_scope": True, "_saved_utterance": saved}
+                target = next((t for t in reversed(source.get("design_target_history", []))
+                               if t["captured_at"] <= saved["end_ms"]), None)
+                if (target and target.get("part_id") and target["base_version_id"] == selected["version_id"]
+                        and target["expected_adopted_revision"] == state["adopted_revision"]):
+                    payload.update({k: target.get(k) for k in ("part_id", "hit_point_asset_m")}, _saved_selection=target)
+                    image = next((i for i in source["images"] if i["evidence_id"] == target.get("image_id")
+                                  and i["version_id"] == selected["version_id"]), None)
+                    if image:
+                        state["images"].append({**image, "url": f"/v1/sessions/{child}/media/{image['evidence_id']}"})
+                        payload["image_id"] = image["evidence_id"]
+                event, data, job = shared_workflows.apply(self, state, actor_id, "design_request", payload, stamp)
+                self.emit(state, event, data, actor_id)
+                self.db.execute("INSERT INTO design_continuations VALUES (?,?,?,?,?)",
+                                (sid, source_actor, key, signature, child))
+            result = child if parent_token is None else self.connection(state, participant, child_token)
+        if job:
+            self.submit(child, *job)
+        return result

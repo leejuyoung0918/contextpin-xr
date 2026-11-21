@@ -4,13 +4,14 @@ from pathlib import Path
 import struct
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 import zipfile
 
 from .geometry import GeometryError, default_parameters, digest
 from .mesh_geometry import MeshGeometry, export_stl
-from .openscad_geometry import SAMPLE, OpenScadAdapter, build_model, executable, load_profile
+from .openscad_geometry import SAMPLE, OpenScadAdapter, _prism_hash, _render, _stl_faces, build_model, executable, load_profile
 from .test_geometry import glb_width, stl_width
 
 
@@ -26,6 +27,45 @@ class OpenScadGeometryTests(unittest.TestCase):
         environment = patch.dict(os.environ, {"OPENSCAD_ASSEMBLY_CONFIG": str(SAMPLE)})
         environment.start()
         self.addCleanup(environment.stop)
+
+    def test_local_corner_removes_only_material_above_the_selected_outer_corner(self):
+        location = Path(__file__).resolve().parents[2] / "artifacts/cable-demo"
+        if not (location/"corner-assembly.json").is_file():
+            self.skipTest("Register the supplied cable CAD with --upper-corners")
+        model = OpenScadAdapter(location/"corner-assembly.json")
+        original = OpenScadAdapter(location/"assembly.json")
+        defaults = default_parameters(model.describe())
+        engine = executable()
+        deadline = time.monotonic() + 100
+        entries = {}
+        for name, cad, params in [("original", original, default_parameters(original.describe())),
+                                  ("baseline", model, defaults), ("changed", model, {**defaults, "upper_corner_nx_py": 1.7})]:
+            entries[name] = cad.write_source(self.root/name, cad.resolve(params))
+        def render(name, path):
+            return _stl_faces(_render(engine, path, self.root/(name + ".stl"), deadline, None))
+        def surface(faces):
+            return {tuple(sorted(triangle)) for triangle in faces}
+        self.assertEqual(surface(render("original", entries["original"])), surface(render("baseline", entries["baseline"])))
+        removed = self.root/"removed.scad"
+        removed.write_text("module v1() { include <baseline/candidate.scad>\n}\n"
+                           "module v2() { include <changed/candidate.scad>\n}\ndifference(){v1(); v2();}")
+        # Difference of the two actual CAD solids avoids roundoff from booleaning re-imported binary STLs.
+        triangles = render("removed", removed)
+        self.assertGreater(len(triangles), 0)
+        self.assertTrue(all(-42.001 <= x <= -36.8 and 3.8 <= y <= 9.001 and 6 <= z <= 10.001
+                            for face in triangles for x, y, z in face))
+
+    def test_prism_guard_rejects_an_interior_wall(self):
+        floor = [(0,0,0), (10,0,0), (10,8,0), (0,8,0)]
+        roof = [(x,y,3.5) for x,y,_ in floor]
+        triangles = [(cap[0],cap[1],cap[2]) for cap in [floor,roof]] + [(cap[0],cap[2],cap[3]) for cap in [floor,roof]]
+        for i in range(4):
+            j = (i+1)%4
+            triangles.extend([(floor[i],floor[j],roof[j]), (floor[i],roof[j],roof[i])])
+        guard = {"axis":"z", "tolerance_mm":0.001}
+        self.assertTrue(_prism_hash(triangles,guard))
+        with self.assertRaises(GeometryError):
+            _prism_hash(triangles + [((4,4,1),(4,5,1),(4,4,3))],guard)
 
     def test_open_scad_uses_same_mounting_origin_and_fixed_surface_for_new_geometry(self):
         profile = load_profile()
@@ -95,6 +135,35 @@ class OpenScadGeometryTests(unittest.TestCase):
 
 
 class OpenScadSourceTests(unittest.TestCase):
+    def test_qr_pose_is_exposed_without_changing_cad_identity(self):
+        with tempfile.TemporaryDirectory() as name:
+            config, _ = write_source_with_dependencies(Path(name))
+            data = json.loads(config.read_text())
+            qr = data.pop("qr_alignment")
+            config.write_text(json.dumps(data))
+            previous = OpenScadAdapter(config).describe()
+            self.assertNotIn("qr_alignment", previous["assembly"])
+
+            data["qr_alignment"] = qr
+            config.write_text(json.dumps(data))
+            current = OpenScadAdapter(config).describe()
+            self.assertEqual(current["assembly"]["qr_alignment"], qr)
+            self.assertEqual(current["assembly"]["mounting"], previous["assembly"]["mounting"])
+            self.assertEqual(current["source_hash"], previous["source_hash"])
+
+    def test_invalid_qr_configuration_is_reported(self):
+        with tempfile.TemporaryDirectory() as name:
+            config, _ = write_source_with_dependencies(Path(name))
+            data = json.loads(config.read_text())
+            mounting = data["qr_alignment"]["mounting"]
+            for invalid in ({"payload": "wrong\npayload", "mounting": mounting},
+                            {"payload": "valid", "mounting": {**mounting, "rotation_xyzw": [0, 0, 0, 0]}}):
+                with self.subTest(qr=invalid):
+                    data["qr_alignment"] = invalid
+                    config.write_text(json.dumps(data))
+                    with self.assertRaisesRegex(GeometryError, "QR 정렬 설정"):
+                        OpenScadAdapter(config)
+
     def test_source_resolution_skips_comment_and_module_defaults(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)

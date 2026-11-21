@@ -10,8 +10,11 @@ namespace ContextPin
 {
     public sealed partial class RelayApp
     {
-        bool assemblyStarting, assemblyStopping, assemblyAdopting, assemblyResultDownload;
+        bool assemblyStarting, assemblyStopping, assemblyAdopting, assemblyResultDownload, assemblyPrepOpened;
         string assemblyFeedback = "";
+        bool requireBundleOutput, requireCandidateGeneration;
+        bool RequestedOutputUnavailable => requireBundleOutput && !CaptureBundleMeeting ||
+            requireCandidateGeneration && !CandidateGenerationMeeting;
         MeetingPcmStream assemblyAudio;
         Task assemblyAudioSend;
         readonly List<byte[]> assemblyAudioTail = new List<byte[]>();
@@ -28,19 +31,23 @@ namespace ContextPin
         bool AssemblyActive => AssemblySessionStatus is "recording" or "paused";
         bool AssemblyCaptureRequested => (meetingSnapshot?["meeting"] as JObject)?.Value<bool?>("capture_requested") == true;
 
-        IEnumerator RunAssemblyAction(MeetingTransport transport, string type, JObject payload, Action<JObject, string> completed)
+        IEnumerator RunAssemblyAction(MeetingTransport transport, string type, JObject payload, Action<JObject, string> completed, bool preserveClock = false)
         {
-            AddMeetingClock(payload);
+            if (!preserveClock) AddMeetingClock(payload);
             var command = new JObject { ["command_id"] = Guid.NewGuid().ToString("N"), ["type"] = type, ["payload"] = payload };
+            int attempts = 0;
             while (meetingTransport == transport)
             {
+                attempts++;
                 JObject reply = null;
                 string error = null;
                 long status = 0;
                 yield return transport.JsonWithStatus(transport.SessionPath + "/commands", command,
                     (response, issue, responseCode) => { reply = response; error = issue; status = responseCode; });
                 if (meetingTransport != transport) yield break;
-                if (reply != null || status is >= 400 and < 500 && status != 429)
+                bool retryable = status == 0 || status is 408 or 429 or 502 or 504;
+                bool finalizing = type is "meeting_end" or "meeting_pause";
+                if (reply != null || !retryable || (attempts >= 3 && !finalizing))
                 {
                     if (reply?["snapshot"] is JObject snapshot) AcceptMeetingSnapshot(snapshot);
                     completed(reply, error);
@@ -54,19 +61,49 @@ namespace ContextPin
             }
         }
 
-        void StartSpatialMeeting()
+        void StartSpatialMeeting() => StartSpatialMeetingWithMode(false);
+
+        void StartSpatialMeetingWithMode(bool explicitDesign)
         {
-            if (assemblyStarting || assemblyStopping || meetingTransport == null || assemblyAlignment != AssemblyAlignment.Confirmed) return;
+            if (assemblyStarting || assemblyStopping || meetingTransport == null) return;
             var mode = TextValue(meetingSnapshot, "provider_mode") == "live" ? "live" : "replay";
             var transport = meetingTransport;
             assemblyStarting = true;
             assemblyFeedback = mode == "live" ? "마이크를 연결하고 있습니다." : "예시 회의를 여는 중입니다.";
             Draw();
-            StartCoroutine(RunAssemblyAction(transport, "meeting_start", new JObject { ["mode"] = mode, ["audio_device_id"] = meetingDeviceId },
+            var start = new JObject { ["mode"] = mode, ["audio_device_id"] = meetingDeviceId };
+            if (explicitDesign && mode == "live")
+            {
+                requireBundleOutput = true;
+#if UNITY_EDITOR
+                if (UnityEditor.SessionState.GetBool("ContextPinLegacyCandidateWorkflow", false))
+                    requireBundleOutput = false;
+#endif
+                requireCandidateGeneration = requireBundleOutput;
+#if UNITY_EDITOR
+                if (UnityEditor.SessionState.GetBool("ContextPinCaptureOnlyWorkflow", false))
+                    requireCandidateGeneration = false;
+#endif
+                start["design_submit_mode"] = "explicit";
+            }
+            if (requireBundleOutput || CaptureBundleMeeting)
+            {
+                start["design_submit_mode"] = "explicit";
+                start["edit_request_output"] = "bundle";
+                if (requireCandidateGeneration || CandidateGenerationMeeting) start["candidate_generation"] = "ai";
+            }
+            StartCoroutine(RunAssemblyAction(transport, "meeting_start", start,
                 (_, error) =>
                 {
                     if (error == null && mode == "live" && !assemblyStopping)
                     {
+                        if (RequestedOutputUnavailable)
+                        {
+                            assemblyStarting = false;
+                            assemblyFeedback = "회의 서버에서 요청한 CAD 처리 모드를 확인할 수 없습니다. 서버 버전을 확인하세요.";
+                            Draw();
+                            return;
+                        }
                         StartCoroutine(OpenSpatialMicrophone(transport));
                         return;
                     }
@@ -75,27 +112,56 @@ namespace ContextPin
                 }));
         }
 
+#if UNITY_EDITOR
+        // The simulator can replay a clocked PCM clip through the same WebSocket and STT path as Quest.
+        internal static Func<AudioClip> EditorOpenPcmInput;
+        internal static Func<int> EditorPcmPosition;
+#endif
+
+        static int SpatialMicPosition()
+        {
+#if UNITY_EDITOR
+            if (EditorPcmPosition != null) return EditorPcmPosition();
+#endif
+            return Microphone.GetPosition(null);
+        }
+
+        static bool SpatialMicRecording()
+        {
+#if UNITY_EDITOR
+            if (EditorPcmPosition != null) return true;
+#endif
+            return Microphone.IsRecording(null);
+        }
+
         IEnumerator OpenSpatialMicrophone(MeetingTransport transport)
         {
             if (meetingCapture == null) meetingCapture = gameObject.AddComponent<RelayEvidence>();
             assemblyCaptureFrozen = false;
             string status = "";
-            yield return meetingCapture.StartMicrophone(value => status = value, 8);
+            AudioClip clip = null;
+#if UNITY_EDITOR
+            clip = EditorOpenPcmInput?.Invoke();
+#endif
+            if (clip == null)
+            {
+                yield return meetingCapture.StartMicrophone(value => status = value, 8);
+                if (meetingCapture.Recording) clip = meetingCapture.RecordingClip;
+            }
             if (meetingTransport != transport || assemblyStopping || assemblyCaptureFrozen) yield break;
-            if (!meetingCapture.Recording)
+            if (clip == null)
             {
                 assemblyStarting = false;
                 assemblyFeedback = string.IsNullOrEmpty(status) ? "마이크를 사용할 수 없습니다. PC에서 회의를 시작하세요." : status;
                 Draw();
                 yield break;
             }
-            var clip = meetingCapture.RecordingClip;
             var until = Time.unscaledTimeAsDouble + 3;
-            var position = Microphone.GetPosition(null);
+            var position = SpatialMicPosition();
             while (position <= 0 && Time.unscaledTimeAsDouble < until && meetingTransport == transport && !assemblyCaptureFrozen)
             {
                 yield return null;
-                position = Microphone.GetPosition(null);
+                position = SpatialMicPosition();
             }
             if (meetingTransport != transport || assemblyCaptureFrozen) yield break;
             if (position <= 0)
@@ -138,14 +204,14 @@ namespace ContextPin
         void UpdateSpatialMicrophone()
         {
             if (assemblyAudio == null || assemblyStarting || assemblyCaptureFrozen) return;
-            if (assemblyAudioSend?.IsFaulted == true || assemblyAudioSend?.IsCanceled == true)
+            if (assemblyAudio.ServerEnded || assemblyAudioSend?.IsFaulted == true || assemblyAudioSend?.IsCanceled == true)
             {
                 AssemblyAudioFailed("마이크 연결이 끊겼습니다. 기존 전사는 보존됩니다.");
                 return;
             }
             var now = Time.unscaledTimeAsDouble;
-            var position = Microphone.GetPosition(null);
-            if (!Microphone.IsRecording(null) || now - assemblyLastMicSample > 6)
+            var position = SpatialMicPosition();
+            if (!SpatialMicRecording() || now - assemblyLastMicSample > 6)
             {
                 AssemblyAudioFailed("마이크 샘플에 긴 공백이 생겼습니다. 확보한 전사는 보존됩니다.");
                 return;
@@ -167,6 +233,27 @@ namespace ContextPin
             catch (InvalidOperationException error) { AssemblyAudioFailed(error.Message); }
         }
 
+        bool TryMarkDesignSpeech(string speechRangeId, bool start, out string error)
+        {
+            error = null;
+            if (assemblyAudio == null || assemblyStarting || assemblyCaptureFrozen || !SpatialMicRecording())
+            {
+                error = "이 기기의 회의 마이크가 연결된 뒤 수정 발언을 시작하세요.";
+                return false;
+            }
+            try
+            {
+                assemblyAudioSend = assemblyAudio.MarkSpeech(assemblyAudioSend, speechRangeId, start, SpatialMicPosition(),
+                    CaptureBundleMeeting ? explicitRequest?.BaseId : null);
+                return true;
+            }
+            catch (InvalidOperationException failure)
+            {
+                error = failure.Message;
+                return false;
+            }
+        }
+
         void FreezeSpatialMicrophone()
         {
             if (assemblyCaptureFrozen) return;
@@ -175,7 +262,7 @@ namespace ContextPin
             {
                 try
                 {
-                    assemblyAudio.ObservePosition(Microphone.GetPosition(null));
+                    assemblyAudio.ObservePosition(SpatialMicPosition());
                     while (assemblyAudio.ReadPacket(flush: true) is byte[] packet) assemblyAudioTail.Add(packet);
                 }
                 catch (InvalidOperationException error) { assemblyFeedback = error.Message; }
@@ -243,7 +330,6 @@ namespace ContextPin
         void SpatialSnapshotUpdated()
         {
             if (!SpatialAssembly) return;
-            if (assemblyAdoptedTakesEffect == AssemblyAdoptedId) assemblyAdoptedTakesEffect = null;
             if (AssemblySessionStatus is "finalizing" or "completed" or "save_error" && assemblyAudio != null && !assemblyStopping && !assemblyCaptureFrozen)
             {
                 FreezeSpatialMicrophone();
@@ -258,8 +344,9 @@ namespace ContextPin
 
         void AdoptSpatialCandidate(JToken round, JToken candidate)
         {
-            if (assemblyAdopting || assemblyStopping || assemblyAlignment != AssemblyAlignment.Confirmed ||
-                TextValue(candidate, "version_id") != meetingLoadedVersion || !assemblyCompare) return;
+            if (assemblyAdopting || assemblyStopping || !HasReviewTable || !CanCompareModels || !IsLocalCandidateVisible(meetingViewedVersion) ||
+                TextValue(candidate, "version_id") != SpatialComparisonLoadedVersion ||
+                SpatialComparisonLoadedVersion != meetingViewedVersion || !assemblyCompare) return;
             assemblyAdopting = true;
             assemblyFeedback = "";
             var payload = new JObject
@@ -275,7 +362,6 @@ namespace ContextPin
                 assemblyFeedback = error ?? "";
                 if (reply == null) return;
                 assemblyCompare = false;
-                assemblyAdoptedTakesEffect = AssemblyAdoptedId == TextValue(candidate, "version_id") ? null : TextValue(candidate, "version_id");
                 SetMeetingViewedVersion(null);
             }));
             Draw();

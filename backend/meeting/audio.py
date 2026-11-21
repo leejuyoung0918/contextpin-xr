@@ -3,6 +3,7 @@ import array
 import io
 import math
 import os
+import re
 import struct
 import sys
 import wave
@@ -58,11 +59,15 @@ class AudioCapture:
         self.expected_sample = 0
         self.segment = 0
         self.start_sample = None
+        self.first_voiced = 0
         self.last_voiced = 0
         self.stamp = clock_stamp({**body, "source_monotonic_ms": body.get("stream_start_source_monotonic_ms")}, now_ms())
         self.started_ms = self.stamp["captured_session_time_ms"]
         self.opened = False
         self.reported_sample = 0
+        self.open_design_range = None
+        self.command_pcm = None
+        self.design_marks = {}
         self.actor, self.device = coordinator.audio_start(self.sid, body["token"], stream_id, body.get("device_id"),
                                                           continuous=True, sample_rate=self.rate)
         self.view_actor = self.actor if body.get("bind_view") is True else None
@@ -90,6 +95,22 @@ class AudioCapture:
             self.coordinator.audio_progress(self.sid, self.stream_id, self.expected_sample)
             self.reported_sample = self.expected_sample
         pcm = frame[16:]
+        if self.command_pcm is not None:
+            if len(self.command_pcm) + len(pcm) <= 2 * self.rate * MAX_SECONDS * 5:
+                self.command_pcm.extend(pcm)
+            else:
+                self.command_pcm = None
+        # A packet can straddle the 15-second STT limit. Feed the remainder to the next segment.
+        while pcm:
+            buffered = len(self.buffer) + len(self.preroll)
+            take = min(len(pcm), self.duration_max * 2 - buffered)
+            self._append_pcm(sample, pcm[:take])
+            sample += take // 2
+            pcm = pcm[take:]
+
+    def _append_pcm(self, sample, pcm):
+        count = len(pcm) // 2
+        through = sample + count
         values = array.array("h", pcm)
         if sys.byteorder != "little":
             values.byteswap()
@@ -97,16 +118,38 @@ class AudioCapture:
         if voiced:
             if self.start_sample is None:
                 self.start_sample = sample - len(self.preroll) // 2
+                self.first_voiced = sample
                 self.buffer.extend(self.preroll)
                 self.preroll.clear()
-            self.last_voiced = self.expected_sample
+            self.last_voiced = through
         if self.start_sample is not None:
             self.buffer.extend(pcm)
-            if self.expected_sample - self.last_voiced >= self.silence_limit or self.expected_sample - self.start_sample >= self.duration_max:
-                self.finish(self.expected_sample)
+            if through - self.last_voiced >= self.silence_limit or through - self.start_sample >= self.duration_max:
+                self.finish(through)
         else:
             self.preroll.extend(pcm)
             del self.preroll[:-2 * self.pre_limit]
+
+    def design_boundary(self, packet):
+        rid, sample, edge = packet.get("range_id"), packet.get("sample_index"), packet.get("edge")
+        if (not isinstance(rid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", rid)
+                or type(sample) is not int or edge not in ("start", "end")):
+            raise MeetingError("수정 발언 구간 정보를 확인하세요.")
+        key = (rid, edge)
+        if key in self.design_marks and self.design_marks[key] == sample:
+            return
+        if (sample != self.expected_sample or key in self.design_marks
+                or (edge == "start" and self.open_design_range is not None)
+                or (edge == "end" and self.open_design_range != rid)):
+            raise MeetingError("발언 경계와 서버가 수신한 PCM 샘플이 일치하지 않습니다.", 409)
+        self.finish(sample)
+        self.preroll.clear()
+        wav = encode_wav(self.command_pcm, self.rate) if edge == "end" and self.command_pcm else None
+        bundle = self.coordinator.audio_boundary(self.sid, self.stream_id, self.actor, rid, edge == "start",
+                                                  sample, self.segment, wav, packet.get("base_version_id"))
+        self.command_pcm = bytearray() if bundle and edge == "start" else None
+        self.open_design_range = rid if edge == "start" else None
+        self.design_marks[key] = sample
 
     def finish(self, end_sample=None):
         if self.start_sample is None:
@@ -119,7 +162,6 @@ class AudioCapture:
         self.buffer.clear()
         if self.last_voiced - start_sample < self.rate // 8:
             return
-        self.segment += 1
         start = self.started_ms + round(start_sample / self.rate * 1000)
         end = self.started_ms + round(end_sample / self.rate * 1000)
         cutoff = self.coordinator.audio_cutoff(self.sid, self.stream_id)
@@ -128,9 +170,14 @@ class AudioCapture:
                 return
             pcm = pcm[:2 * round((cutoff - start) * self.rate / 1000)]
             end = cutoff
+        stamp = {k: v for k, v in self.stamp.items() if k not in ("received_at", "captured_session_time_ms")}
+        self.segment += 1
+        stamp["start_sample"] = start_sample
+        stamp["end_sample"] = start_sample + len(pcm) // 2
+        stamp["voice_onset_ms"] = self.started_ms + round(self.first_voiced / self.rate * 1000)
         self.coordinator.audio_submit(self.sid, self.stream_id, self.segment, start, end,
                                       encode_wav(pcm, self.rate), self.actor, self.device, self.view_actor,
-                                      {k: v for k, v in self.stamp.items() if k not in ("received_at", "captured_session_time_ms")})
+                                      stamp)
 
     def close(self, eos=False, last_sequence=None):
         try:

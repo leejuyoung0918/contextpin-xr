@@ -13,7 +13,7 @@ PlayerSettings:
   useOnDemandResources: 0
   accelerometerFrequency: 60
   companyName: ContextPin
-  productName: ContextPin Trace
+  productName: ContextPin XR
   defaultCursor: {fileID: 0}
   cursorHotspot: {x: 0, y: 0}
   m_SplashScreenBackgroundColor: {r: 0.12156863, g: 0.12156863, b: 0.1254902, a: 1}
@@ -175,7 +175,7 @@ PlayerSettings:
   AndroidBundleVersionCode: 3
   AndroidMinSdkVersion: 32
   AndroidTargetSdkVersion: 0
-  AndroidPreferredInstallLocation: 1
+  AndroidPreferredInstallLocation: 0
   AndroidPreferredDataLocation: 1
   aotOptions: 
   stripEngineCode: 1
@@ -425,8 +425,8 @@ PlayerSettings:
   enableCrashReportAPI: 0
   cameraUsageDescription: 
   locationUsageDescription: 
-  microphoneUsageDescription: "\uB3D9\uC758\uD55C \uC124\uBA85\uC744 \uC2DC\uAC04\uC21C\uC73C\uB85C
-    \uC804\uC0AC\uD558\uACE0 \uD68C\uB85C \uC9C0\uC810\uC5D0 \uC5F0\uACB0\uD569\uB2C8\uB2E4."
+  microphoneUsageDescription: "\uD68C\uC758 \uBC1C\uD654\uB97C \uAE30\uB85D\uD558\uACE0
+    \uD569\uC758\uD55C \uC124\uACC4 \uBCC0\uACBD\uC744 \uC694\uCCAD\uD569\uB2C8\uB2E4."
   bluetoothUsageDescription: 
   macOSTargetOSVersion: 12.0
   switchNMETAOverride: 

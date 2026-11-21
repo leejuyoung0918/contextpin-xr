@@ -1,3 +1,4 @@
+import { DraftEditor } from "./drafts.js";
 import { ModelViewer } from "./viewer.js";
 import { canRecord, MeetingMicrophone } from "./audio.js";
 import { MeetingConnection, randomId, request } from "./edge.js";
@@ -33,6 +34,14 @@ const lifecycle = new MeetingLifecycle(deviceId, {
   beforeUtterance, pendingDecision: () => state.decisionPromise, notice, errorMessage: message, download,
 });
 
+const drafts = new DraftEditor({ state: () => state, command: runCommand,
+  showVersion: versionId => {
+    state.target = { kind: "draft", versionId, label: "조정 중인 초안" };
+    updateModel();
+  },
+  clearView: () => { state.target = null; updateModel(); paint(); },
+});
+
 function notice(text = "", error = false) {
   const area = byId("notice");
   area.textContent = text;
@@ -61,9 +70,9 @@ function reportStage(error) {
 
 try {
   state.viewer = new ModelViewer(byId("model-canvas"), {
-    onPart: part => {
+    onPart: (part, hit) => {
       if (!state.loadedVersion || state.switching) return;
-      setPart(part);
+      setPart(part, hit);
     },
     onZoom: paintZoomLabel,
     onLost: () => write("view-message", "3D 그래픽 연결이 끊겼습니다. 화면을 새로고침해 주세요."),
@@ -120,12 +129,14 @@ function startSession(identity) {
   show("meeting");
   show("leave-button");
   notice();
+  state.openedComparisons = new Set();
   state.edge = new MeetingConnection(identity, {
     snapshot: snapshot => {
       if (state.partial && snapshot.utterances?.at(-1)?.utterance_id !== state.lastUtterance) state.partial = null;
       state.lastUtterance = snapshot.utterances?.at(-1)?.utterance_id;
       const changedProfile = state.snapshot?.profile.object_id !== snapshot.profile.object_id;
       state.snapshot = snapshot;
+      if (state.target?.kind === "draft" && !snapshot.edit_draft?.lease_id) state.target = null;
       followSharedPreview(snapshot);
       if (changedProfile) buildPartButtons();
       if (state.target?.kind === "candidate") {
@@ -135,6 +146,11 @@ function startSession(identity) {
             candidate.candidate_id === state.target.candidateId && candidate.status === "valid")) {
           state.target = null;
         }
+      }
+      const comparison = snapshot.meeting?.mode === "live" && [...snapshot.rounds].reverse().find(r => r.comparison_fingerprint && r.status === "reviewable");
+      if (comparison && !state.openedComparisons.has(comparison.round_id)) {
+        state.openedComparisons.add(comparison.round_id);
+        state.autoPreview = state.pinnedRound = comparison.round_id;
       }
       selectReadyEdit();
       updateModel();
@@ -179,6 +195,7 @@ function exitSession() {
   state.mic?.close();
   state.mic = null;
   lifecycle.reset();
+  drafts.reset();
   state.edge?.close();
   state.controller?.abort();
   state.loadId++;
@@ -340,6 +357,7 @@ function visualContext() {
   return {
     version_id: state.loadedVersion?.version_id,
     part_ids: state.selected,
+    hit_point_asset_m: state.selectionHit || null,
     round_id: round?.candidates.length ? round.round_id : null,
     candidate_id: candidateId,
     display_order_candidate_ids: round?.candidates.map(candidate => candidate.candidate_id) || [],
@@ -402,12 +420,24 @@ function paintParts() {
   state.viewer?.highlight(highlighted);
 }
 
-function setPart(partId) {
-  if (assembly() || state.switching || !state.snapshot?.profile.capabilities?.can_annotate) return;
+function setPart(partId, hit = null) {
+  if (state.switching || !state.snapshot?.profile.capabilities?.can_annotate) return;
   const knownPart = state.snapshot.profile.semantic_parts.some(part => part.part_id === partId);
   state.selected = knownPart && !state.selected.includes(partId) ? [partId] : [];
+  state.selectionHit = state.selected.length ? hit : null;
+  state.selectionImage = state.selected.length ? captureSelection() : null;
+  if (assembly() && canChangeMeeting()) {
+    state.designTarget = publishTarget(state.selected[0] || null, state.selectionHit, state.selectionImage);
+    state.designTarget.catch(error => notice(message(error), true));
+  }
   paintParts();
   reportView();
+  if (assembly()) {
+    runCommand("pointer", { version_id: state.loadedVersion.version_id,
+      part_id: state.selected[0] || null, hit_point_asset_m: state.selectionHit,
+      tracking_state: state.selectionHit ? "desktop_view" : "limited" });
+  }
+  paint();
 }
 
 function selectReadyEdit() {
@@ -514,6 +544,9 @@ function updateModel() {
       state.loadedVersion = version;
       state.displayedView = view;
       state.selected = [];
+      state.selectionHit = null;
+      state.selectionImage = null;
+      state.designTarget = null;
       state.switching = false;
       byId("model-canvas").dataset.version = version.version_id;
       write("view-message", "");
@@ -548,7 +581,7 @@ function paintModelHeader() {
   show("original-view", Boolean(scene && !isOriginal));
   show("readopt-original", Boolean(lifecycle.enabled(state.snapshot) && canChangeMeeting() &&
     version && isOriginal && !isHead && !state.switching));
-  show("part-controls", !scene);
+  show("part-controls", true);
   show("assembly-view-hint", Boolean(scene));
   show("model-files", Boolean(version?.stl_url && state.snapshot.profile.capabilities?.can_export_stl));
   const entry = version?.assets?.["candidate.scad"] || version?.assets?.["object_2.scad"];
@@ -559,17 +592,33 @@ function paintModelHeader() {
   show("media-label", !scene && Boolean(version) && state.snapshot.status === "active");
 }
 
+function saveBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = element("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+byId("minutes-code-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector("button");
+  button.disabled = true;
+  try {
+    const blob = await request("/v1/minutes-download", {body: {code: byId("minutes-code").value}, responseType: "blob"});
+    saveBlob(blob, "contextpin-minutes.txt");
+    notice("전체 회의록을 내려받았습니다.");
+  } catch (error) { notice(message(error), true); }
+  finally { button.disabled = false; }
+});
+
 async function download(path, filename) {
   try {
     const blob = await state.edge.get(path, "blob");
-    const url = URL.createObjectURL(blob);
-    const link = element("a");
-    link.href = url;
-    link.download = filename;
-    document.body.append(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1500);
+    saveBlob(blob, filename);
   } catch (error) {
     notice(message(error), true);
   }
@@ -615,7 +664,7 @@ byId("download-scad").addEventListener("click", () => {
 });
 byId("download-zip").addEventListener("click", () => exportVersion(state.loadedVersion));
 byId("download-minutes").addEventListener("click", () => {
-  if (state.edge) download(state.edge.path + "/minutes", "contextpin-meeting-minutes.json");
+  if (state.edge) download(state.edge.path + "/minutes.txt", "contextpin-meeting-minutes.txt");
 });
 
 function paintParameters(version = state.loadedVersion) {
@@ -624,7 +673,7 @@ function paintParameters(version = state.loadedVersion) {
   const destination = byId("parameters");
   const host = currentPerson()?.role === "host";
   const canEdit = Boolean(version && !state.switching && profile.capabilities?.can_parametric_edit &&
-    canChangeMeeting());
+    canChangeMeeting() && !state.snapshot.edit_draft?.lease_id);
   const locks = (state.snapshot.constraints || []).filter(item => item.status === "active");
   const key = JSON.stringify([version?.version_id, state.snapshot.constraint_revision, canEdit, host]);
   if (destination.dataset.key === key) return;
@@ -729,22 +778,25 @@ function paint() {
   const presenter = currentPerson()?.role === "host";
   const scene = assembly();
   write("object-title", scene?.display_name || snapshot.profile.display_name);
-  write("participants", scene ? "" : snapshot.participants
+  write("participants", snapshot.participants
     .map(person => person.display_name + (person.role === "host" ? " (진행자)" : "")).join(" · "));
   show("invite-button", presenter && snapshot.status === "active");
   write("invite-button", scene ? "Quest 연결" : "참가 코드");
   write("invite-hint", scene ? "Quest의 조립체 검토 메뉴에서 PC EDGE에 연결한 뒤 이 참가 코드를 입력하세요." :
     "검토자가 이 화면의 주소를 열고 아래 코드를 입력하면 같은 모델을 볼 수 있습니다.");
   show("assembly-summary", Boolean(scene));
+  show("assembly-qr-card", scene?.qr_alignment?.payload === "ContextPin:assembly:demo:v1");
+  const cable = snapshot.meeting?.mode === "replay" ? snapshot.cable_demo : null;
   if (scene) {
     const target = scene.object_2?.display_name || snapshot.profile.semantic_parts[0]?.label || "물체 2";
-    write("assembly-target", (scene.is_demo ? "예제 조립체 · " : "") + target + " 외형 수정");
+    write("assembly-target", cable ? "케이블 정리대 · 대본 리허설" :
+      (scene.is_demo ? "예제 조립체 · " : "") + target + " 외형 수정");
     const items = (scene.preserved_conditions || []).map(condition => typeof condition === "string"
       ? condition : condition.label).filter(Boolean);
     write("assembly-protection", items.length ? "유지하는 결합 조건 · " + items.join(" · ") : "");
   }
   write("parameter-summary", scene ? "외형 직접 수정" : "치수 직접 수정과 유지 조건");
-  byId("speech-text").placeholder = scene ?
+  byId("speech-text").placeholder = cable ? "추가 메모를 입력하세요. 후보는 대본 버튼으로 엽니다." : scene ?
     "더 곡선적으로 해보고 싶다면 유지할 결합 조건과 함께 적어 주세요." :
     "변경하고 싶은 부위와 유지할 조건을 함께 적어보세요.";
   paintZoomLabel(state.viewer?.zoom ?? 1);
@@ -757,7 +809,7 @@ function paint() {
   const candidateId = !state.switching && state.displayedView?.roundId === round?.round_id ?
     state.displayedView?.candidateId : null;
   renderRound(round, snapshot, { actor: state.identity.participant_id, presenter: presenter || Boolean(scene), candidateId,
-    interactive: canChangeMeeting() }, {
+    interactive: canChangeMeeting() && !snapshot.edit_draft?.lease_id }, {
     view: changeView, command: runCommand, error: text => notice(text, true),
     refine: current => {
       const input = byId("speech-text");
@@ -766,7 +818,10 @@ function paint() {
       input.setSelectionRange(input.value.length, input.value.length);
     },
   });
+  drafts.paint();
+  paintSharedSelections();
   renderTranscripts(snapshot, state.partial, loadAudio);
+  paintCableHistory(cable);
   renderMinutes(snapshot, {
     view: version => {
       state.target = { kind: "history", versionId: version.version_id, label: "회의록 보기" };
@@ -783,8 +838,40 @@ function paint() {
   paintDebug(round);
   if (scene) show("print-panel", false);
   else paintPrintResults(snapshot);
-  byId("text-submit").disabled = !canChangeMeeting() || state.switching;
+  byId("text-submit").disabled = !canChangeMeeting();
+  const bundleMeeting = snapshot.meeting?.edit_request_output === "bundle";
+  const failed = Object.values(snapshot.design_speech_ranges || {}).filter(range =>
+    range.end_sample != null && ["failed", "no_speech"].includes(range.status) && range.base_version_id === snapshot.adopted_version_id);
+  const ranges = byId("edit-speech-range");
+  const chosen = ranges.value;
+  ranges.replaceChildren(new Option("일반 회의 발언", ""), ...failed.map(range =>
+    new Option(new Date(range.created_at).toLocaleTimeString() + " 수정 요청 · 직접 입력", range.range_id)));
+  if (failed.some(range => range.range_id === chosen)) ranges.value = chosen;
+  show("edit-transcript-fallback", bundleMeeting && failed.length > 0);
+  show("design-request", Boolean(scene) && !bundleMeeting);
+  byId("design-request").disabled = !canChangeMeeting() || state.switching || !state.selected.length || Boolean(snapshot.edit_draft?.lease_id);
   reportView();
+}
+
+function paintCableHistory(cable) {
+  const root = byId("cable-design-history");
+  show("cable-design-history", Boolean(cable));
+  if (!cable) return;
+  const fingerprint = JSON.stringify(cable.history);
+  if (root.dataset.cableHistory === fingerprint) return;
+  root.dataset.cableHistory = fingerprint;
+  const list = element("ol");
+  for (const item of cable.history) {
+    const row = element("li");
+    row.append(makeButton(item.label + " · " + item.what, "", () => {
+      state.target = { kind: "history", versionId: item.version_id, label: item.label + " 보기" };
+      updateModel();
+      paint();
+    }));
+    if (item.why) row.append(element("p", item.why, "subtle"));
+    list.append(row);
+  }
+  root.replaceChildren(list);
 }
 
 function paintStatus(round) {
@@ -794,9 +881,9 @@ function paintStatus(round) {
   const live = (round?.provider_mode || snapshot.provider_mode) === "live";
   const source = byId("source-mode");
   source.dataset.tone = fixture ? "replay" : live ? "live" : "";
-  source.textContent = fixture ? "REPLAY · 예시 플래너" : live ?
-    "LIVE · " + (state.serviceCaps.planner === true && snapshot.cloud_state === "online" ?
-      "AI 연결" : "AI 연결 확인 필요") : "직접 수정";
+  source.textContent = snapshot.meeting?.mode === "replay" && snapshot.cable_demo ? "대본 리허설 · 준비한 CAD" : fixture ? "REPLAY · 예시 플래너" : live ?
+    state.serviceCaps.planner_backend === "registered" || round?.proposal_provenance?.source === "registered_rules" ? "실제 입력 · 등록 치수 비교" : "LIVE · " + (state.serviceCaps.planner === true && snapshot.cloud_state === "online" ?
+      "AI 설정됨" : "AI 연결 확인 필요") : "직접 수정";
   const scene = assembly();
   const local = state.mic && !state.mic.closed;
   const recording = snapshot.capture_state === "recording" || (scene && local && !state.mic.stopping);
@@ -816,9 +903,14 @@ function paintStatus(round) {
     capture.textContent = statuses[snapshot.session_status];
     show("audio-host", false);
     show("record-button", false);
-    write("mic-note", "");
-    show("sample-button", active && (snapshot.provider_mode === "fixture" || snapshot.meeting?.mode === "replay") &&
-      Boolean(snapshot.profile.demo_utterance));
+    const lastVoice = [...snapshot.utterances].reverse().find(u => u.source_kind === "audio");
+    write("mic-note", snapshot.speech_error || snapshot.speech_intent_notice || (lastVoice ?
+      "최근 인식 · " + lastVoice.text : recording ? "첫 발화 전사 대기 중" : ""));
+    const cable = snapshot.meeting?.mode === "replay" ? snapshot.cable_demo : null;
+    write("sample-button", cable?.action || "예시 발화 넣기");
+    const showSample = cable ? snapshot.session_status === "recording" && cable.stage <= 2 && !cable.pending :
+      active && (snapshot.provider_mode === "fixture" || snapshot.meeting?.mode === "replay") && Boolean(snapshot.profile.demo_utterance);
+    show("sample-button", showSample);
     return;
   }
   const host = snapshot.audio_host_device_id === deviceId;
@@ -854,7 +946,7 @@ function paintDebug(round) {
     const partIds = context.part_ids || context.view?.part_ids || [];
     pairs.push(["근거 부위", partIds.map(id => snapshot.profile.semantic_parts.find(part => part.part_id === id)?.label || id)
       .join(", ") || "미확인"], ["편집 기준", round.edit_base_version_id], ["요청", context.request_id],
-      ["AI에 사진 전달", context.images_used ? "사용됨" : "사용되지 않음"]);
+      ["AI에 사진 전달", round?.proposal_provenance?.images_sent ? "사용됨" : "전송 확인 없음"]);
     if (round.planner_started_at && round.planner_finished_at) {
       pairs.push(["후보 해석 시간", unitValue(round.planner_finished_at - round.planner_started_at, "ms")]);
     }
@@ -879,6 +971,7 @@ async function beforeUtterance() {
   // Use the model/selection the participant has already reported to the canonical session.
   try {
     await state.viewReports;
+    if (assembly() && state.selected.length) await state.designTarget;
   } catch {
     throw new Error(assembly() ? "현재 모델의 연결을 확인한 뒤 다시 시도하세요." :
       "선택 부위가 아직 공유되지 않았습니다. 부위를 다시 선택한 뒤 입력하세요.");
@@ -898,8 +991,10 @@ byId("text-form").addEventListener("submit", async event => {
   const text = input.value.trim();
   if (!text) return;
   try {
-    await beforeUtterance();
-    const result = await runCommand("text", { text }, form);
+    const range = byId("edit-speech-range").value;
+    if (!range) await beforeUtterance();
+    const result = await runCommand("text", range ? { text, speech_range_id: range } : { text }, form);
+    if (result && input.value.trim() === text) input.value = "";
     if (result?.round_id) {
       if (input.value.trim() === text) input.value = "";
       // Preserve a candidate comparison already opened; other rounds remain selectable.
@@ -913,12 +1008,110 @@ byId("text-form").addEventListener("submit", async event => {
   }
 });
 
+async function publishTarget(part, hit, image) {
+  const edge = state.edge;
+  const target = {base_version_id: state.loadedVersion.version_id, expected_adopted_revision: state.snapshot.adopted_revision,
+    part_id: part, hit_point_asset_m: hit, image_id: null};
+  const command = edge.commandBody("design_target", target);
+  const blob = await image;
+  if (blob) {
+    const body = new FormData();
+    body.set("file", blob, "selection.png");
+    body.set("version_id", target.base_version_id);
+    body.set("part_id", part);
+    body.set("source_mode", "desktop_render");
+    body.set("source_monotonic_ms", String(command.payload.source_monotonic_ms));
+    for (const [key, value] of Object.entries(edge.clock || {})) body.set(key, String(value));
+    const result = await edge.upload(edge.path + "/media", body);
+    command.payload.image_id = target.image_id = result.evidence_id;
+  }
+  if (state.edge !== edge) throw new Error("회의가 변경되었습니다.");
+  await edge.command("design_target", target, command);
+  return target;
+}
+
+function captureSelection() {
+  const viewer = state.viewer;
+  if (!viewer) return Promise.resolve(null);
+  viewer.draw();
+  return new Promise(resolve => byId("model-canvas").toBlob(resolve, "image/png"));
+}
+
+function paintSharedSelections() {
+  const snapshot = state.snapshot;
+  const descriptions = Object.entries(snapshot.pointers || {}).filter(([actor, pointer]) =>
+    actor !== state.identity.participant_id && pointer.tracking_state !== "lost").map(([actor, pointer]) => {
+    const name = snapshot.participants.find(item => item.participant_id === actor)?.display_name || "참가자";
+    const part = snapshot.profile.semantic_parts.find(item => item.part_id === pointer.part_id)?.label || "대상";
+    return name + " · " + part;
+  });
+  state.viewer?.setPointers(Object.entries(snapshot.pointers || {}).filter(([actor, pointer]) =>
+    actor !== state.identity.participant_id && pointer.tracking_state !== "lost" &&
+      pointer.version_id === state.loadedVersion?.version_id).map(([actor, pointer]) => ({ ...pointer,
+        label: snapshot.participants.find(item => item.participant_id === actor)?.display_name || "참가자" })));
+  write("shared-selections", descriptions.length ? "함께 선택한 위치 · " + descriptions.join(" / ") : "");
+  if (snapshot.assembly?.scripted_demo === "cable_organizer") {
+    write("assembly-view-hint", "선택한 홈 치수는 홈 다섯 개에 공통 적용됩니다.");
+  }
+}
+
+byId("design-request").addEventListener("click", async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    await beforeUtterance();
+    const edge = state.edge;
+    if (!state.selected[0]) throw new Error("모델에서 수정할 부위를 선택하세요.");
+    const target = await state.designTarget;
+    if (!target?.part_id || target.base_version_id !== state.loadedVersion.version_id) throw new Error("현재 모델의 부위를 다시 선택하세요.");
+    const text = byId("speech-text").value.trim();
+    if (text) {
+      if (!await runCommand("text", { text })) return;
+      if (byId("speech-text").value.trim() === text) byId("speech-text").value = "";
+    }
+    const utteranceIds = [...new Map(state.snapshot.utterances.filter(item => item.status === "final")
+      .map(item => [item.utterance_id, item])).values()].slice(-5).map(item => item.utterance_id);
+    if (!utteranceIds.length) throw new Error("수정할 내용을 말하거나 직접 입력한 뒤 요청하세요.");
+    if (state.edge !== edge) return;
+    const result = await runCommand("design_request", {...target, utterance_ids: utteranceIds});
+    if (result?.round_id) { state.pinnedRound = result.round_id; paint(); }
+  } catch (error) { notice(message(error), true); }
+  finally { if (state.snapshot) paint(); }
+});
+
+byId("result-continue").addEventListener("click", async event => {
+  const edge = state.edge;
+  if (!edge || !state.snapshot?.result?.api_url) return;
+  event.currentTarget.disabled = true;
+  try {
+    const identity = await edge.upload(edge.path + "/continue", {
+      device_id: deviceId, display_name: currentPerson()?.display_name || "후속 작업자",
+      capabilities: deviceCapabilities(),
+    });
+    if (state.edge !== edge) return;
+    exitSession();
+    startSession(identity);
+    notice("최종 채택 모델과 이전 결정에서 새 작업을 시작했습니다.");
+  } catch (error) { notice(message(error), true); }
+  finally { byId("result-continue").disabled = false; }
+});
+
+byId("verification-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const result = await runCommand("verify", {
+    target: byId("verify-target").value.trim(), method: byId("verify-method").value.trim(),
+    dimensions: byId("verify-dimensions").value.trim(), next_action: byId("verify-next").value.trim(),
+    additional_questions: byId("verify-questions").value === "" ? undefined : Number(byId("verify-questions").value),
+  }, event.currentTarget);
+  if (result) write("verification-status", "입력한 실제 응답을 저장했습니다.");
+});
+
 byId("sample-button").addEventListener("click", async event => {
   const button = event.currentTarget;
   button.disabled = true;
   try {
     await beforeUtterance();
-    const result = await runCommand("replay", { sample: "curves" });
+    const result = await runCommand("replay", { sample: state.snapshot?.cable_demo ? "cable" : "curves" });
     if (result?.round_id) {
       state.pinnedRound = result.round_id;
       paint();
@@ -930,13 +1123,25 @@ byId("sample-button").addEventListener("click", async event => {
   }
 });
 
-byId("invite-button").addEventListener("click", () => {
+byId("invite-button").addEventListener("click", async () => {
   const snapshot = state.snapshot;
   if (!snapshot) return;
   const code = snapshot.join_expires_at > Date.now() ? snapshot.join_code : null;
   write("invite-code", code || "코드 만료");
   write("copy-code", code ? "코드 복사" : "새 코드 만들기");
   byId("invite-dialog").showModal();
+  byId("invite-qr").hidden = true;
+  write("invite-address", "참가 주소 확인 중");
+  try {
+    const info = await state.edge.get(state.edge.path + "/join-info");
+    write("invite-address", info.join_url || "공유 가능한 서버 주소 설정이 필요합니다.");
+    if (state.joinQrUrl) URL.revokeObjectURL(state.joinQrUrl);
+    if (info.qr_svg) {
+      state.joinQrUrl = URL.createObjectURL(new Blob([info.qr_svg], { type: "image/svg+xml" }));
+      byId("invite-qr").src = state.joinQrUrl;
+      byId("invite-qr").hidden = false;
+    }
+  } catch (error) { write("invite-address", message(error)); }
 });
 byId("copy-code").addEventListener("click", async () => {
   let code = state.snapshot?.join_expires_at > Date.now() ? state.snapshot.join_code : null;
@@ -946,6 +1151,8 @@ byId("copy-code").addEventListener("click", async () => {
     code = state.snapshot.join_code;
     write("invite-code", code);
     write("copy-code", "코드 복사");
+    byId("invite-dialog").close();
+    byId("invite-button").click();
     return;
   }
   try {
@@ -1142,6 +1349,8 @@ window.addEventListener("pagehide", () => {
   lifecycle.reset();
   releaseAudio();
 });
+const incomingCode = new URLSearchParams(location.search).get("join");
+if (incomingCode) byId("join-code").value = incomingCode;
 let savedIdentity;
 try { savedIdentity = JSON.parse(storage.get(storageKey)); } catch { storage.clear(storageKey); }
 if (savedIdentity?.token) startSession(savedIdentity);

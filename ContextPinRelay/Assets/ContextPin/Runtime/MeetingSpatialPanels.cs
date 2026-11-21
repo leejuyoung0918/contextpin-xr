@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
+using UnityEngine.InputSystem;
 
 namespace ContextPin
 {
@@ -9,9 +11,20 @@ namespace ContextPin
     {
         const float SpatialWidth = 420;
         const float SpatialOriginY = 270;
-        bool assemblyCompare, assemblyMenu, assemblyCollapsed, assemblyCaption, assemblyPlacingPanel, assemblyPanelReady, assemblyRecoveryPanel;
-        bool assemblyClarify;
-        string assemblyCompareRound, assemblyAdoptedTakesEffect;
+        bool assemblyCompare, assemblyMenu, assemblyPanelReady, assemblyRecoveryPanel;
+        bool movingMeetingPanel, meetingPanelMoved, showJoinKeypad;
+        Ray meetingPanelRay;
+        float meetingGrabDistance;
+        Vector3 meetingGrabOffset;
+        string minutesCode;
+        long minutesCodeExpiresAt;
+        bool fetchingMinutesCode, savedFollowUpPending, confirmingMeetingEnd;
+        bool assemblyClarify, assemblyHistory, assemblyCableRequest;
+        int assemblyHistoryPage;
+        bool IsCableDemo => meetingSnapshot?["cable_demo"] is JObject && AssemblyRecordingMode != "live" && TextValue(meetingSnapshot, "provider_mode") != "live";
+        int CableStage => meetingSnapshot?["cable_demo"]?.Value<int?>("stage") ?? 0;
+        bool choosingAlignmentMethod;
+        string assemblyCompareRound;
         float assemblyPanelDistance, assemblyPanelScale, assemblyFontScale;
         Pose assemblyPanelPose;
         static readonly Color SpatialBackground = new Color32(17, 36, 34, 245);
@@ -21,6 +34,7 @@ namespace ContextPin
         {
             if (assemblyPanelReady) return;
             assemblyPanelReady = true;
+            assemblyHistory = assemblyCableRequest = false;
             var config = RelayEvidence.LoadConfig();
             assemblyPanelDistance = Mathf.Clamp(config.meetingPanelDistanceMeters, .65f, 2f);
             assemblyPanelScale = Mathf.Clamp(config.meetingPanelWidthMeters, .22f, .48f) / SpatialWidth;
@@ -28,7 +42,7 @@ namespace ContextPin
             var forward = Vector3.ProjectOnPlane(view.transform.forward, Vector3.up).normalized;
             if (forward.sqrMagnitude < .1f) forward = Vector3.forward;
             var side = Quaternion.AngleAxis(35, Vector3.up) * forward;
-            PlaceSpatialPanel(view.transform.position + side * assemblyPanelDistance - Vector3.up * .17f);
+            PlaceSpatialPanel(meetingPanelMoved ? panel.position : view.transform.position + side * assemblyPanelDistance - Vector3.up * .17f);
             if (OVRManager.IsInsightPassthroughSupported()) SetPassthrough(true);
         }
 
@@ -50,30 +64,66 @@ namespace ContextPin
         void UpdateSpatialPanelPosition()
         {
             if (!SpatialAssembly || !assemblyPanelReady) return;
-            if (assemblyAlignment != AssemblyAlignment.Lost) return;
+            if (!string.IsNullOrEmpty(minutesCode) && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= minutesCodeExpiresAt)
+            {
+                minutesCode = null;
+                assemblyFeedback = "코드 사용 시간이 끝났습니다. 새 코드를 받으세요.";
+                Draw();
+            }
+            if (assemblyAlignment != AssemblyAlignment.Lost || assemblyRecoveryPanel || movingMeetingPanel) return;
             var forward = view.transform.forward;
             panel.SetPositionAndRotation(view.transform.position + forward * .75f - view.transform.up * .10f,
                 Quaternion.LookRotation(forward, view.transform.up));
             assemblyRecoveryPanel = true;
         }
 
+        void DrawPanelHandle(float x, float y, float width, float height)
+        {
+            var handle = Button("MeetingPanelHandle", x, y, width, height, "잡고 옮기기", () => { });
+            handle.pointClicked = hitPoint =>
+            {
+                movingMeetingPanel = true;
+                meetingPanelMoved = true;
+                meetingGrabDistance = Vector3.Distance(meetingPanelRay.origin, hitPoint);
+                meetingGrabOffset = panel.position - hitPoint;
+            };
+        }
+
         bool PlaceSpatialPanelFromInput(Ray ray, bool clicked)
         {
-            if (!SpatialAssembly || !assemblyPlacingPanel) return false;
-            if (!clicked) return false;
-            PlaceSpatialPanel(ray.GetPoint(assemblyPanelDistance));
-            assemblyPlacingPanel = false;
-            assemblyFeedback = "";
-            Draw();
+            meetingPanelRay = ray;
+            if (!movingMeetingPanel) return false;
+            bool held = xr ? leftTriggerWasDown || rightTriggerWasDown || wasPressed : Mouse.current?.leftButton.isPressed == true;
+            if (!held) { movingMeetingPanel = false; return true; }
+            panel.position = ray.GetPoint(meetingGrabDistance) + meetingGrabOffset;
+            if (SpatialAssembly) assemblyPanelPose = new Pose(panel.position, panel.rotation);
             return true;
         }
 
         bool RecallSpatialPanel()
         {
-            if (!SpatialAssembly || !assemblyPanelReady || assemblyAlignment == AssemblyAlignment.Lost) return false;
+            if (!SpatialAssembly || !assemblyPanelReady) return false;
+            movingMeetingPanel = false;
             var direction = Quaternion.AngleAxis(26, Vector3.up) * view.transform.forward;
             PlaceSpatialPanel(view.transform.position + direction * assemblyPanelDistance - Vector3.up * .16f);
             return true;
+        }
+
+        void PresentReadyProposal(JToken round)
+        {
+            if (!SpatialAssembly || CaptureBundleMeeting || !AssemblyActive || collaborativeEditing || assemblyAdopting || assemblyStopping || confirmingMeetingEnd) return;
+            var status = TextValue(round, "status");
+            if (status is not ("reviewable" or "needs_input")) return;
+            if (AssemblyRecordingMode == "live")
+            {
+                var speech = (round?["context"] as JObject)?["utterance"];
+                if (TextValue(speech, "status") != "final" || string.IsNullOrWhiteSpace(TextValue(speech, "text")) ||
+                    TextValue(speech, "source_mode") is not ("live_capture" or "manual")) return;
+            }
+            // Finish an in-progress physical alignment first; the result stays available in the panel.
+            if (A4PointSampling || TabletopPointSampling || AssemblySampling || AssemblyQrScanning || assemblyAlignment == AssemblyAlignment.Preview) return;
+            assemblyMenu = false;
+            OpenSpatialComparison(round);
         }
 
         int SpatialFont(int size) => Mathf.RoundToInt(size * assemblyFontScale);
@@ -92,66 +142,291 @@ namespace ContextPin
             else
                 Button("SpatialSessionAction", 0, 0, 222, 47, status, action, true);
 
-            if (assemblyCollapsed && assemblyAlignment == AssemblyAlignment.Confirmed)
+            DrawPanelHandle(238, 0, 182, 47);
+
+            if (confirmingMeetingEnd && !assemblyStopping && (AssemblyActive || assemblyStarting || AssemblyCaptureRequested))
             {
-                Button("SpatialSummaryOpen", 236, 0, 184, 47, "요약 열기", () => { assemblyCollapsed = false; Draw(); });
+                RoundBox("SpatialEndPanel", content, 0, 58, SpatialWidth, 124, SpatialBackground, 12);
+                BoldLabel("SpatialEndHeading", content, 12, 65, 396, 43, "회의를 마치고 결과를 저장할까요?", SpatialFont(21), HeaderText);
+                Button("SpatialEndKeep", 12, 119, 189, 43, "계속 검토", () => { confirmingMeetingEnd = false; Draw(); }, true);
+                Button("SpatialConfirmEnd", 210, 119, 198, 43, "종료하고 저장", () => { confirmingMeetingEnd = false; EndSpatialMeeting(); });
                 return;
             }
-
-            var alignmentWork = assemblyAlignment != AssemblyAlignment.Confirmed && state is not ("completed" or "save_error");
-            if (alignmentWork) { DrawSpatialAlignment(); return; }
+            confirmingMeetingEnd = false;
+            if (state == "completed")
+            {
+                if (assemblyMenu) DrawSpatialMenu(); else DrawSavedResult();
+                return;
+            }
+            if (ExplicitDesignMeeting && explicitTranscriptPage >= 0 && AssemblyActive) { DrawExplicitTranscript(); return; }
+            if (ExplicitDesignMeeting && AssemblyActive && !assemblyMenu &&
+                (assemblyAlignment != AssemblyAlignment.Confirmed || !HasReviewTable))
+            {
+                if (assemblyAlignment != AssemblyAlignment.Confirmed) DrawSpatialAlignment();
+                else DrawExplicitRequestPanel();
+                return;
+            }
+            if (assemblyHistory) { DrawSpatialHistory(); return; }
+            if (CollaborativeDraftVisible) { DrawCollaborativeEdit(); return; }
             if (assemblyCompare) { DrawSpatialComparison(); return; }
             if (assemblyMenu) { DrawSpatialMenu(); return; }
+            if (!CanCompareModels && state != "save_error") { DrawSpatialAlignment(); return; }
 
+            if (ExplicitDesignMeeting && AssemblyActive) { DrawExplicitRequestPanel(); return; }
             var summary = meetingSnapshot["summary"] as JObject;
-            var discussion = TextValue(summary, "discussion");
-            var preserved = TextValue(summary, "preserved");
-            var decision = TextValue(summary, "decision");
-            var count = summary?.Value<int?>("proposal_count") ?? 0;
-            var rounds = Values(meetingSnapshot, "rounds").OfType<JObject>().ToArray();
-            var proposal = RelevantSpatialRound(rounds, TextValue(summary, "round_id"), "reviewable");
-            var questionRound = RelevantSpatialRound(rounds, TextValue(summary, "question_round_id"), "needs_input");
-            if (count == 0)
-                count = Values(proposal, "candidates").Count(item => TextValue(item, "status") == "valid");
-            var round = count > 0 ? proposal : questionRound;
-            var question = TextValue(questionRound, "question");
-            var active = state is "recording" or "paused";
-            var hasActivity = active && round != null && (count > 0 || !string.IsNullOrWhiteSpace(question));
-            var showResult = state == "completed" && !string.IsNullOrEmpty(AssemblyResultUrl);
-            float height = 145;
-            if (assemblyCaption) height += 32;
-            if (!string.IsNullOrEmpty(assemblyFeedback)) height += 28;
+            var round = MeetingLatestRound;
+            var roundState = TextValue(round, "status");
+            bool active = AssemblyActive;
+            var last = LatestFinalUtterance;
+            var speechError = active ? TextValue(meetingSnapshot, "speech_error") : "";
+            var speechHint = active ? TextValue(last, "processing_notice") : "";
+            if (HasRegisteredDesignScope && speechHint.Contains("부위를 선택")) speechHint = "";
+            var feedback = speechError.Length > 0 ? speechError : speechHint.Length > 0 ? speechHint : assemblyFeedback ?? "";
+            if (active && roundState == "failed" && speechError.Length == 0) feedback = TextValue(round, "error");
+            bool retryModel = A4PoseApplied && AdoptedModelFailed;
+            if (retryModel) feedback = "채택 CAD 표시 실패";
+            else if (A4PoseApplied && meetingLoadingVersion != null && meetingLoadingVersion == AssemblyAdoptedId)
+                feedback = "채택 CAD 불러오는 중";
+            float height = feedback.Length > 0 ? 215 : 164;
             RoundBox("SpatialSummary", content, 0, 58, SpatialWidth, height, SpatialBackground, 12);
-            SpatialSummaryLine("논의", 68, discussion, "논의할 내용을 기다리는 중");
-            SpatialSummaryLine("유지", 97, preserved, string.Join(" · ", Values(meetingSnapshot["assembly"], "preserved_conditions").Select(value => value.ToString())));
-            SpatialSummaryLine("결정", 126, decision, "아직 미정");
-            if (hasActivity)
-                Button("SpatialOpenComparison", 11, 157, 246, 37,
-                    count > 0 ? $"수정안 {count}개 준비됨" : "확인 질문 보기", () => OpenSpatialComparison(round), true);
-            else if (showResult)
-                Button("SpatialResult", 11, 157, 246, 37, "결과 ZIP 받기", SaveSpatialResult, true);
-            else
+            var transcript = TextValue(last, "text");
+            string source = IsCableDemo || AssemblyRecordingMode == "replay" ? "대본" : TextValue(last, "source_kind") == "manual_input" ? "입력" : "전사";
+            string waiting = state == "ready" ? "회의를 시작하세요" : IsCableDemo ? "예시 회의 진행 중" : "확정된 발화를 기다리는 중";
+            SpatialSummaryLine(source, 65, transcript, waiting);
+            string next = !active ? IsCableDemo ? "예시 회의를 시작하세요" : "녹음 시작 후 바꿀 점을 말하세요" : IsCableDemo ?
+                CableStage <= 2 ? TextValue(meetingSnapshot["cable_demo"], "target_label") + "을 가리키세요" : "두 번의 설계 변경을 마쳤습니다" :
+                TextValue(meetingSnapshot?["meeting"], "input_mode") == "manual" ? "PC에서 바꿀 치수를 입력하세요" :
+                HasSelectedDesignTarget ? "선택한 부위를 어떻게 바꿀지 말하세요" : "어떤 부분을 어떻게 바꿀지 말하세요";
+            SpatialSummaryLine("안내", 99, next, "시제품과 겹쳐진 원본을 확인하세요");
+            SpatialSummaryLine("결정", 131, TextValue(summary, "decision"), "아직 미정");
+            if (active && AssemblyRecordingMode == "live")
+                DrawLiveDesignAction(round, 175);
+            else if (active && (roundState is "collecting" or "generating" or "building" || assemblyCableRequest))
+                Label("SpatialDesignStatus", content, 12, 175, 298, 37, "CAD 수정안 준비 중…", SpatialFont(19), SpatialMuted);
+            else if (active && roundState is ("reviewable" or "needs_input"))
+                Button("SpatialOpenComparison", 10, 175, 298, 37, roundState == "needs_input" ? "확인 질문 열기" : "수정안 다시 보기", () => OpenSpatialComparison(round), true);
+            else if (active && IsCableDemo && CableStage > 2)
+                Button("SpatialHistory", 10, 175, 298, 37, "설계 이력 보기", OpenSpatialHistory);
+            else if (active && IsCableDemo)
+                Button("SpatialCableStage", 10, 175, 298, 37, TextValue(meetingSnapshot["cable_demo"], "action"), () => RequestCableDemoStage(), true);
+            else if (GroovePreviewAvailable)
+                DrawGroovePreviewControl();
+            Button("SpatialMenu", 330, 175, 80, 37, "메뉴", () => { assemblyMenu = true; Draw(); });
+            if (feedback.Length > 0)
+                Label("SpatialFeedback", content, 12, 219, retryModel ? 268 : 396, 48, TruncateSpatial(feedback, "", 70), SpatialFont(17), SpatialMuted);
+            if (retryModel) Button("MeetingRetryModel", 291, 223, 116, 38, "다시 불러오기", RetryAdoptedModel);
+            DrawTablePlacementControls(height + 65, showCurrentVersion: true);
+        }
+
+        bool AdoptedModelFailed => !string.IsNullOrEmpty(AssemblyAdoptedId) && meetingFailedVersion == AssemblyAdoptedId;
+
+        string ShownLatestLabel()
+        {
+            if (meetingModel == null || !meetingModel.activeInHierarchy || string.IsNullOrEmpty(meetingLoadedVersion))
+                return "현재 모델 표시 대기";
+            string label = TextValue(MeetingVersion(meetingLoadedVersion), "design_version");
+            return "Latest · " + (label.Length == 0 ? MeetingVersionLabel(meetingLoadedVersion) : label);
+        }
+
+        void DrawLatestCaption(float x, float y, float width, float height)
+        {
+            var caption = ShownLatestLabel();
+            if (CandidateGenerationMeeting && A4PoseApplied && width >= 230)
             {
-                var design = TextValue(meetingSnapshot, "design_status");
-                var text = design switch
+                var swatch = PaperLatestColor;
+                swatch.a = 1;
+                RoundBox("LatestColor", content, x, y + height / 2 - 5, 10, 10, swatch, 5);
+                x += 16;
+                width -= 16;
+                if (meetingModel != null && meetingModel.activeInHierarchy) caption += " · 채택본 / 앞오른쪽";
+            }
+            Label("ExplicitLatest", content, x, y, width, height, caption, SpatialFont(16), SpatialMuted);
+        }
+
+        void RetryAdoptedModel()
+        {
+            if (BundleAssetsFailed)
+            {
+                bundleReviewError = null;
+                for (int i = 0; i < bundleCandidates.Length; i++)
+                    if (bundleSlots[i].FailedVersion != null)
+                    {
+                        bundleSlots[i].FailedVersion = null;
+                        QueueBundleSlot(i);
+                    }
+                Draw();
+                return;
+            }
+            if (!AdoptedModelFailed) return;
+            meetingFailedVersion = null;
+            QueueMeetingModel(RequestedMeetingVersion());
+            Draw();
+        }
+
+        void DrawExplicitRequestPanel()
+        {
+            var background = RoundBox("ExplicitDesignPanel", content, 0, 58, SpatialWidth, 219, SpatialBackground, 12);
+            DrawLatestCaption(12, 64, 292, 30);
+            Button("SpatialMenu", 330, 63, 80, 34, "메뉴", () => { assemblyMenu = true; Draw(); });
+            var guidance = HasReviewTable ? ExplicitDesignStatus : "모델을 놓을 책상을 확인하거나 아래에서 직접 지정하세요.";
+            bool retry = HasReviewTable && (AdoptedModelFailed || BundleAssetsFailed);
+            if (retry && AdoptedModelFailed) guidance = bundleReviewError ?? "채택한 CAD를 불러오지 못했습니다.";
+            else if (HasReviewTable && meetingLoadingVersion != null && meetingLoadingVersion == AssemblyAdoptedId)
+                guidance = "채택한 CAD를 불러오는 중입니다.";
+            Label("ExplicitDesignStatus", content, 12, 99, retry ? 269 : 396, 48, guidance, SpatialFont(18), HeaderText);
+            if (retry)
+                Button("MeetingRetryModel", 291, 102, 116, 38, "다시 불러오기", RetryAdoptedModel);
+            float details = DrawBundleCandidateInfo(CurrentCandidateSet, 147);
+            background.rectTransform.sizeDelta = new Vector2(SpatialWidth, 219 + details);
+            Label("ExplicitCameraStatus", content, 12, 147 + details, 278, 34, ExplicitCameraStatus, SpatialFont(16), SpatialMuted);
+            if (HasReviewTable && !ExplicitCameraReady)
+                Button("ExplicitPrepareCamera", 292, 146 + details, 115, 34, "카메라 준비", () => StartExplicitCamera(true));
+            var transcript = ExplicitTranscript;
+            bool manualTranscript = CaptureBundleMeeting && explicitRequest?.TranscriptSource == "manual";
+            Label("ExplicitTranscript", content, 12, 184 + details, 396, 38,
+                string.IsNullOrEmpty(transcript) ? "수정 발언의 확정 전사가 여기에 표시됩니다." :
+                TruncateSpatial(manualTranscript ? "수동 전사 · " + transcript : transcript, "", 74),
+                SpatialFont(17), HeaderText);
+            if (!string.IsNullOrEmpty(transcript))
+                Button("ExplicitReadTranscript", 300, 224 + details, 107, 40, "원문 보기", () => { explicitTranscriptPage = 0; Draw(); });
+            string speech = ExplicitSpeechAction;
+            if (HasReviewTable && !string.IsNullOrEmpty(speech))
+                Button("ExplicitSpeechAction", 10, 224 + details, 155, 40, speech, ToggleExplicitSpeech, true);
+            if (CanRetryExplicitRequest)
+                Button("ExplicitRetry", 173, 224 + details, 120, 40, "다시 시도", RetryExplicitRequest);
+            DrawTablePlacementControls(282 + details);
+            if (!CaptureBundleMeeting && !string.IsNullOrEmpty(TextValue(MeetingLatestRound, "round_id")) &&
+                TextValue(MeetingLatestRound, "status") is "reviewable" or "needs_input")
+                Button("SpatialOpenComparison", 10, 344, 206, 38, "최근 수정안 열기", () => OpenSpatialComparison(MeetingLatestRound));
+        }
+
+        float DrawBundleCandidateInfo(JObject set, float top)
+        {
+            if (set == null) return 0;
+            var rows = new List<(string text, string candidateKey)>();
+            var candidates = Values(set, "candidates").ToArray();
+            if (TextValue(set, "status") == "ready")
+            {
+                foreach (var candidate in candidates)
                 {
-                    "interpreting" => "제안 해석 중",
-                    "generating" => "형상 생성 중",
-                    "error" => "제안 확인 필요",
-                    _ => "",
-                };
-                Label("SpatialDesignStatus", content, 12, 157, 257, 37, text, SpatialFont(18), SpatialMuted);
+                    string values = string.Join(", ", Values(candidate, "parameter_diff").Select(change =>
+                        $"{TextValue(change, "label")} {change["before"]} → {change["after"]} {TextValue(change, "unit")}".TrimEnd()));
+                    string key = TextValue(candidate, "candidate_key");
+                    string side = key == "A" ? "뒤왼쪽" : "뒤오른쪽";
+                    rows.Add(($"후보 {key} · {side} · {values}\n{TextValue(candidate, "interpretation")}", key));
+                }
             }
-            Button("SpatialMenu", 338, 157, 69, 37, "더 보기", () => { assemblyMenu = true; Draw(); });
-            if (assemblyCaption)
+            string reason = TextValue(set, "reason");
+            var limits = Values(set, "limitations").Values<string>().Where(s => !string.IsNullOrWhiteSpace(s)).Distinct().ToArray();
+            if (!string.IsNullOrWhiteSpace(reason) && reason != string.Join(" ", limits)) rows.Add((reason, null));
+            if (limits.Length > 0)
+                rows.Add(((candidates.Length == 1 ? "후보가 1개인 이유 · " : "") + string.Join("\n", limits), null));
+            float y = top;
+            foreach (var (text, key) in rows)
             {
-                var last = Values(meetingSnapshot, "utterances").LastOrDefault();
-                Label("SpatialCaption", content, 12, 198, 396, 29,
-                    TruncateSpatial(TextValue(last, "text"), "확정 발화를 기다리는 중", 42), SpatialFont(17), SpatialMuted);
+                float indent = 0;
+                if (key != null)
+                {
+                    var swatch = BundleColor(key);
+                    swatch.a = 1;
+                    RoundBox("CandidateColor" + key, content, 12, y + 6, 10, 10, swatch, 5);
+                    indent = 16;
+                }
+                var label = Label("CandidateDetail", content, 12 + indent, y, 396 - indent, 24, text, SpatialFont(16), HeaderText);
+                float height = Mathf.Max(24, Mathf.Ceil(label.preferredHeight) + 4);
+                label.rectTransform.sizeDelta = new Vector2(396 - indent, height);
+                y += height + 3;
             }
-            if (!string.IsNullOrEmpty(assemblyFeedback))
-                Label("SpatialFeedback", content, 12, assemblyCaption ? 228 : 198, 396, 28,
-                    TruncateSpatial(assemblyFeedback, "", 64), SpatialFont(16), SpatialMuted);
+            return y - top;
+        }
+
+        int explicitTranscriptPage = -1;
+        void DrawExplicitTranscript()
+        {
+            const int pageSize = 150;
+            var text = ExplicitTranscript ?? "";
+            var pages = Mathf.Max(1, Mathf.CeilToInt(text.Length / (float)pageSize));
+            explicitTranscriptPage = Mathf.Clamp(explicitTranscriptPage, 0, pages - 1);
+            int start = explicitTranscriptPage * pageSize;
+            RoundBox("ExplicitTranscriptPage", content, 0, 58, SpatialWidth, 240, SpatialBackground, 12);
+            string title = CaptureBundleMeeting && explicitRequest?.TranscriptSource == "manual" ? "수동 전사 원문" : "수정 발언 원문";
+            BoldLabel("Title", content, 12, 65, 396, 33, $"{title}  {explicitTranscriptPage + 1}/{pages}", SpatialFont(20), HeaderText);
+            Label("FullText", content, 12, 102, 396, 126, text.Substring(start, Mathf.Min(pageSize, text.Length - start)), SpatialFont(17), HeaderText);
+            if (explicitTranscriptPage > 0) Button("Previous", 12, 246, 103, 36, "이전", () => { explicitTranscriptPage--; Draw(); });
+            if (explicitTranscriptPage + 1 < pages) Button("Next", 123, 246, 100, 36, "다음", () => { explicitTranscriptPage++; Draw(); });
+            Button("CloseTranscript", 288, 246, 119, 36, "닫기", () => { explicitTranscriptPage = -1; Draw(); });
+        }
+
+        void DrawLiveDesignAction(JToken round, float y)
+        {
+            var status = TextValue(round, "status");
+            if (status is "collecting" or "generating" or "building" || designRequestPending)
+                Label("SpatialDesignStatus", content, 12, y, 305, 40, "CAD 수정안 준비 중…", SpatialFont(20), HeaderText);
+            else if (status is "reviewable" or "needs_input")
+                Button("SpatialOpenComparison", 10, y, 300, 40, status == "needs_input" ? "확인 질문 열기" : "수정안 보기",
+                    () => OpenSpatialComparison(round), true);
+            else if (targetSnapshotPending)
+                Label("SpatialDesignStatus", content, 12, y, 305, 40, "선택 부위 저장 중…", SpatialFont(19), SpatialMuted);
+            else if (CurrentDesignUtterance != null)
+                Button("SpatialDesignRequest", 10, y, 300, 40, "이 발언으로 수정안 보기", RequestSelectedDesign, true);
+            else
+                Label("SpatialDesignStatus", content, 12, y, 305, 40, "확정된 수정 발언을 기다리는 중", SpatialFont(18), SpatialMuted);
+        }
+
+        void DrawSavedResult()
+        {
+            var source = meetingSnapshot["saved_design_utterance"] as JObject;
+            RoundBox("SpatialSavedPanel", content, 0, 58, SpatialWidth, 266, SpatialBackground, 12);
+            BoldLabel("SpatialSavedHeading", content, 12, 64, 396, 31, source != null ? "저장된 수정 발언" : "저장된 회의", SpatialFont(20), SpatialMuted);
+            Label("SpatialSavedUtterance", content, 12, 98, 396, 51,
+                TruncateSpatial(TextValue(source ?? LatestFinalUtterance, "text"), "확정 발언이 없습니다.", 75), SpatialFont(22), HeaderText);
+            bool live = AssemblyRecordingMode == "live";
+            if (source != null)
+            {
+                if (savedFollowUpPending)
+                    Label("SpatialSavedDesignStatus", content, 12, 153, 396, 45, "저장된 발언으로 수정안 준비 중…", SpatialFont(20), HeaderText);
+                else Button("SpatialSavedDesign", 12, 153, 396, 45, "이 발언으로 수정안 보기", ContinueSavedDesign, true);
+            }
+            else if (live)
+                Label("SpatialSavedDesignStatus", content, 12, 153, 396, 45, "수정 요청으로 사용할 발언이 없습니다.", SpatialFont(18), SpatialMuted);
+
+            float y = source != null || live ? 207 : 160;
+            if (!string.IsNullOrEmpty(minutesCode))
+                BoldLabel("SpatialMinutesCode", content, 12, y, 300, 39, "회의록 코드  " + minutesCode, SpatialFont(21), HeaderText);
+            else if (!string.IsNullOrEmpty(AssemblyResultUrl))
+                Button("SpatialMinutesDownload", 12, y, 296, 39, fetchingMinutesCode ? "코드 확인 중…" : "PC에서 회의록 받기", FetchMinutesCode);
+            Button("SpatialMenu", 325, y, 83, 39, "메뉴", () => { assemblyMenu = true; Draw(); });
+            var hint = !string.IsNullOrEmpty(assemblyFeedback) ? assemblyFeedback : source != null ?
+                "이 발언과 현재 CAD로 후속 검토를 엽니다." : "PC 회의 화면에서 회의록 코드를 입력하세요.";
+            Label("SpatialFeedback", content, 12, y + 42, 396, 62, TruncateSpatial(hint, "", 80), SpatialFont(17), SpatialMuted);
+        }
+
+        void AskToEndSpatialMeeting()
+        {
+            confirmingMeetingEnd = true;
+            Draw();
+        }
+
+        void FetchMinutesCode()
+        {
+            if (fetchingMinutesCode || meetingTransport == null) return;
+            var transport = meetingTransport;
+            fetchingMinutesCode = true;
+            StartCoroutine(transport.Json(transport.SessionPath + "/minutes-code", null, (reply, error) =>
+            {
+                if (transport != meetingTransport) return;
+                fetchingMinutesCode = false;
+                minutesCode = TextValue(reply, "code");
+                minutesCodeExpiresAt = reply?.Value<long?>("expires_at") ?? 0;
+                if (minutesCode.Length == 0) assemblyFeedback = error ?? "다운로드 코드를 받지 못했습니다. 다시 시도하세요.";
+                else
+                {
+                    int remaining = Math.Max(1, (int)Math.Ceiling((minutesCodeExpiresAt - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) / 60000.0));
+                    assemblyFeedback = $"PC 회의 화면에서 코드를 입력하세요. 약 {remaining}분간 사용할 수 있습니다.";
+                }
+                Draw();
+            }));
+            Draw();
         }
 
         (string label, Action action) SpatialSessionAction(string state)
@@ -159,19 +434,24 @@ namespace ContextPin
             if (assemblyStopping || state == "finalizing") return ("결과 저장 중", null);
             if (state == "completed") return (Values(meetingSnapshot?["result"], "missing").Any() ? "누락 포함 저장됨" : "저장됨", null);
             if (state == "save_error") return ("저장 다시 시도", RetrySpatialSave);
+            if (RequestedOutputUnavailable && !assemblyStarting && !string.IsNullOrEmpty(assemblyFeedback))
+                return ("저장 모드 연결 다시 시도", StartSpatialMeeting);
             if (state == "recording")
             {
+                if (!meetingEventsConnected && !meetingHttpAvailable) return ("서버 연결 대기 · 종료", AskToEndSpatialMeeting);
                 if (AssemblyRecordingMode == "replay") return ("예시 진행 · 회의 종료", () => EndSpatialMeeting());
                 var capture = TextValue(meetingSnapshot, "capture_state");
-                return (capture == "recording" && !assemblyCaptureFrozen ? "● 녹음 중 · 회의 종료" : "회의 종료", () => EndSpatialMeeting());
+                if (TextValue(meetingSnapshot?["meeting"], "input_mode") == "manual") return ("설계 검토 · 종료", AskToEndSpatialMeeting);
+                var confirmedVoice = Values(meetingSnapshot, "utterances").Any(u => TextValue(u, "status") == "final" && TextValue(u, "source_mode") == "live_capture");
+                if (TextValue(meetingSnapshot, "speech_error").Length > 0) return ("전사 오류 · 종료", AskToEndSpatialMeeting);
+                string badge = capture == "recording" ? confirmedVoice ? "녹음·전사 중" : "녹음 중 · 전사 대기" : "마이크 미연결";
+                return (badge + " · 종료", AskToEndSpatialMeeting);
             }
             if (assemblyStarting || TextValue(meetingSnapshot, "capture_state") == "starting")
-                return ("마이크 연결 중 · 종료", () => EndSpatialMeeting());
-            if (AssemblyCaptureRequested && assemblyAlignment != AssemblyAlignment.Confirmed)
-                return ("회의 종료", () => EndSpatialMeeting());
-            if (state == "paused") return assemblyAlignment == AssemblyAlignment.Confirmed
-                ? ("회의 이어가기", StartSpatialMeeting) : ("회의 종료", () => EndSpatialMeeting());
-            return ("회의 시작", assemblyAlignment == AssemblyAlignment.Confirmed ? StartSpatialMeeting : null);
+                return ("마이크 연결 중 · 종료", AskToEndSpatialMeeting);
+            if (state == "paused") return ("녹음 재개", StartSpatialMeeting);
+            if (AssemblyCaptureRequested && TextValue(meetingSnapshot?["meeting"], "audio_device_id") != meetingDeviceId) return ("회의 마이크 연결 중", null);
+            return (TextValue(meetingSnapshot, "provider_mode") == "live" ? "회의 시작 · 녹음" : "예시 회의 시작", StartSpatialMeeting);
         }
 
         void RetrySpatialSave()
@@ -198,31 +478,237 @@ namespace ContextPin
             Label("SpatialValue" + name, content, 72, y, 335, 27, TruncateSpatial(value, fallback), SpatialFont(20), HeaderText);
         }
 
+        void ShowAlignmentMethods()
+        {
+            choosingAlignmentMethod = true;
+            ResetA4ProbeStability();
+            Draw();
+        }
+
+        void DrawAlignmentMethods()
+        {
+            RoundBox("SpatialAlignment", content, 0, 58, SpatialWidth, 229, SpatialBackground, 12);
+            BoldLabel("SpatialAlignmentStatus", content, 12, 66, 396, 37, "다른 정렬 방법", SpatialFont(22), HeaderText);
+            Button("TabletopCaptureStart", 12, 115, 188, 47, "책상 한 점 지정", () => { choosingAlignmentMethod = false; BeginTabletopAlignment(); });
+            if (assemblyHasMount)
+                Button("AssemblyAlignmentStart", 212, 115, 195, 47, "기준점 세 개", () => { choosingAlignmentMethod = false; BeginAssemblyAlignment(); });
+            if (AssemblyQrAvailable)
+                Button("AssemblyQrStart", 12, 177, 188, 47, "받침 QR 읽기", () => { choosingAlignmentMethod = false; BeginAssemblyQrAlignment(); });
+            Button("A4Return", 212, 177, 195, 47, "A4로 돌아가기", () =>
+            {
+                choosingAlignmentMethod = false;
+                if (A4PointSampling || A4PreviewActive) Draw(); else BeginA4Alignment();
+            }, true);
+        }
+
+        bool AlignmentPassthroughAvailable()
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            if (!OVRManager.IsInsightPassthroughSupported())
+            {
+                BoldLabel("SpatialAlignmentStatus", content, 12, 66, 396, 40, "실물 보기 대기", SpatialFont(22), HeaderText);
+                Label("SpatialAlignmentHint", content, 12, 112, 396, 72, "헤드셋의 패스스루를 사용할 수 있어야 실물과 원본을 맞출 수 있습니다.", SpatialFont(18), SpatialMuted);
+                return false;
+            }
+#endif
+            return true;
+        }
+
+        static readonly string[] A4CornerLabels = { "앞 왼쪽", "앞 오른쪽", "뒤 오른쪽", "뒤 왼쪽" };
+
+        void DrawA4Alignment()
+        {
+            RoundBox("SpatialAlignment", content, 0, 58, SpatialWidth, 285, SpatialBackground, 12);
+            if (!AlignmentPassthroughAvailable()) return;
+            if (A4PreviewActive)
+            {
+                BoldLabel("SpatialAlignmentStatus", content, 12, 67, 396, 38,
+                    "실물을 A4 중앙에 놓으세요", SpatialFont(23), HeaderText);
+                Label("SpatialAlignmentHint", content, 12, 108, 396, 75,
+                    CandidateGenerationMeeting ? latestPaperError ?? "중앙은 실물 자리입니다. 앞오른쪽 청록색 Latest의 바닥과 방향을 확인하세요." :
+                        "오른쪽 앞의 가상 CAD와 중앙 실물의 바닥과 방향을 확인한 뒤 트리거로 배치를 확인하세요.",
+                    SpatialFont(19), HeaderText);
+                DrawLatestCaption(12, 184, 395, 26);
+                if (OriginalOverlayLoaded)
+                    Button("AssemblyAlignmentConfirm", 12, 217, 395, 47, "배치 확인", ConfirmAssemblyAlignment, true);
+                else if (AdoptedModelFailed)
+                {
+                    Label("SpatialOriginalLoading", content, 12, 217, 239, 47, "채택 CAD 표시 실패", SpatialFont(18), SpatialMuted);
+                    Button("MeetingRetryModel", 259, 217, 148, 47, "다시 불러오기", RetryAdoptedModel);
+                }
+                else
+                    Label("SpatialOriginalLoading", content, 12, 217, 395, 47, "표시할 CAD를 불러오는 중입니다.", SpatialFont(18), SpatialMuted);
+                Button("A4Undo", 12, 280, 190, 43, "마지막 점 다시", UndoA4Corner);
+                Button("A4Restart", 215, 280, 192, 43, "처음부터 다시", BeginA4Alignment);
+                return;
+            }
+            if (!A4PointSampling)
+            {
+                string title = assemblyAlignment == AssemblyAlignment.Lost ? "책상 위치를 다시 맞춰 주세요" : "빈 A4를 책상에 놓으세요";
+                BoldLabel("SpatialAlignmentStatus", content, 12, 67, 396, 40, title, SpatialFont(22), HeaderText);
+                Label("SpatialAlignmentHint", content, 12, 116, 396, 85, "책상 위 빈 A4의 네 모서리를 오른손 컨트롤러로 짚습니다. 가로로 놓으면 실물과 수정안을 비교하기 편합니다.", SpatialFont(18), SpatialMuted);
+                Button("A4Start", 12, 225, 190, 47, "A4 네 점 지정", BeginA4Alignment, true);
+                Button("A4AlignmentMethods", 215, 225, 192, 47, "다른 정렬 방법", ShowAlignmentMethods);
+                return;
+            }
+
+            int corner = Mathf.Clamp(A4CornerCount, 0, 3);
+            BoldLabel("SpatialAlignmentStatus", content, 12, 66, 396, 40,
+                $"A4 {corner + 1}/4 · {A4CornerLabels[corner]} 모서리", SpatialFont(24), HeaderText);
+            string instruction = corner == 0 ? "빈 A4를 책상에 놓으세요.\n가로 권장 · 세로 가능\n오른손 표시점을 모서리에 대고 A를 누르세요." :
+                $"종이를 움직이지 말고 {A4CornerLabels[corner]} 모서리에 오른손 표시점을 대고 A를 누르세요.";
+            Label("SpatialAlignmentHint", content, 12, 110, 256, 102, instruction, SpatialFont(18), HeaderText);
+            DrawA4CornerMap(corner);
+            string status = !tabletopTipTracked ? "오른쪽 컨트롤러와 헤드셋의 추적을 확인하세요." :
+                !string.IsNullOrWhiteSpace(A4Status) ? A4Status :
+                a4TipStable ? "표시점이 안정됐습니다. A를 누르세요." : "모서리에서 표시점을 잠깐 멈춰 주세요.";
+            Label("A4ProbeStatus", content, 12, 218, 396, 54, status, SpatialFont(17), SpatialMuted);
+            if (corner > 0)
+            {
+                Button("A4Undo", 12, 281, 121, 44, "한 점 취소", UndoA4Corner);
+                Button("A4Restart", 143, 281, 126, 44, "처음부터", BeginA4Alignment);
+            }
+            Button("A4AlignmentMethods", 279, 281, 128, 44, "다른 방법", ShowAlignmentMethods);
+        }
+
+        void DrawA4CornerMap(int current)
+        {
+            Box("A4GuideSheet", content, 288, 125, 109, 76, Field);
+            for (int i = 0; i < A4CornerLabels.Length; i++)
+            {
+                float x = i == 1 || i == 2 ? 374 : 282;
+                float y = i < 2 ? 180 : 117;
+                var mark = RoundBox("A4GuideCorner" + i, content, x, y, 29, 29,
+                    i == current ? Lime : i < current ? Mint : Field, 9);
+                BoldLabel("Index", mark.transform, 0, 0, 29, 29, (i + 1).ToString(), SpatialFont(16),
+                    i < current ? Card : Light, TextAnchor.MiddleCenter);
+            }
+            Label("A4GuideFront", content, 308, 175, 66, 25, "내 쪽", SpatialFont(15), Light, TextAnchor.MiddleCenter);
+        }
+
+        void DrawTabletopAlignment()
+        {
+            RoundBox("SpatialAlignment", content, 0, 58, SpatialWidth, 229, SpatialBackground, 12);
+            if (!AlignmentPassthroughAvailable()) return;
+            if (TabletopPreviewActive)
+            {
+                BoldLabel("SpatialAlignmentStatus", content, 12, 65, 396, 37, "실물 배치 확인", SpatialFont(22), HeaderText);
+                var hint = TabletopNeedsSpaceConfirmation
+                    ? "원본이 실물에 겹치고 오른쪽 윤곽선 전체가 빈 책상 위에 있는지 확인하세요."
+                    : "반투명 원본이 실물과 같은 위치와 방향에 겹치는지 확인하세요.";
+                Label("SpatialAlignmentHint", content, 12, 109, 396, 63, hint, SpatialFont(18), SpatialMuted);
+                Button("TabletopRotateLeft", 12, 177, 116, 41, "왼쪽 5°", () => RotateTabletopPreview(-5));
+                Button("TabletopRotateRight", 138, 177, 116, 41, "오른쪽 5°", () => RotateTabletopPreview(5));
+                Button("TabletopRecapture", 264, 177, 143, 41, "위치 다시 짚기", BeginTabletopAlignment);
+                if (OriginalOverlayLoaded)
+                    Button("AssemblyAlignmentConfirm", 12, 230, 395, 45, "배치 확인", ConfirmAssemblyAlignment, true);
+                else Label("SpatialOriginalLoading", content, 12, 230, 395, 45, "원본 모델을 불러오는 중입니다.", SpatialFont(17), SpatialMuted);
+                return;
+            }
+            bool lost = assemblyAlignment == AssemblyAlignment.Lost;
+            BoldLabel("SpatialAlignmentStatus", content, 12, 65, 396, 37, lost ? "위치를 다시 짚어 주세요" : "책상 한 점으로 배치", SpatialFont(22), HeaderText);
+            Label("SpatialAlignmentHint", content, 12, 108, 396, 85,
+                "부품의 긴 방향을 좌우로 놓고, 앞면 가운데 바로 앞의 상판에 오른손 표시점을 대고 A를 누르세요.", SpatialFont(18), SpatialMuted);
+            if (TabletopPointSampling)
+            {
+                string status = !TryGetTabletopOriginalBounds(out _) ? "원본 모델을 불러오는 중" :
+                    tabletopTipTracked ? "오른손 표시점 준비됨" : "오른쪽 컨트롤러 추적 대기";
+                Label("TabletopProbeStatus", content, 12, 202, 227, 54, status, SpatialFont(16), SpatialMuted);
+            }
+            else Button("TabletopCaptureStart", 12, 208, 203, 46, "책상 한 점 지정", BeginTabletopAlignment, true);
+            Button("TabletopAlignmentMethods", 235, 208, 172, 46, "다른 정렬 방법", ShowAlignmentMethods);
+        }
+
         void DrawSpatialAlignment()
         {
+            if (choosingAlignmentMethod) { DrawAlignmentMethods(); return; }
+            if (!ReviewTableSampling && (A4PointSampling || A4PreviewActive ||
+                (ExplicitDesignMeeting && assemblyAlignment is (AssemblyAlignment.Unaligned or AssemblyAlignment.Lost))))
+            {
+                DrawA4Alignment();
+                return;
+            }
+            if (!ReviewTableSampling && (TabletopPointSampling || TabletopPreviewActive))
+            {
+                DrawTabletopAlignment();
+                return;
+            }
+            bool live = AssemblyActive && AssemblyRecordingMode == "live" && !ExplicitDesignMeeting;
             RoundBox("SpatialAlignment", content, 0, 58, SpatialWidth, 138, SpatialBackground, 12);
+            DrawTablePlacementControls(201);
+            if (live)
+            {
+                RoundBox("SpatialUnalignedSpeech", content, 0, 263, SpatialWidth, 83, SpatialBackground, 12);
+                SpatialSummaryLine("전사", 267, TextValue(LatestFinalUtterance, "text"), "바꿀 부분과 방향을 말하세요");
+                DrawLiveDesignAction(MeetingLatestRound, 302);
+            }
 #if UNITY_ANDROID && !UNITY_EDITOR
             if (!OVRManager.IsInsightPassthroughSupported())
             {
                 Label("SpatialAlignmentStatus", content, 12, 65, 396, 34, "패스스루 사용 불가", SpatialFont(21), HeaderText);
-                Label("SpatialAlignmentHint", content, 12, 101, 396, 65, "이 기기는 AR 배치를 지원하지 않습니다. PC 화면에서 세션을 검토하세요.", SpatialFont(19), SpatialMuted);
-                if (stateCanClose()) Button("SpatialSetupExit", 320, 0, 99, 47, "나가기", LeaveMeeting);
+                Label("SpatialAlignmentHint", content, 12, 101, 396, 65, "녹음을 시작하고 바꿀 점을 말하면 수정안이 패널에 표시됩니다.", SpatialFont(19), SpatialMuted);
+                if (stateCanClose()) Button("SpatialSetupExit", 288, 265, 120, 38, "회의 목록", LeaveMeeting);
                 return;
             }
 #endif
-            Label("SpatialAlignmentStatus", content, 12, 65, 396, 34, AssemblyAlignmentText(), SpatialFont(21), HeaderText);
+            bool offerPaper = SpatialAssembly && !ExplicitDesignMeeting && !ReviewTableSampling &&
+                assemblyAlignment is (AssemblyAlignment.Unaligned or AssemblyAlignment.Lost);
+            Label("SpatialAlignmentStatus", content, 12, 65, offerPaper ? 247 : 396, 34, AssemblyAlignmentText(), SpatialFont(21), HeaderText);
+            if (offerPaper)
+                Button("A4Start", 268, 65, 139, 34, "A4 네 점 지정", BeginA4Alignment);
             var instruction = AssemblySampling
-                ? "오른손 검지로 표시를 짚고 왼손을 핀치하거나, 오른쪽 컨트롤러의 추적점을 맞춰 A를 누르세요."
-                : assemblyAlignment == AssemblyAlignment.Lost ? "실물 위 표시를 숨겼습니다. 원본 위치를 다시 맞추세요."
-                : "고정된 실물 조립체에 원본을 맞춥니다.";
+                ? "기준점을 짚고 왼손을 핀치하거나 오른쪽 컨트롤러의 A를 누르세요."
+                : !string.IsNullOrWhiteSpace(AssemblyQrStatus) ? AssemblyQrStatus
+                : assemblyAlignment == AssemblyAlignment.Lost ? "정렬을 잃었습니다. 기준 QR을 다시 봐 주세요."
+                : AssemblyQrAvailable ? "고정 받침의 QR로 실물 위치를 맞춥니다." : "실물 기준점을 직접 지정할 수 있습니다.";
             Label("SpatialAlignmentHint", content, 12, 101, 396, 47, TruncateSpatial(instruction, "", 80), SpatialFont(17), SpatialMuted);
-            if (assemblyAlignment == AssemblyAlignment.Preview && meetingLoadedVersion == AssemblyOriginalId)
-                Button("AssemblyAlignmentConfirm", 12, 151, 223, 37, "실물 일치 확인", ConfirmAssemblyAlignment, true);
-            if (assemblyHasMount)
-                Button("AssemblyAlignmentStart", assemblyAlignment == AssemblyAlignment.Preview ? 249 : 12, 151,
-                    assemblyAlignment == AssemblyAlignment.Preview ? 157 : 222, 37,
-                    assemblyAlignment == AssemblyAlignment.Unaligned ? "원본 맞추기" : "다시 맞추기", BeginAssemblyAlignment);
-            if (stateCanClose()) Button("SpatialSetupExit", 320, 0, 99, 47, "나가기", LeaveMeeting);
+            if (assemblyAlignment == AssemblyAlignment.Preview)
+            {
+                if (OriginalOverlayLoaded)
+                    Button("AssemblyAlignmentConfirm", 12, 151, 216, 37, "실물 일치 확인", ConfirmAssemblyAlignment, true);
+                if (AssemblyQrAvailable)
+                    Button("AssemblyQrStart", 244, 151, 163, 37, "QR 다시 보기", BeginAssemblyQrAlignment);
+                else if (assemblyHasMount)
+                    Button("AssemblyAlignmentStart", 244, 151, 163, 37, "다시 맞추기", BeginAssemblyAlignment);
+            }
+            else if (AssemblyQrScanning)
+                Button("AssemblyQrCancel", 12, 151, 216, 37, "QR 읽기 취소", CancelAssemblyQrAlignment);
+            else
+            {
+                if (AssemblyQrAvailable && !AssemblySampling)
+                    Button("AssemblyQrStart", 12, 151, 216, 37, "QR로 자동 정렬", BeginAssemblyQrAlignment, true);
+                if (assemblyHasMount)
+                    Button("AssemblyAlignmentStart", AssemblyQrAvailable && !AssemblySampling ? 244 : 12, 151,
+                        AssemblyQrAvailable && !AssemblySampling ? 163 : 216, 37,
+                        AssemblySampling ? "원점부터 다시" : "수동 맞추기", BeginAssemblyAlignment, !AssemblyQrAvailable);
+            }
+            if (ExplicitDesignMeeting && (AssemblySampling || AssemblyQrScanning || assemblyAlignment == AssemblyAlignment.Preview))
+                Button("A4Start", 12, 264, 223, 41, "A4로 다시 맞추기", BeginA4Alignment);
+            if (stateCanClose()) Button("SpatialSetupExit", 288, 265, 120, 38, "회의 목록", LeaveMeeting);
+            var feedback = !string.IsNullOrEmpty(assemblyFeedback) ? assemblyFeedback : TextValue(meetingSnapshot, "speech_error");
+            if (feedback.Length > 0)
+                Label("SpatialSetupFeedback", content, 12, live ? 349 : 310, 396, 48, TruncateSpatial(feedback, "", 70), SpatialFont(17), SpatialMuted);
+        }
+
+        void DrawTablePlacementControls(float y, bool showCurrentVersion = false)
+        {
+            RoundBox("SpatialTablePlacement", content, 0, y, SpatialWidth, 55, SpatialBackground, 12);
+            string title = ReviewTableSampling ? "지정 취소" : HasReviewTable ? "책상 다시 지정" : "책상 지정";
+            Button("SpatialTablePlacementAction", 10, y + 7, 132, 40, title, () =>
+            {
+                if (ReviewTableSampling) CancelTablePlacement();
+                else BeginTablePlacement();
+            });
+            if (!HasReviewTable && !ReviewTableSampling && DeskNeedsPermission)
+                Button("SpatialDeskPermission", 152, y + 7, 251, 40, "공간 권한 허용 · 자동 찾기", RequestDeskAccess);
+            else if (CanRequestDeskSetup)
+            {
+                Label("SpatialTablePlacementHint", content, 152, y + 2, 148, 51, TablePlacementHint, SpatialFont(15), SpatialMuted);
+                Button("SpatialDeskSetup", 306, y + 7, 102, 40, "공간 설정", RequestDeskSetup);
+            }
+            else if (showCurrentVersion && A4ReviewSurfaceActive && string.IsNullOrEmpty(tableFeedback))
+                DrawLatestCaption(152, y + 2, 256, 51);
+            else Label("SpatialTablePlacementHint", content, 152, y + 2, 256, 51, TablePlacementHint, SpatialFont(17), SpatialMuted);
         }
 
         bool stateCanClose() => AssemblySessionStatus == "ready" && !assemblyStarting;
@@ -231,14 +717,24 @@ namespace ContextPin
         {
             if (round == null) return;
             assemblyCompare = true;
+            assemblyHistory = false;
             assemblyCompareRound = TextValue(round, "round_id");
-            assemblyClarify = !string.IsNullOrWhiteSpace(TextValue(round, "question"));
+            assemblyClarify = TextValue(round, "status") == "needs_input";
+            if (!assemblyClarify)
+            {
+                if (!CanCompareModels) StartLocalCandidatePreview();
+                var first = Values(round, "candidates").FirstOrDefault(candidate => TextValue(candidate, "status") == "valid");
+                var id = TextValue(first, "version_id");
+                if (!string.IsNullOrEmpty(id)) SetMeetingViewedVersion(id);
+                QueueMeetingModel(RequestedMeetingVersion());
+            }
             Draw();
         }
 
         void CloseSpatialComparison()
         {
-            assemblyCompare = assemblyClarify = false;
+            collaborativeEditing = false;
+            assemblyCompare = assemblyClarify = assemblyHistory = false;
             assemblyCompareRound = null;
             SetMeetingViewedVersion(null);
             Draw();
@@ -246,15 +742,12 @@ namespace ContextPin
 
         JObject SpatialRound() => Values(meetingSnapshot, "rounds").OfType<JObject>()
             .FirstOrDefault(round => TextValue(round, "round_id") == assemblyCompareRound);
-        static JObject RelevantSpatialRound(JObject[] rounds, string id, string status) =>
-            rounds.LastOrDefault(round => TextValue(round, "round_id") == id && TextValue(round, "status") == status) ??
-            rounds.LastOrDefault(round => TextValue(round, "status") == status);
-        bool SpatialViewingShared => SpatialAssembly && assemblyCompare && !assemblyClarify;
+        bool SpatialComparisonVisible => SpatialAssembly && assemblyCompare && !assemblyClarify;
+        bool SpatialViewingShared => SpatialComparisonVisible && !assemblyHistory;
         bool SpatialSharesCommitted => SpatialAssembly && !assemblyCompare && assemblyAlignment == AssemblyAlignment.Confirmed;
 
         void DrawSpatialComparison()
         {
-            RoundBox("SpatialComparison", content, 0, 58, SpatialWidth, 166, SpatialBackground, 12);
             var round = SpatialRound();
             var candidates = Values(round, "candidates").Take(3).ToArray();
             var selected = candidates.FirstOrDefault(value => TextValue(value, "version_id") == meetingViewedVersion);
@@ -262,84 +755,185 @@ namespace ContextPin
             var question = TextValue(round, "question");
             if (assemblyClarify && question.Length > 0)
             {
+                RoundBox("SpatialComparison", content, 0, 58, SpatialWidth, 166, SpatialBackground, 12);
                 BoldLabel("SpatialQuestion", content, 12, 67, 396, 41, TruncateSpatial(question, "", 62), SpatialFont(21), HeaderText);
-                Label("SpatialQuestionHint", content, 12, 114, 396, 40,
-                    "대화로 답하거나 PC에서 입력하세요.", SpatialFont(18), SpatialMuted);
+                bool manual = TextValue(meetingSnapshot?["meeting"], "input_mode") == "manual";
+                Label("SpatialQuestionHint", content, 12, 114, 396, 40, ExplicitDesignMeeting ?
+                    "닫기 후 수정할 범위를 다시 말하고 오른쪽 A로 해당 부위를 지정하세요." : manual ?
+                    "PC의 이 회의에서 변경할 치수와 값을 입력하세요." :
+                    "변경할 치수를 말한 뒤 ‘수정안 보여줘’라고 하거나 PC에서 답하세요.", SpatialFont(18), SpatialMuted);
+                Button("SpatialCloseComparison", 287, 170, 120, 37, "닫기", CloseSpatialComparison);
+                if (A4PoseApplied) DrawLatestCaption(12, 170, 262, 37);
+                DrawTablePlacementControls(231);
+                return;
             }
-            else
+            var source = TextValue((round?["context"] as JObject)?["utterance"], "text");
+            float rowsY = source.Length > 0 ? 146 : 106;
+            float detailY = rowsY + 4 + candidates.Length * 46;
+            RoundBox("SpatialComparison", content, 0, 58, SpatialWidth, detailY + 53, SpatialBackground, 12);
+            var mode = HasReviewTable ? "책상 위 비교" : "책상 지정 대기";
+            string count = $"수정안 {candidates.Length}개";
+            BoldLabel("SpatialComparisonHeading", content, 12, 64, A4PoseApplied ? 135 : 284, 37,
+                A4PoseApplied ? count : count + " · " + mode, SpatialFont(21), HeaderText);
+            if (A4PoseApplied) DrawLatestCaption(153, 64, 142, 37);
+            Button("SpatialOriginal", 304, 67, 104, 33, "원본", () => { SetMeetingViewedVersion(AssemblyOriginalId); Draw(); }, SpatialComparisonLoadedVersion == AssemblyOriginalId);
+            if (source.Length > 0)
+                Label("SpatialProposalSource", content, 12, 101, 396, 40, TruncateSpatial("요청 · " + source, "", 62), SpatialFont(18), SpatialMuted);
+            for (int i = 0; i < candidates.Length; i++)
             {
-                Button("SpatialOriginal", 12, 69, 91, 38, "원본", () => { SetMeetingViewedVersion(AssemblyOriginalId); Draw(); }, meetingLoadedVersion == AssemblyOriginalId);
-                for (var i = 0; i < candidates.Length; i++)
+                var candidate = candidates[i];
+                var id = TextValue(candidate, "version_id");
+                var title = TruncateSpatial(TextValue(candidate, "title"), TextValue(candidate, "interpretation"), 30);
+                float y = rowsY + i * 46;
+                if (string.IsNullOrEmpty(id) || TextValue(candidate, "status") != "valid")
                 {
-                    var candidate = candidates[i];
-                    var id = TextValue(candidate, "version_id");
-                    if (string.IsNullOrEmpty(id) || TextValue(candidate, "status") != "valid") continue;
-                    Button("SpatialCandidate-" + TextValue(candidate, "candidate_id"), 112 + i * 99, 69, 91, 38, $"{(char)('A' + i)}",
-                        () => { assemblyFeedback = ""; SetMeetingViewedVersion(id); Draw(); }, id == meetingViewedVersion);
+                    Label("SpatialUnavailableCandidate" + i, content, 12, y, 396, 40, $"{(char)('A' + i)}  {title} · 생성 실패", SpatialFont(18), SpatialMuted);
+                    continue;
                 }
-                var line = meetingLoadingVersion != null ? "수정안을 불러오는 중" :
-                    meetingFailedVersion != null && meetingFailedVersion == meetingViewedVersion ? "불러오지 못했습니다. 이전 모델을 유지합니다." :
-                    old ? "이 수정안에는 다시 검토가 필요합니다." :
-                    TextValue(selected, "interpretation");
-                Label("SpatialCandidateInterpretation", content, 12, 112, 396, 54,
-                    TruncateSpatial(line, "같은 장착 위치에서 수정안을 비교하세요.", 65), SpatialFont(19), HeaderText);
-                if (selected != null && !old && meetingLoadedVersion == meetingViewedVersion && !assemblyAdopting && !assemblyStopping)
-                    Button("SpatialAdopt", 12, 176, 229, 37, "이 안 채택", () => AdoptSpatialCandidate(round, selected), true);
-                else if (selected != null && !old && meetingFailedVersion != null && meetingFailedVersion == meetingViewedVersion)
-                    Button("SpatialRetryCandidate", 12, 176, 229, 37, "수정안 다시 불러오기", () =>
-                    {
-                        meetingFailedVersion = null;
-                        QueueMeetingModel(RequestedMeetingVersion());
-                        Draw();
-                    });
-                else if (assemblyAdopting)
-                    Label("SpatialAdopting", content, 12, 176, 229, 37, "채택 확인 중", SpatialFont(18), SpatialMuted);
+                Button("SpatialCandidate-" + TextValue(candidate, "candidate_id"), 12, y, 396, 40, $"{(char)('A' + i)}  {title}",
+                    () => { assemblyFeedback = ""; SetMeetingViewedVersion(id); Draw(); }, id == meetingViewedVersion);
             }
-            Button("SpatialCloseComparison", 287, 176, 120, 37, "닫기", CloseSpatialComparison);
+            var line = SpatialComparisonFailedVersion != null && SpatialComparisonFailedVersion == meetingViewedVersion ? "불러오지 못했습니다. 이전 모델을 유지합니다." :
+                SpatialComparisonLoadingVersion != null ? "비교할 수정안을 불러오는 중" :
+                old ? "이 수정안에는 다시 검토가 필요합니다." : TextValue(selected, "interpretation");
+            Label("SpatialCandidateInterpretation", content, 12, detailY, 396, 52,
+                TruncateSpatial(line, "비교할 수정안을 선택하세요.", 65), SpatialFont(19), HeaderText);
+            var yActions = detailY + 58;
+            if (selected != null && !old && HasReviewTable && IsLocalCandidateVisible(meetingViewedVersion) && !assemblyAdopting && !assemblyStopping)
+                Button("SpatialAdopt", 12, yActions, 150, 39, "이 안 채택", () => AdoptSpatialCandidate(round, selected), true);
+            else if (selected != null && !old && SpatialComparisonFailedVersion != null && SpatialComparisonFailedVersion == meetingViewedVersion)
+                Button("SpatialRetryCandidate", 12, yActions, 150, 39, "다시 불러오기", RetrySpatialComparison);
+            else if (assemblyAdopting)
+                Label("SpatialAdopting", content, 12, yActions, 150, 39, "채택 확인 중", SpatialFont(18), SpatialMuted);
+            if (selected != null && !old)
+                Button("SpatialAdjustCandidate", 174, yActions, 123, 39, "치수 조정", () => BeginCollaborativeEdit(round, selected));
+            Button("SpatialCloseComparison", 309, yActions, 99, 39, "닫기", CloseSpatialComparison);
+            DrawTablePlacementControls(yActions + 45);
+        }
+
+        void HandleCableDemoTarget(string partId)
+        {
+            if (!IsCableDemo || assemblyCompare || CableStage < 1 || CableStage > 2) return;
+            if (CableStage == 1 && partId != "outer_shell") return;
+            RequestCableDemoStage(partId);
+        }
+
+        void RequestCableDemoStage(string partId = null)
+        {
+            if (!IsCableDemo || assemblyCableRequest || !AssemblyActive || CableStage is not (1 or 2) ||
+                meetingSnapshot["cable_demo"]?.Value<bool?>("pending") == true) return;
+            assemblyMenu = false;
+            assemblyCableRequest = true;
+            assemblyFeedback = "대본의 수정안을 여는 중";
+            var body = new JObject { ["sample"] = "cable" };
+            if (!string.IsNullOrEmpty(partId))
+            {
+                body["target_part_id"] = partId;
+                body["target_version_id"] = meetingLoadedVersion;
+            }
+            StartCoroutine(RunAssemblyAction(meetingTransport, "replay", body, (_, error) =>
+            {
+                assemblyCableRequest = false;
+                assemblyFeedback = error ?? "";
+                Draw();
+            }));
+            Draw();
+        }
+
+        IEnumerable<JToken> DesignHistory()
+        {
+            if (IsCableDemo) return Values(meetingSnapshot["cable_demo"], "history");
+            var history = new JArray(new JObject { ["label"] = "V1", ["version_id"] = AssemblyOriginalId, ["what"] = "초기 시제품", ["why"] = "" });
+            foreach (var decision in Values(meetingSnapshot, "decisions"))
+            {
+                var id = TextValue(decision, "selected_model_version_id");
+                if (id.Length == 0) continue;
+                history.Add(new JObject { ["label"] = TextValue(decision, "design_version"), ["version_id"] = id,
+                    ["what"] = TextValue(decision, "candidate_title"), ["why"] = TextValue(decision, "rationale_text") is string reason && reason.Length > 0 ? reason : "선택 이유 미기록" });
+            }
+            return history;
+        }
+
+        void OpenSpatialHistory()
+        {
+            assemblyHistoryPage = 0;
+            assemblyMenu = assemblyClarify = false;
+            assemblyHistory = assemblyCompare = true;
+            assemblyCompareRound = null;
+            var first = DesignHistory().FirstOrDefault();
+            if (first != null) SetMeetingViewedVersion(TextValue(first, "version_id"));
+            Draw();
+        }
+
+        void DrawSpatialHistory()
+        {
+            RoundBox("SpatialHistoryPanel", content, 0, 58, SpatialWidth, 214, SpatialBackground, 12);
+            BoldLabel("SpatialHistoryHeading", content, 12, 65, A4PoseApplied ? 269 : 396, 30,
+                "설계 이력 · 선택하면 옆에 표시", SpatialFont(20), HeaderText);
+            if (A4PoseApplied) DrawLatestCaption(289, 65, 119, 30);
+            var history = DesignHistory().Skip(assemblyHistoryPage * 3).Take(3).ToArray();
+            for (int i = 0; i < history.Length; i++)
+            {
+                var item = history[i];
+                var id = TextValue(item, "version_id");
+                var label = TextValue(item, "label");
+                Button("SpatialHistory-" + label, 12 + 133 * i, 103, 125, 35, label,
+                    () => { SetMeetingViewedVersion(id); Draw(); }, id == meetingViewedVersion);
+            }
+            var selected = history.FirstOrDefault(item => TextValue(item, "version_id") == meetingViewedVersion);
+            Label("SpatialHistoryWhat", content, 12, 146, 396, 30,
+                TruncateSpatial(TextValue(selected, "what"), ""), SpatialFont(20), HeaderText);
+            Label("SpatialHistoryWhy", content, 12, 179, 396, 42,
+                TruncateSpatial(TextValue(selected, "why"), "초기 배치와 치수를 확인합니다.", 60), SpatialFont(17), SpatialMuted);
+            if (assemblyHistoryPage > 0) Button("SpatialHistoryPrev", 12, 230, 92, 34, "이전", () => { assemblyHistoryPage--; Draw(); });
+            if (DesignHistory().Count() > (assemblyHistoryPage + 1) * 3)
+                Button("SpatialHistoryNext", 112, 230, 92, 34, "다음", () => { assemblyHistoryPage++; Draw(); });
+            Button("SpatialHistoryClose", 287, 230, 120, 34, "닫기", CloseSpatialComparison);
         }
 
         void DrawSpatialMenu()
         {
-            RoundBox("SpatialOptions", content, 0, 58, SpatialWidth, 192, SpatialBackground, 12);
-            Button("SpatialMovePanel", 12, 69, 195, 37, "패널 옮기기", () =>
+            RoundBox("SpatialOptions", content, 0, 58, SpatialWidth, 165, SpatialBackground, 12);
+            if (AssemblySessionStatus == "completed")
             {
-                assemblyMenu = false;
-                assemblyPlacingPanel = true;
-                assemblyFeedback = "놓을 방향을 가리키고 트리거를 누르세요.";
-                Draw();
-            });
-            Button("SpatialRealign", 215, 69, 193, 37, "실물 다시 맞추기", () => { assemblyMenu = false; BeginAssemblyAlignment(); });
-            Button("SpatialCaptions", 12, 115, 195, 37, assemblyCaption ? "자막 끄기" : "마지막 발화 보기",
-                () => { assemblyCaption = !assemblyCaption; assemblyMenu = false; Draw(); });
-            Button("SpatialFold", 215, 115, 193, 37, "요약 접기", () => { assemblyCollapsed = true; assemblyMenu = false; Draw(); });
-            if (AssemblyActive)
+                Button("SpatialResult", 12, 72, 188, 40, "결과 ZIP 저장", SaveSpatialResult);
+                Button("SpatialContinue", 212, 72, 194, 40, "후속 작업", ContinueSavedMeeting);
+            }
+            else
             {
-                if (AssemblyRecordingMode == "replay")
-                    Button("SpatialReplayUtterance", 12, 161, 195, 37, "예시 발화 재생", () =>
+                Button("SpatialRealign", 12, 72, 188, 40, "A4로 다시 맞추기", () =>
+                {
+                    assemblyMenu = choosingAlignmentMethod = false;
+                    BeginA4Alignment();
+                });
+                if (AssemblyActive && !IsCableDemo && AssemblyRecordingMode == "replay")
+                    Button("SpatialReplayUtterance", 212, 72, 194, 40, "예시 발화 재생", () =>
                     {
                         assemblyMenu = false;
                         StartCoroutine(RunAssemblyAction(meetingTransport, "replay", new JObject { ["sample"] = "curves" },
-                            (_, error) => { if (error != null) assemblyFeedback = error; }));
-                        Draw();
+                            (_, error) => { assemblyFeedback = error ?? ""; }));
                     });
-                else Button("SpatialPause", 12, 161, 195, 37, AssemblySessionStatus == "paused" ? "회의 종료" : "일시 정지",
-                    () => { assemblyMenu = false; EndSpatialMeeting(AssemblySessionStatus != "paused"); });
+                else Button("SpatialHistory", 212, 72, 194, 40, "설계 이력", OpenSpatialHistory);
             }
-            else if (AssemblyCaptureRequested)
-                Button("SpatialStopArmed", 12, 161, 195, 37, "회의 종료", () => EndSpatialMeeting());
-            else Button("SpatialLeave", 12, 161, 195, 37, "나가기", LeaveMeeting);
-            Button("SpatialMenuClose", 287, 161, 120, 37, "닫기", () => { assemblyMenu = false; Draw(); });
+            Button("SpatialLeave", 12, 126, 188, 39, "회의 목록", LeaveMeeting);
+            Button("SpatialMenuClose", 212, 126, 194, 39, "돌아가기", () => { assemblyMenu = false; Draw(); });
             var code = TextValue(meetingSnapshot, "join_code");
-            Label("SpatialJoinCode", content, 12, 210, 396, 30,
-                string.IsNullOrEmpty(code) ? "왼쪽 컨트롤러 X · 패널 다시 부르기" : "PC 관찰 화면 참가 코드  " + code,
-                SpatialFont(17), SpatialMuted);
+            Label("SpatialJoinCode", content, 12, 177, 396, 35, code.Length > 0 ? "참가 코드  " + code : "왼쪽 컨트롤러 X · 패널 다시 부르기", SpatialFont(18), SpatialMuted);
         }
 
         void ResetSpatialAssembly()
         {
-            assemblyCompare = assemblyMenu = assemblyCollapsed = assemblyCaption = assemblyPlacingPanel = assemblyPanelReady = assemblyRecoveryPanel = false;
+            assemblyCompare = assemblyMenu = movingMeetingPanel = meetingPanelMoved = assemblyPanelReady = assemblyRecoveryPanel = false;
+            showJoinKeypad = false;
+            minutesCode = null;
+            fetchingMinutesCode = savedFollowUpPending = confirmingMeetingEnd = false;
             assemblyClarify = assemblyStarting = assemblyStopping = assemblyAdopting = assemblyResultDownload = assemblyCaptureFrozen = false;
-            assemblyCompareRound = assemblyAdoptedTakesEffect = null;
+            assemblyCompareRound = null;
+            assemblyPrepOpened = false;
+            requireBundleOutput = requireCandidateGeneration = false;
+            choosingAlignmentMethod = tabletopTipTracked = tabletopAHeld = false;
+            ResetA4ProbeStability();
+            explicitTranscriptPage = -1;
             assemblyFeedback = "";
             ReleaseSpatialAudio();
         }

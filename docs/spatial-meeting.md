@@ -9,32 +9,32 @@ Unity 6000.4.0f1, Meta XR Core 209.0.0, OpenXR 1.16.1과 기존 glTFast 로더�
 [OpenSCAD 설치와 실제 모델 등록](openscad-assembly.md)을 마친 뒤 저장소 루트에서 아래 명령을 실행합니다. 처음 실행하는 경우 README에 안내된 가상 환경을 준비합니다.
 
 ```sh
-artifacts/meeting-venv/bin/python -m backend.meeting assembly
+MEETING_STT_BACKEND=local MEETING_PLAN_BACKEND=registered python3 scripts/relay.py server
 ```
 
-직접 라이브 음성을 사용하려면 PC에 `AI_MODE=live`, `AI_API_KEY`, `AI_TRANSCRIPTION_MODEL`, `AI_PLANNER_MODEL`을 설정합니다. 기본 실행은 **예시 진행**이며 발화 예시 또는 직접 입력을 사용할 수 있습니다. OpenSCAD의 모델 생성은 가상 재생에서도 실제로 실행됩니다.
+이 명령은 PC의 한국어 faster-whisper 모델과 케이블 정리대 등록 치수 플래너를 사용하는 실시간 서버를 엽니다. PC에 필요한 로컬 모델 준비 및 외부 공급자 선택 방법은 README를 참고합니다. 대본 예시도 사용할 때는 별도 터미널에서 `python3 scripts/relay.py replay-server`를 실행합니다. [서버 설정](../README.md)
 
 | 장치 | 여는 방법 |
 | --- | --- |
-| PC | [회의 보조 화면](http://127.0.0.1:8788/meeting/) |
-| Meta XR Simulator | `python3 scripts/relay.py simulator` → **3D 설계 회의** |
-| Meta Quest | `python3 scripts/relay.py build` 및 `python3 scripts/relay.py deploy` → **3D 설계 회의** |
+| PC | [실시간 회의](http://127.0.0.1:8789/meeting/) · [대본 시연](http://127.0.0.1:8788/meeting/) |
+| Meta XR Simulator | `python3 scripts/relay.py simulator` |
+| Meta Quest | `python3 scripts/relay.py build` 후 `python3 scripts/relay.py deploy` |
 
-USB Quest 연결에는 개발자 모드와 USB 디버깅 허용이 필요합니다. `deploy`는 앱 설치와 8788 포트 전달을 수행합니다. PC 웹에서 마이크를 사용할 경우 localhost 또는 신뢰된 HTTPS에서 화면을 엽니다. PC는 헤드셋과 같은 회의에 참가할 수 있습니다.
+USB Quest 연결에는 개발자 모드와 USB 디버깅 허용이 필요합니다. `deploy`가 앱을 설치·실행하고 8789와 8788 포트를 전달합니다. PC 웹에서 마이크를 사용할 때는 localhost 또는 신뢰된 HTTPS에서 회의를 엽니다.
 
 ## 진행
 
-1. 조립체를 고정합니다. 헤드셋에서 원점, +X, +Y 기준점을 지정하고 반투명 원본을 보고 실물과 일치하는지 확인합니다. 패널은 조립체 옆에 놓아두며, **더 보기**에서 한 번 이동할 수 있습니다. 왼쪽 컨트롤러 X로 패널을 다시 불러옵니다. 고정 조립체나 기준판을 움직였으면 재정렬합니다.
-2. **회의 시작**을 누릅니다. 지정한 기기 하나가 PCM 오디오를 연속 제공합니다. 첫 프레임 수신 이후에 녹음 상태가 표시됩니다. PC 마이크 사용 시 PC에서 권한을 부여하고 지정된 마이크를 시작합니다. 확정된 발화가 수집되는 동안 최근 전사를 필요할 때만 표시할 수 있습니다.
-3. 수정안이 준비되었다는 조용한 표시가 나오면 비교를 엽니다. 한 번에 하나의 형상을 봅니다. PC에는 공유된 후보 번호가 나타납니다. **이 안 채택**으로 서버에 버전을 기록합니다. 이유는 PC에서 직접 쓰거나 기존 확정 발화에서 연결할 수 있습니다. 화면만 전환하면 미리보기로 남습니다.
-4. **회의 종료**로 채택본을 고정합니다. 마지막 오디오를 닫고 확정 전사를 모은 뒤 파일을 저장합니다. 추적을 잃은 경우에도 종료 조작이 보입니다.
-5. **저장됨**에서 PC의 전체 결과를 열거나 헤드셋에서 **결과 ZIP 받기**를 누릅니다. PC 결과는 같은 회의에 참가한 브라우저에서 인증된 상태로 열립니다. 헤드셋은 기기의 앱 저장소 `MeetingExports/`에 ZIP을 저장합니다.
+1. 헤드셋에서 **회의 시작**을 누르고 마이크 권한을 허용합니다. 이미 PC에서 연 회의가 있다면 첫 화면에서 참가 QR을 읽거나 여섯 자리 코드를 입력합니다.
+2. 새 실시간 회의에서는 빈 A4를 책상 위에 놓고 몸에서 가까운 왼쪽부터 앞왼쪽, 앞오른쪽, 뒤오른쪽, 뒤왼쪽 순서로 오른손 표시점을 대고 **A**를 누릅니다. 실물은 종이 중앙에 두고, 오른쪽 앞에 나타난 가상 Latest의 바닥과 방향을 확인한 뒤 **배치 확인**을 누릅니다. 새로 채택한 버전도 같은 오른쪽 앞 자리에 놓입니다. 종이나 책상을 움직였으면 다시 등록합니다. 재등록한 위치에서도 최신 버전을 이어서 봅니다. 고정 카드를 쓰는 현장은 다른 정렬 방법에서 QR을 선택할 수 있습니다. [정렬 카드 인쇄와 배치](cable-demo.md#qr-설치)
+3. 패널은 언제든지 옮길 수 있습니다. 위쪽 **잡고 옮기기**에 컨트롤러 광선을 대고 트리거를 누른 채 패널을 옮긴 후 놓습니다. 데스크톱에서는 마우스 왼쪽 버튼으로 끕니다. 공간 회의에서는 왼쪽 컨트롤러 X로 패널을 다시 부를 수 있습니다.
+4. **수정 요청 시작**을 누르고 변경할 내용을 말한 뒤 **발언 완료**를 누릅니다. 확정 전사가 뜨면 오른쪽 앞 가상 Latest의 해당 부위를 가리키고 A를 누릅니다. 패널의 **수정 요청 저장 완료**를 확인합니다.
+5. 상태 버튼의 **종료**를 누르면 오디오를 닫고 전사와 채택본을 저장합니다. **PC에서 회의록 받기**를 눌러 받은 10자리 코드를 같은 서버의 PC 시작 화면 **회의록 받기**에 입력합니다. 코드의 유효 시간은 10분입니다. PC 결과 화면에서도 **전체 회의록 TXT**를 받을 수 있습니다. CAD와 이전 버전이 포함된 ZIP은 PC 결과 화면이나 Quest **메뉴 → 결과 ZIP 저장**에서 받습니다. Quest 저장 폴더는 앱 저장소의 `MeetingExports/`입니다.
 
 헤드셋 패널 기본값은 폭 0.32m, 거리 1.15m, 글자 배율 1입니다. 기존 `Assets/Resources/relay-local.json`에서 `meetingPanelWidthMeters`, `meetingPanelDistanceMeters`, `meetingPanelTextScale`을 조정할 수 있습니다.
 
 ## 결과와 재현
 
-PC의 기본 저장 경로는 `artifacts/assembly/results/<회의 ID>/<저장 디렉터리>/`입니다. `EDGE_DATA_DIR`를 사용하면 해당 폴더의 `results/`로 옮겨집니다.
+회의 결과는 PC의 `EDGE_DATA_DIR/results/<회의 ID>/<저장 디렉터리>/`에 저장됩니다. `scripts/relay.py server`의 기본 실시간 데이터 폴더는 `artifacts/cable-live/`입니다.
 
 - `manifest.json`에 확정 채택 버전과 저장 상태, 파일 해시, 전사 누락을 기록합니다. 늦은 전사가 도착하거나 정정하면 같은 CAD를 참조하는 다음 개정본을 저장합니다.
 - `transcript.txt`, `transcript.jsonl`, `summary.md`, `decisions.json`에서 전체 전사, 발화 ID, 수정 해석과 채택 이유를 확인합니다.

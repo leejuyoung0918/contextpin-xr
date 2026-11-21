@@ -7,6 +7,8 @@ namespace ContextPin
     public sealed class RelayHit : MonoBehaviour
     {
         public Action clicked;
+        public Action<Vector3> pointClicked, dragged;
+        public string meetingVersion;
         public Image background;
         public GameObject focus;
         public Color resting;

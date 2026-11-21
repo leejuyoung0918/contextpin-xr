@@ -18,6 +18,8 @@ namespace ContextPin
         readonly CancellationTokenSource lifetime = new CancellationTokenSource();
         readonly AudioClip clip;
         readonly int packetFrames;
+        Task<string> stopReply;
+        public bool ServerEnded => stopReply?.IsCompleted == true;
         int writePosition, readPosition, available;
         uint sequence;
         ulong sample;
@@ -35,6 +37,20 @@ namespace ContextPin
             await socket.ConnectAsync(endpoint, deadline.Token).ConfigureAwait(false);
             await SendText(handshake, deadline.Token).ConfigureAwait(false);
             await Expect("ready", deadline.Token).ConfigureAwait(false);
+            // A pending receive lets Mono process WebSocket pings throughout the recording.
+            // The next application reply after "ready" is "stopped" or a server error.
+            stopReply = ReceiveStopReply(lifetime.Token);
+        }
+
+        async Task<string> ReceiveStopReply(CancellationToken token)
+        {
+            try
+            {
+                await Expect("stopped", token).ConfigureAwait(false);
+                return null;
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch (Exception error) { return error.Message; }
         }
 
         public bool ObservePosition(int position)
@@ -80,17 +96,45 @@ namespace ContextPin
             await socket.SendAsync(new ArraySegment<byte>(packet), WebSocketMessageType.Binary, true, deadline.Token).ConfigureAwait(false);
         }
 
-        public async Task Finish(Task inFlight, IReadOnlyList<byte[]> tail)
+        // Called on Unity's main thread to freeze the microphone cursor at the button press.
+        // Only this PCM owner reads the ring. Network sends remain serialized with ordinary frames.
+        public Task MarkSpeech(Task inFlight, string rangeId, bool start, int microphonePosition, string baseVersionId = null)
+        {
+            if (microphonePosition < 0 || microphonePosition >= clip.samples)
+                throw new InvalidOperationException("마이크의 현재 샘플 위치를 읽을 수 없습니다.");
+            ObservePosition(microphonePosition);
+            var tail = new List<byte[]>();
+            while (ReadPacket(flush: true) is byte[] packet) tail.Add(packet);
+            var marker = new JObject
+            {
+                ["type"] = "design_speech_boundary", ["range_id"] = rangeId,
+                ["edge"] = start ? "start" : "end", ["sample_index"] = (long)sample
+            };
+            if (!string.IsNullOrEmpty(baseVersionId)) marker["base_version_id"] = baseVersionId;
+            return SendBoundary(inFlight, tail, marker);
+        }
+
+        async Task SendBoundary(Task inFlight, List<byte[]> tail, JObject marker)
         {
             if (inFlight != null) await inFlight.ConfigureAwait(false);
+            foreach (var packet in tail) await Send(packet).ConfigureAwait(false);
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
-            deadline.CancelAfter(TimeSpan.FromSeconds(12));
+            deadline.CancelAfter(TimeSpan.FromSeconds(8));
+            await SendText(marker, deadline.Token).ConfigureAwait(false);
+        }
+
+        public async Task Finish(Task inFlight, IReadOnlyList<byte[]> tail)
+        {
+            var token = lifetime.Token;
+            lifetime.CancelAfter(TimeSpan.FromSeconds(12));
+            if (inFlight != null) await inFlight.ConfigureAwait(false);
             foreach (var packet in tail)
-                await socket.SendAsync(new ArraySegment<byte>(packet), WebSocketMessageType.Binary, true, deadline.Token).ConfigureAwait(false);
+                await socket.SendAsync(new ArraySegment<byte>(packet), WebSocketMessageType.Binary, true, token).ConfigureAwait(false);
             var end = new JObject { ["type"] = "stop" };
             if (sequence > 0) end["last_sequence"] = sequence - 1;
-            await SendText(end, deadline.Token).ConfigureAwait(false);
-            await Expect("stopped", deadline.Token).ConfigureAwait(false);
+            await SendText(end, token).ConfigureAwait(false);
+            var error = await stopReply.ConfigureAwait(false);
+            if (error != null) throw new IOException(error);
         }
 
         Task SendText(JObject value, CancellationToken token) => socket.SendAsync(

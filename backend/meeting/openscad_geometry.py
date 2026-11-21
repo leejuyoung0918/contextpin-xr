@@ -43,6 +43,30 @@ def _is_number(value):
     return type(value) in (int, float) and -1e9 <= value <= 1e9
 
 
+def _mount_pose(value):
+    if not isinstance(value, dict):
+        raise ValueError()
+    position, rotation = value["position_m"], value["rotation_xyzw"]
+    if (not isinstance(position, list) or len(position) != 3 or not all(_is_number(x) for x in position)
+            or not isinstance(rotation, list) or len(rotation) != 4 or not all(_is_number(x) for x in rotation)
+            or not math.isclose(math.hypot(*rotation), 1, abs_tol=1e-5)):
+        raise ValueError()
+    return {"position_m": position, "rotation_xyzw": rotation}
+
+
+def _qr_alignment(value):
+    if value is None:
+        return None
+    try:
+        payload = value["payload"]
+        if (not isinstance(payload, str) or payload.strip() != payload or not payload.isprintable()
+                or not 1 <= len(payload.encode("utf-8")) <= 128):
+            raise ValueError()
+        return {"payload": payload, "mounting": _mount_pose(value["mounting"])}
+    except (KeyError, TypeError, ValueError) as error:
+        raise GeometryError("QR 정렬 설정의 payload와 장착 위치 및 회전을 확인해 주세요.") from error
+
+
 def _file_info(data):
     return {"sha256": digest(data), "size_bytes": len(data)}
 
@@ -129,7 +153,9 @@ class OpenScadAdapter(ModelAdapter):
             self.config = json.loads(config_path.read_text(encoding="utf-8"))
             self.sources = self.read_sources()
             self.guard = self.config["coupling_guard"]
-            self.mounting = self.config["mounting"]
+            self.mounting = _mount_pose(self.config["mounting"])
+            self.qr_alignment = _qr_alignment(self.config.get("qr_alignment"))
+            self.fixed_parameters = self.config.get("fixed_parameters", {})
             self.check_assembly()
             self.check_source()
         except GeometryError:
@@ -164,16 +190,16 @@ class OpenScadAdapter(ModelAdapter):
                 or not isinstance(config["preserved_conditions"], list)
                 or not all(isinstance(label, str) for label in config["preserved_conditions"])):
             raise ValueError()
-        for field, size in (("position_m", 3), ("rotation_xyzw", 4)):
-            vector = self.mounting[field]
-            if not isinstance(vector, list) or len(vector) != size or not all(_is_number(x) for x in vector):
-                raise ValueError()
-        if not math.isclose(math.hypot(*self.mounting["rotation_xyzw"]), 1, abs_tol=1e-5):
-            raise ValueError()
         guard = self.guard
         if (guard["axis"] not in AXES or guard["side"] not in {"below", "above"}
                 or not _is_number(guard["limit_mm"]) or not _is_number(guard["tolerance_mm"])
                 or not 0.0001 <= guard["tolerance_mm"] <= 0.01):
+            raise ValueError()
+        if guard.get("method", "original_faces") not in {"original_faces", "clipped_solid", "clipped_convex_prism"}:
+            raise ValueError()
+        scripted_demo = config.get("scripted_demo")
+        if scripted_demo is not None and (not isinstance(scripted_demo, str)
+                                          or not re.fullmatch(r"[a-z_]{1,32}", scripted_demo)):
             raise ValueError()
         profile = config["profile"]
         parts = [item["part_id"] for item in profile["semantic_parts"]]
@@ -183,6 +209,15 @@ class OpenScadAdapter(ModelAdapter):
             raise ValueError()
         fields = profile["parameters"]
         if not 1 <= len(fields) <= 20 or len({item["parameter_id"] for item in fields}) != len(fields):
+            raise ValueError()
+        editable = {item["parameter_id"] for item in fields}
+        if (not isinstance(self.fixed_parameters, dict) or editable.intersection(self.fixed_parameters)
+                or any(not PARAMETER_NAME.fullmatch(key) or not _is_number(value)
+                       for key, value in self.fixed_parameters.items())):
+            raise ValueError()
+        varying = guard.get("vary_parameters", [])
+        if (not isinstance(varying, list) or any(not isinstance(item, str) or item not in editable for item in varying)
+                or len(varying) != len(set(varying))):
             raise ValueError()
         for item in fields:
             if (not PARAMETER_NAME.fullmatch(item["parameter_id"]) or item["affected_part_ids"] != [self.outer_part]
@@ -201,8 +236,10 @@ class OpenScadAdapter(ModelAdapter):
         original = self.config["source_file"]
         self.original_text = self.sources[original].decode("utf-8")
         defaults = default_parameters(self.config["profile"])
+        parameter_defaults = {**defaults, **self.fixed_parameters}
         main_tokens = _tokens(self.original_text)
-        self.parameter_edits = _literal_edits(main_tokens, defaults)
+        self.parameter_edits = {name: span for name, span in _literal_edits(main_tokens, parameter_defaults).items()
+                                if name in defaults}
         self.resolved_entry = str(Path(original).with_name("candidate.scad"))
         if self.resolved_entry != original and self.resolved_entry in self.sources:
             raise GeometryError("candidate.scad 파일 이름은 실행 가능한 수정안에 사용됩니다.")
@@ -213,7 +250,7 @@ class OpenScadAdapter(ModelAdapter):
             if (name, shares_globals) in checked:
                 continue
             checked.add((name, shares_globals))
-            if name != original and shares_globals and _assignments(tokens, defaults):
+            if name != original and shares_globals and _assignments(tokens, parameter_defaults):
                 raise GeometryError("편집할 OpenSCAD 매개변수의 최상위 선언은 원본 진입 파일 하나에만 두세요.")
             for dependency_kind, target in _static_assets(tokens):
                 path = posixpath.normpath(posixpath.join(posixpath.dirname(name), target))
@@ -226,12 +263,31 @@ class OpenScadAdapter(ModelAdapter):
         config = self.config
         profile = dict(config["profile"])
         source = {name: digest(data) for name, data in self.sources.items()}
-        source_hash = digest(json_bytes({"assembly": config, "sources": source}))
+        # Alignment and approved comparison ranges do not change the CAD source.
+        # Older sessions retain their own profile snapshot and source identity.
+        cad_config = {key: value for key, value in config.items() if key not in {"qr_alignment", "comparison_maxima"}}
+        source_hash = digest(json_bytes({"assembly": cad_config, "sources": source}))
+        maxima = config.get("comparison_maxima", {})
+        if maxima:
+            fields = {f["parameter_id"]: f for f in profile["parameters"]}
+            if not isinstance(maxima, dict) or any(
+                key not in fields or fields[key]["type"] != "number" or not _is_number(value)
+                or value < fields[key]["default_value"] for key, value in maxima.items()
+            ):
+                raise ValueError("비교 치수 상한이 유효하지 않습니다.")
+            profile["parameters"] = [{**f, "max_value": max(f["max_value"], maxima.get(f["parameter_id"], f["max_value"]))}
+                                     if f["parameter_id"] in maxima else f for f in profile["parameters"]]
         public_assembly = {key: config[key] for key in ("display_name", "is_demo", "preserved_conditions")}
-        public_assembly.update(mode="openscad", mounting={key: self.mounting[key] for key in ("position_m", "rotation_xyzw")},
+        public_assembly.update(mode="openscad", mounting=self.mounting,
                                fixed_part_id=self.mount_part, editable_part_id=self.outer_part,
                                object_1={"display_name": config["object_1"]["display_name"]},
                                object_2={"display_name": config["object_2"]["display_name"]})
+        if self.qr_alignment is not None:
+            public_assembly["qr_alignment"] = self.qr_alignment
+        if self.fixed_parameters:
+            public_assembly["fixed_parameters"] = self.fixed_parameters
+        if config.get("scripted_demo"):
+            public_assembly["scripted_demo"] = config["scripted_demo"]
         profile.update(object_id="object_2", display_name=config["object_2"]["display_name"], design_units="mm",
                        capabilities={name: True for name in ("can_view", "can_annotate", "can_parametric_edit", "can_export_stl")},
                        source_hash=source_hash, source_asset_id="source_" + source_hash, assembly=public_assembly,
@@ -246,6 +302,12 @@ class OpenScadAdapter(ModelAdapter):
         result = super().validate_parameters(profile, params)
         if any(type(value) in (int, float) and not _is_number(value) for value in result.values()):
             raise GeometryError("OpenSCAD 수치는 유한한 값이어야 합니다.")
+        from .parameter_relations import validate_relations
+        from .contracts import MeetingError
+        try:
+            validate_relations(profile, result)
+        except MeetingError as error:
+            raise GeometryError(str(error)) from error
         return result
 
     def build(self, params):
@@ -296,6 +358,18 @@ def adapter():
     return OpenScadAdapter(Path(os.environ.get("OPENSCAD_ASSEMBLY_CONFIG") or SAMPLE).expanduser().resolve())
 
 
+def adapter_for_source(source_hash):
+    model = adapter()
+    if model.describe()["source_hash"] == source_hash:
+        return model
+    legacy = model.config.get("previous_assembly_config")
+    if isinstance(legacy, str) and Path(legacy).name == legacy and legacy:
+        old = OpenScadAdapter(model.profile_path.with_name(legacy))
+        if old.describe()["source_hash"] == source_hash:
+            return old
+    raise GeometryError("등록된 SCAD 원본이나 조립체 설정이 변경됐습니다. 새 회의를 시작해 주세요.")
+
+
 def load_profile():
     return adapter().describe()
 
@@ -323,7 +397,7 @@ def _environment():
 @lru_cache(maxsize=4)
 def _version(path, _modified_at):
     try:
-        result = subprocess.run([path, "--version"], env=_environment(), capture_output=True, timeout=10, check=True)
+        result = subprocess.run([path, "--version"], env=_environment(), capture_output=True, timeout=30, check=True)
     except (OSError, subprocess.SubprocessError) as exc:
         raise GeometryError("OpenSCAD CLI를 시작하지 못했습니다. 실행 파일을 확인해 주세요.") from exc
     match = re.search(rb"OpenSCAD version\s+([^\r\n]+)", result.stdout + result.stderr)
@@ -357,22 +431,28 @@ def _render(path, entry, artifact, deadline, cancelled):
     return artifact.read_bytes()
 
 
-def _convert(stl, model):
+def _stl_faces(stl):
     if len(stl) < 84:
         raise GeometryError("OpenSCAD 출력에서 바이너리 STL 헤더를 읽을 수 없습니다.")
     count = struct.unpack_from("<I", stl, 80)[0]
     if count < 4 or len(stl) != 84 + 50 * count:
         raise GeometryError("OpenSCAD 출력과 바이너리 STL 삼각형 수가 일치하지 않습니다.")
-    vertices = []
-    ids = {}
-    original = []
-    parts = {model.mount_part: [], model.outer_part: []}
+    faces = []
     for index in range(count):
         coords = struct.unpack_from("<9f", stl, 96 + index * 50)
         face = tuple(zip(coords[::3], coords[1::3], coords[2::3]))
         if not all(_is_number(component) for point in face for component in point):
             raise GeometryError("OpenSCAD 출력에 유효하지 않은 좌표가 있습니다.")
-        original.append(face)
+        faces.append(face)
+    return faces
+
+
+def _convert(stl, model):
+    original = _stl_faces(stl)
+    vertices = []
+    ids = {}
+    parts = {model.mount_part: [], model.outer_part: []}
+    for face in original:
         indices = []
         for x, y, z in face:
             point = (x, z, -y)  # Inverse of canonical-to-STL rotation, preserving the CAD origin.
@@ -408,13 +488,81 @@ def _surface_hash(faces):
     return checksum.hexdigest()
 
 
+def _prism_hash(faces, guard):
+    """Certify the exported solid is a filled convex prism, independent of coplanar subdivision."""
+    axis, tol = AXES[guard["axis"]], guard["tolerance_mm"]
+    u, v = [i for i in range(3) if i != axis]
+    verts = {p for tri in faces for p in tri}
+    low, high = min(p[axis] for p in verts), max(p[axis] for p in verts)
+    footprint = sorted({(p[u], p[v]) for p in verts if abs(p[axis] - low) < tol})
+    def cross(a, b, c):
+        return (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0])
+    def chain(points):
+        half = []
+        for p in points:
+            while len(half) > 1 and cross(half[-2], half[-1], p) <= 1e-10:
+                half.pop()
+            half.append(p)
+        return half[:-1]
+    hull = chain(footprint) + chain(reversed(footprint))
+    if high-low <= tol or len(hull) < 3:
+        raise GeometryError("고정 결합 영역에서 각기둥 단면을 확인할 수 없습니다.")
+    edges = [(p, q, math.dist(p, q)) for p, q in zip(hull, hull[1:] + hull[:1])]
+    area = sum(cross((0, 0), p, q) for p, q, _ in edges)/2
+    caps = [0., 0.]
+    for face in faces:
+        xy = [(p[u], p[v]) for p in face]
+        if all(abs(p[axis]-low) <= tol for p in face):
+            caps[0] += abs(cross(*xy))/2
+        elif all(abs(p[axis]-high) <= tol for p in face):
+            caps[1] += abs(cross(*xy))/2
+        elif not any(all(abs(cross(a,b,p)) <= tol*length
+                         and min(a[0],b[0])-tol <= p[0] <= max(a[0],b[0])+tol
+                         and min(a[1],b[1])-tol <= p[1] <= max(a[1],b[1])+tol for p in xy)
+                     for a,b,length in edges):
+            raise GeometryError("고정 결합 단면에 내부 구멍 또는 변형된 측면이 있습니다.")
+    if any(abs(cap-area) > tol*sum(length for _,_,length in edges) for cap in caps):
+        raise GeometryError("고정 결합 단면의 면적이 달라졌습니다.")
+    return digest(json_bytes([round(low/tol), round(high/tol), [[round(x/tol),round(y/tol)] for x,y in hull]]))
+
+
+def _protected_region(path, work, stl, faces, guard, deadline, cancelled):
+    if guard.get("method") not in {"clipped_solid", "clipped_convex_prism"}:
+        return _guard(faces, guard)
+    # Clip the exported model so upper slot changes cannot alter a lower-region
+    # comparison solely by changing the tessellation of tall side faces.
+    limits = bounds([vertex for face in faces for vertex in face])
+    lower = [value - 1 for value in limits["min"]]
+    upper = [value + 1 for value in limits["max"]]
+    axis = AXES[guard["axis"]]
+    if guard["side"] == "below":
+        upper[axis] = guard["limit_mm"]
+    else:
+        lower[axis] = guard["limit_mm"]
+    size = [end - start for start, end in zip(lower, upper)]
+    if any(value <= 0 for value in size):
+        raise GeometryError("바닥 보호 영역이 실제 모델 범위에 없습니다.")
+    work.mkdir()
+    (work / "candidate.stl").write_bytes(stl)
+    source = work / "guard.scad"
+    source.write_text(
+        'intersection() {\n'
+        '    import("candidate.stl");\n'
+        f'    translate({json.dumps(lower)}) cube({json.dumps(size)});\n'
+        '}\n',
+        encoding="ascii",
+    )
+    clipped = _stl_faces(_render(path, source, work / "fixed.stl", deadline, cancelled))
+    return {"triangle_count": len(clipped), "sha256": _prism_hash(clipped, guard)
+            if guard.get("method") == "clipped_convex_prism" else _surface_hash(clipped)}
+
+
 def build_model(root, version_id, profile, params, constraints=(), *, cancelled=None):
+    started = time.monotonic()
     if not isinstance(version_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", version_id):
         raise GeometryError("모델 버전 ID가 유효하지 않습니다.")
-    model = adapter()
+    model = adapter_for_source(profile["source_hash"])
     current = model.describe()
-    if current["source_hash"] != profile["source_hash"]:
-        raise GeometryError("등록된 SCAD 원본이나 조립체 설정이 변경됐습니다. 새 회의를 시작해 주세요.")
     params = model.validate_parameters(current, params)
     path = executable()
     root = Path(root).resolve()
@@ -434,29 +582,57 @@ def build_model(root, version_id, profile, params, constraints=(), *, cancelled=
             render_key = (*cache_key, digest(source))
             with _cache_lock:
                 cached = _rendered.get(render_key)
-            stl = cached if cached is not None else _render(path, entry, sandbox / "candidate.stl", deadline, cancelled)
+            if cached is None:
+                stl = _render(path, entry, sandbox / "candidate.stl", deadline, cancelled)
+                fixed_region = None
+            else:
+                stl, fixed_region = cached
             mesh, faces = _convert(stl, model)
-            guard = _guard(faces, model.guard)
             shape = _surface_hash(faces)
             initial = default_parameters(current)
-            if params != initial:
+            allowed_variations = {key: params[key] for key in model.guard.get("vary_parameters", [])}
+            reference = {**initial, **allowed_variations}
+            baseline_key = (*cache_key, digest(model.resolve(reference)))
+            if fixed_region is None:
+                fixed_region = _protected_region(path, sandbox / "guard", stl, faces, model.guard, deadline, cancelled)
+            if params != reference:
                 with _cache_lock:
-                    baseline = _baselines.get(cache_key)
+                    baseline = _baselines.get(baseline_key)
                 if baseline is None:
-                    original_entry = model.write_source(sandbox / "baseline", model.resolve(initial))
+                    original_entry = model.write_source(sandbox / "baseline", model.resolve(reference))
                     original = _render(path, original_entry, sandbox / "original.stl", deadline, cancelled)
-                    _, original_faces = _convert(original, model)
-                    baseline = (_guard(original_faces, model.guard), _surface_hash(original_faces))
-                    _cache_set(_baselines, cache_key, baseline)
-                if baseline[0] != guard:
+                    original_faces = _stl_faces(original)
+                    baseline_region = _protected_region(path, sandbox / "baseline_guard", original, original_faces,
+                                                        model.guard, deadline, cancelled)
+                    baseline = (baseline_region, _surface_hash(original_faces))
+                    _cache_set(_baselines, baseline_key, baseline)
+                if baseline[0]["sha256"] != fixed_region["sha256"]:
                     raise GeometryError("수정안이 고정 결합 영역을 변경했습니다. 이 후보는 표시하지 않습니다.")
                 if baseline[1] == shape:
                     raise GeometryError("매개변수 값을 바꿨지만 실제 OpenSCAD 형상이 동일합니다.")
+            elif params != initial:
+                # The registered variation itself may change the base length. Make
+                # sure it changes actual geometry even if no other edit was made.
+                initial_key = (*cache_key, digest(model.resolve(initial)))
+                with _cache_lock:
+                    initial_result = _baselines.get(initial_key)
+                if initial_result is None:
+                    initial_entry = model.write_source(sandbox / "initial", model.resolve(initial))
+                    initial_stl = _render(path, initial_entry, sandbox / "initial.stl", deadline, cancelled)
+                    initial_shape = _surface_hash(_stl_faces(initial_stl))
+                else:
+                    initial_shape = initial_result[1]
+                if initial_shape == shape:
+                    raise GeometryError("장착 예외 값을 바꿨지만 실제 OpenSCAD 형상이 동일합니다.")
+            guard = {**fixed_region, "baseline_parameters": allowed_variations} if allowed_variations else fixed_region
             result = _register(sandbox, root, version_id, model, current, params, constraints, mesh, stl, guard,
-                               shape, engine, source, deadline, cancelled)
-            _cache_set(_rendered, render_key, stl)
-            if params == initial:
-                _cache_set(_baselines, cache_key, (guard, shape))
+                               shape, engine, source, deadline, cancelled,
+                               {"source": "cache" if cached is not None else "openscad",
+                                "cache_key": digest(json_bytes(render_key)), "engine": engine,
+                                "elapsed_ms": round((time.monotonic() - started) * 1000)})
+            _cache_set(_rendered, render_key, (stl, fixed_region))
+            if params == reference:
+                _cache_set(_baselines, baseline_key, (fixed_region, shape))
             return result
     finally:
         _slots.release()
@@ -466,12 +642,12 @@ def _cache_set(entries, key, value):
     with _cache_lock:
         entries[key] = value
         entries.move_to_end(key)
-        while len(entries) > 4:
+        while len(entries) > 12:
             entries.popitem(last=False)
 
 
 def _register(sandbox, root, version, model, profile, params, constraints, mesh, stl, guard, shape, engine,
-              source, deadline, cancelled):
+              source, deadline, cancelled, provenance):
     report = inspect_mesh(mesh)
     measured = model.measure(mesh)
     violations = violated_constraints(profile, measured, constraints)
@@ -493,6 +669,7 @@ def _register(sandbox, root, version, model, profile, params, constraints, mesh,
     resolved_archive = model.resolved_archive(source)
     build = {
         "schema_version": 1, "engine": engine,
+        "geometry_provenance": provenance,
         "source_hash": profile["source_hash"], "original_entry": original_entry,
         "resolved_entry": model.resolved_entry, "input_path": model.resolved_entry,
         "argument_template": [*STL_ARGUMENTS, "-o", "<output.stl>", model.resolved_entry],
@@ -535,6 +712,7 @@ def _register(sandbox, root, version, model, profile, params, constraints, mesh,
             "design_units": "mm", "full_parameters": params, "bounds_mm": report["bounds_mm"],
             "bounds_m": report["bounds_m"], "measured_dimensions_mm": measured, "geometry_hash": geometry_hash, "surface_sha256": shape,
             "build_mode": "generated", "engine": engine, "assets": assets, "candidate_input_path": model.resolved_entry,
+            "geometry_provenance": provenance,
             "preview_asset_id": assets["preview.glb"]["asset_id"], "stl_asset_id": assets["print.stl"]["asset_id"],
             "semantic_part_map_asset_id": assets["semantic_parts.json"]["asset_id"],
             "validation_report_asset_id": assets["geometry_report.json"]["asset_id"]}

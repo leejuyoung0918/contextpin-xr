@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ContextPin Trace development commands. Run from any working directory."""
+"""ContextPin XR meeting development commands. Run from any working directory."""
 import argparse
 import datetime
 import json
@@ -15,11 +15,13 @@ import time
 import urllib.error
 import urllib.request
 
-from transfer_report import collect_report
 
 ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from backend.meeting.bundle_provider import configure_pc
+
 PROJECT=ROOT/'ContextPinRelay'
-APK=ROOT/'builds/ContextPinTrace.apk'
+APK=ROOT/'builds/ContextPinXR.apk'
 XR_SIM=Path('/Applications/MetaXRSimulator.app/Contents/Resources/MetaXRSimulator')
 
 def simulator_env():
@@ -90,31 +92,63 @@ def device(serial=None):
     if 'Quest' not in model:raise SystemExit('Quest가 아닌 기기에는 설치하지 않습니다: '+model)
     return [adb(),'-s',serial]
 
-def server_env():
-    # Parse a small dotenv file as data; do not execute shell commands from it.
-    allowed={'AI_BASE_URL','AI_API_KEY','AI_VISION_MODEL','AI_TRANSCRIPTION_MODEL','RELAY_PORT','RELAY_DATA_DIR'}
-    env=os.environ.copy()
-    file=ROOT/'backend/.env'
-    if file.exists():
-        for line in file.read_text().splitlines():
-            if not line.strip() or line.lstrip().startswith('#') or '=' not in line:continue
-            key,value=line.split('=',1);key=key.strip()
-            if key in allowed:env[key]=value.strip().strip('\"\'')
+def meeting_python():
+    local = ROOT / 'artifacts/meeting-venv/bin/python'
+    return str(local) if local.is_file() else sys.executable
+
+
+def meeting_env(load_settings=True):
+    env = os.environ.copy()
+    dotenv = ROOT / 'backend/.env'
+    if load_settings and dotenv.is_file():
+        for line in dotenv.read_text().splitlines():
+            if not line.strip() or line.lstrip().startswith('#') or '=' not in line:
+                continue
+            key, value = line.split('=', 1)
+            key = key.strip()
+            if key.startswith(('EDGE_', 'MEETING_', 'OPENSCAD_')) and key not in (
+                    'MEETING_TEAM_API_KEY', 'MEETING_TEAM_MODEL', 'MEETING_BUNDLE_API_KEY'):
+                env.setdefault(key, value.strip().strip(chr(34) + chr(39)))
+    executable = ROOT / 'artifacts/tools/OpenSCAD.app/Contents/MacOS/OpenSCAD'
+    if executable.is_file():
+        env.setdefault('OPENSCAD_EXECUTABLE', str(executable))
     return env
 
-def relay_port(env):
-    try:
-        port = int(env.get('RELAY_PORT', '8787'))
-        if 1 <= port <= 65535:
-            return port
-    except ValueError:
-        pass
-    raise SystemExit('RELAY_PORT는 1–65535 사이의 포트 번호여야 합니다.')
 
-def server():
-    env=server_env()
-    print(f'교수 PC · http://127.0.0.1:{relay_port(env)}/teacher',flush=True)
-    run([sys.executable,ROOT/'backend/server.py'],env=env)
+def assembly_environment(replay=False, candidate_ai='local'):
+    env = meeting_env()
+    try:
+        configure_pc(env, candidate_ai)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    port = int(env.get('EDGE_PORT', '8788' if replay else '8789'))
+    default_config = 'assembly.json' if replay else 'corner-assembly.json'
+    config = Path(env.get('OPENSCAD_ASSEMBLY_CONFIG', ROOT / 'artifacts/cable-demo' / default_config)).expanduser()
+    if not config.is_file():
+        if env.get('OPENSCAD_ASSEMBLY_CONFIG'):
+            raise SystemExit(f'OPENSCAD_ASSEMBLY_CONFIG에서 지정한 파일을 찾을 수 없습니다. {config}')
+        raise SystemExit('먼저 python3 scripts/prepare_cable_demo.py --upper-corners /path/to/cable_organizer.scad 를 실행하세요.')
+    env['AI_MODE'] = 'replay' if replay else 'live'
+    env.setdefault('EDGE_DATA_DIR', str(ROOT / 'artifacts' / ('cable-demo/live' if replay else 'cable-live')))
+    env.setdefault('CAD_JOB_TIMEOUT_SECONDS', '70')
+    if replay:
+        env.setdefault('CABLE_DEMO_PREWARM', '1')
+    if 'EDGE_ADVERTISED_URL' not in env and sys.platform == 'darwin':
+        lan_ip = command_output(['ipconfig', 'getifaddr', 'en0'])
+        if lan_ip:
+            env['EDGE_ADVERTISED_URL'] = f'http://{lan_ip}:{port}'
+    return env, config, port
+
+
+def server(replay=False, candidate_ai='local'):
+    env, config, port = assembly_environment(replay, candidate_ai)
+    if not replay:
+        print('수정안 생성 · 현장 PC 로컬 모델 · 외부 API 사용료 0원', flush=True)
+    print(f'CAD 설정 · {config.name}', flush=True)
+    print(f'PC 회의 · http://127.0.0.1:{port}/meeting/', flush=True)
+    run([meeting_python(), '-m', 'backend.meeting', 'assembly', '--config', config, '--candidate-ai', env['MEETING_CANDIDATE_AI'],
+         '--host', env.get('EDGE_BIND_HOST', '0.0.0.0'), '--port', port], cwd=ROOT, env=env)
+
 
 def command_output(command, timeout=3):
     try:
@@ -123,8 +157,7 @@ def command_output(command, timeout=3):
         return None
 
 def doctor():
-    env=server_env()
-    port=relay_port(env)
+    port=8789
     manifest=json.loads((PROJECT/'Packages/manifest.json').read_text())
     packages={name:version for name,version in manifest['dependencies'].items()
               if name.startswith(('com.meta.xr.', 'com.unity.xr.', 'com.unity.inputsystem'))}
@@ -160,19 +193,12 @@ def doctor():
                 if len(line.split())>=2 and not line.startswith(('List of','*'))]}
     except SystemExit:
         result['adbDevices']={'status':'tool_missing'}
-    candidates=('AI_TRANSCRIPTION_MODEL','AI_VISION_MODEL')
-    auth=bool(env.get('AI_API_KEY')) or env.get('AI_BASE_URL','').startswith(('http://127.0.0.1:','http://localhost:'))
-    result['configuredLocally']={candidate:bool(auth and env.get(candidate)) for candidate in candidates}
     try:
         loopback=urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with loopback.open(f'http://127.0.0.1:{port}/health/capabilities',timeout=2) as response:
-            health=json.load(response)
-        if health.get('service')!='contextpin-relay':
-            raise ValueError('Different local service')
-        result['relay']={'status':'reachable','teacherUrl':f'http://127.0.0.1:{port}/teacher',
-                         **{key:health.get(key) for key in ('speechProvider','visionProvider','markersAvailable','providerRequests')}}
+        with loopback.open(f'http://127.0.0.1:{port}/healthz',timeout=2) as response:
+            result['meeting']=json.load(response)
     except (OSError,ValueError,urllib.error.URLError):
-        result['relay']={'status':'unreachable','port':port}
+        result['meeting']={'status':'unreachable','port':port}
     print(json.dumps(result,ensure_ascii=False,indent=2))
 
 def smoke_meeting(simulator, assembly=False):
@@ -187,6 +213,18 @@ def smoke_meeting(simulator, assembly=False):
     except (OSError, ValueError) as error:
         raise SystemExit(f'회의 EDGE를 먼저 시작하세요. {edge} · {error}') from error
     check = 'assembly' if assembly else 'meeting'
+    if env.get('MEETING_CANDIDATE_COMMIT_SMOKE') == '1':
+        check = 'candidate-commit'
+    elif env.get('MEETING_CANDIDATE_SET_SMOKE') == '1':
+        check = 'candidate-set'
+    elif env.get('MEETING_CAPTURE_ONLY_SMOKE') == '1':
+        check = 'capture-only'
+    elif env.get('MEETING_EXPLICIT_SMOKE') == '1':
+        check = 'explicit'
+    elif env.get('MEETING_LIVE_ALIGNMENT_SMOKE') == '1':
+        check = 'live-alignment'
+    elif env.get('MEETING_SAVED_DESIGN_SMOKE') == '1':
+        check = 'saved-design'
     report = artifacts / f'{check}-{"simulator" if simulator else "smoke"}-report.json'
     log = artifacts / f'unity-{check}{"-simulator" if simulator else ""}.log'
     if assembly:
@@ -196,6 +234,12 @@ def smoke_meeting(simulator, assembly=False):
     method = 'RunMeetingSimulator' if simulator else 'RunMeeting'
     if simulator:
         env.update(simulator_env())
+        # Unity can start adb while holding the editor project lock. Start the daemon
+        # outside Unity so the next Android build can open the project after the smoke.
+        try:
+            subprocess.run([adb(), 'start-server'], timeout=10, check=False)
+        except (OSError, subprocess.TimeoutExpired, SystemExit):
+            pass
     command = [unity(), '-projectPath', unity_project(), *options,
                '-executeMethod', f'ContextPin.Editor.RelaySmoke.{method}', '-logFile', log]
     try:
@@ -203,7 +247,7 @@ def smoke_meeting(simulator, assembly=False):
             # The native simulator can keep an editor window alive after Unity
             # writes its report. Bound teardown for the editor this check owns.
             with subprocess.Popen([str(arg) for arg in command], env=env) as child:
-                deadline = time.monotonic() + (220 if assembly else 160)
+                deadline = time.monotonic() + (650 if check in ('candidate-set', 'candidate-commit') else 220 if assembly else 160)
                 try:
                     while child.poll() is None and time.monotonic() < deadline:
                         if report.is_file():
@@ -226,7 +270,7 @@ def smoke_meeting(simulator, assembly=False):
                             child.kill()
                             child.wait()
         else:
-            run(command, env=env, timeout=180)
+            run(command, env=env, timeout=650 if check in ('candidate-set', 'candidate-commit') else 180)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         detail = json.loads(report.read_text()).get('error') if report.is_file() else None
         raise SystemExit(detail or f'Unity 회의 검증을 완료하지 못했습니다. {log}') from error
@@ -238,13 +282,18 @@ def smoke_meeting(simulator, assembly=False):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=['doctor','open','prepare','desktop','simulator','build','deploy','export','server','test','smoke','smoke-simulator','smoke-meeting','smoke-meeting-simulator','smoke-assembly','smoke-assembly-simulator','report'])
-    parser.add_argument('--serial',help='deploy/export 대상 Quest ADB 기기번호')
-    parser.add_argument('--archive',type=Path,help='report용 기기 export 폴더, Trace 폴더 또는 session.json')
-    parser.add_argument('--relay-data',type=Path,help='report용 PC relay 저장 폴더 또는 transfer.sqlite3')
-    parser.add_argument('--session',help='report에 포함할 단일 세션 ID')
-    parser.add_argument('--output',type=Path,help='report 출력 JSON 경로. 생략하면 stdout')
+    parser.add_argument('command',choices=['doctor','open','prepare','desktop','simulator','build','deploy','replay-server','server','open-saved-review','test','smoke','smoke-simulator','smoke-meeting','smoke-meeting-simulator','smoke-assembly','smoke-assembly-simulator'])
+    parser.add_argument('--serial',help='설치할 Quest의 ADB 기기번호')
+    parser.add_argument('--candidate-ai', choices=('local','team'), help='현장 서버는 local만 지원합니다. team 요청은 시작 전에 차단합니다.')
+    launch = parser.add_mutually_exclusive_group()
+    launch.add_argument('--open-saved-design', action='store_true', help='설치 후 최근 저장한 회의의 발언으로 수정안 열기')
+    launch.add_argument('--join-code', help='설치 후 실시간 회의 서버의 여섯 자리 코드로 참가')
+    parser.add_argument('--session', help='open-saved-review에 사용할 저장된 실시간 회의 ID')
     args=parser.parse_args()
+    if args.candidate_ai is not None and args.command != 'server':
+        parser.error('--candidate-ai는 실시간 회의 서버(server)에서 사용하세요.')
+    if args.join_code is not None and (len(args.join_code) != 6 or not args.join_code.isascii() or not args.join_code.isdigit()):
+        parser.error('--join-code에는 여섯 자리 숫자가 필요합니다.')
     if args.command=='doctor':doctor()
     elif args.command=='open':editor()
     elif args.command=='prepare':editor('Configure',True)
@@ -253,85 +302,44 @@ def main():
         if not Path('/Applications/MetaXRSimulator.app').exists():raise SystemExit('Meta XR Simulator를 먼저 설치하세요. README의 공식 링크를 참고하세요.')
         editor('SimulatorPreview')
     elif args.command=='build':editor('BuildQuest',True)
-    elif args.command=='smoke':
-        artifacts=ROOT/'artifacts';artifacts.mkdir(exist_ok=True)
-        env={**os.environ,'RELAY_WORKSPACE':str(ROOT)}
-        run([unity(),'-projectPath',unity_project(),'-batchmode',
-             '-executeMethod','ContextPin.Editor.RelaySmoke.Run','-logFile',artifacts/'unity-smoke.log'],env=env,timeout=600)
-    elif args.command in {'smoke-meeting', 'smoke-meeting-simulator', 'smoke-assembly', 'smoke-assembly-simulator'}:
-        smoke_meeting(args.command.endswith('-simulator'), args.command.startswith('smoke-assembly'))
-    elif args.command=='smoke-simulator':
-        artifacts=ROOT/'artifacts';artifacts.mkdir(exist_ok=True)
-        log=artifacts/'unity-simulator-smoke.log'
-        report=artifacts/'simulator-smoke-report.json'
-        # OpenXR polls READY and starts stereo in Application.onBeforeRender. Open a
-        # real Game view, as the macOS batch editor can omit that callback entirely.
-        env={**os.environ,**simulator_env(),'RELAY_WORKSPACE':str(ROOT)}
-        started=datetime.datetime.now(datetime.timezone.utc).isoformat()
-        # A native runtime crash before Play starts must not leave an earlier successful result.
-        def pending(message):
-            report.write_text(json.dumps({'success':False,'startedUtc':started,'error':message,'log':log.name},indent=2))
-        pending('Waiting for a simulator OpenXR session')
-        args=[unity(),'-projectPath',unity_project(),'-force-metal',
-              '-executeMethod','ContextPin.Editor.RelaySmoke.RunSimulator','-logFile',log]
-        deadline=time.monotonic()+180
-        with subprocess.Popen(args,env=env) as child:
-            try:
-                while child.poll() is None and time.monotonic()<deadline:
-                    try:
-                        finished='runningDisplays' in json.loads(report.read_text())
-                    except json.JSONDecodeError:
-                        finished=False
-                    if finished:
-                        # The report is written before leaving Play mode. Allow XR
-                        # teardown, then close only the editor owned by this check.
-                        try:child.wait(timeout=20)
-                        except subprocess.TimeoutExpired:pass
-                        break
-                    time.sleep(.5)
-            finally:
-                if child.poll() is None:
-                    child.terminate()
-                    try:child.wait(timeout=8)
-                    except subprocess.TimeoutExpired:
-                        child.kill()
-                        child.wait()
-            saved=json.loads(report.read_text())
-            if 'runningDisplays' not in saved:
-                pending('Editor stopped before XR verification completed. See '+log.name)
-                raise SystemExit('시뮬레이터 검사를 완료하지 못했습니다. '+str(log))
-            if not saved.get('success'):raise SystemExit(saved.get('error') or str(log))
-        print('시뮬레이터 XR 시연 확인: '+str(report))
+    elif args.command.startswith('smoke'):
+        smoke_meeting(args.command.endswith('-simulator'), 'meeting' not in args.command)
     elif args.command=='deploy':
         command=device(args.serial)
         if not APK.exists():editor('BuildQuest',True)
-        run(command+['reverse','tcp:8787',f'tcp:{relay_port(server_env())}'])
+        run(command+['reverse','tcp:8789','tcp:8789'])
         run(command+['reverse','tcp:8788','tcp:8788'])
         run(command+['install','-r',APK])
-        run(command+['shell','am','start','-n','org.contextpin.relay/com.unity3d.player.UnityPlayerActivity'])
-        print('설치·실행 완료. 실제 AI는 별도 터미널에서 server 명령을 실행하세요.')
-    elif args.command=='export':
-        destination=ROOT/'artifacts/device-data'/datetime.datetime.now().strftime('%Y%m%d-%H%M%S');destination.mkdir(parents=True)
-        run(device(args.serial)+['pull','/sdcard/Android/data/org.contextpin.relay/files/Trace',destination]);print(destination)
-    elif args.command=='server':server()
-    elif args.command=='report':
-        if args.archive is None and args.relay_data is None:
-            parser.error('report에는 --archive 또는 --relay-data가 필요합니다.')
-        try:
-            result=collect_report(args.archive,args.relay_data,args.session)
-        except (OSError, ValueError) as error:
-            parser.error(str(error))
-        body=json.dumps(result,ensure_ascii=False,indent=2)+'\n'
-        if args.output:
-            args.output.parent.mkdir(parents=True,exist_ok=True)
-            args.output.write_text(body,encoding='utf-8')
-            print(args.output.resolve())
+        launch_args = ['shell', 'am', 'start', '-W', '-n', 'org.contextpin.relay/com.unity3d.player.UnityPlayerActivity']
+        if args.open_saved_design:
+            launch_args.extend(['--ez', 'contextpin_open_saved_design', 'true'])
+        elif args.join_code:
+            launch_args.extend(['--es', 'contextpin_join_code', args.join_code])
+        launch = run(command + launch_args,
+                     stdout=subprocess.PIPE, text=True)
+        print(launch.stdout, end='')
+        if 'LaunchCheckRequires6dofDialogActivity' in launch.stdout:
+            print('설치 완료. 헤드셋을 착용하고 기기의 위치 추적 안내를 확인하세요.')
+        elif 'Activity: org.contextpin.relay/' in launch.stdout:
+            print('ContextPin XR 설치·실행 완료.')
         else:
-            print(body,end='')
+            print('설치 완료. 헤드셋에 앱 실행을 요청했습니다.')
+    elif args.command == 'open-saved-review':
+        if not args.session:
+            parser.error('open-saved-review에는 --session이 필요합니다.')
+        env, config, _ = assembly_environment()
+        env['OPENSCAD_ASSEMBLY_CONFIG'] = str(config.resolve())
+        env['ACTIVE_OBJECT_PROFILE'] = 'object_2'
+        env.pop('AI_GATEWAY_URL', None)
+        run([meeting_python(), '-m', 'backend.meeting.operator_review', '--data', env['EDGE_DATA_DIR'],
+             '--session', args.session], cwd=ROOT, env=env)
+    elif args.command in ('server','replay-server'):
+        server(replay=args.command=='replay-server', candidate_ai=args.candidate_ai or 'local')
     elif args.command=='test':
-        run([sys.executable,'-m','unittest','discover','-s',ROOT/'backend','-p','test_*.py','-v'])
-        env=os.environ.copy();env['DOTNET_CLI_HOME']=str(ROOT/'artifacts/dotnet');env['DOTNET_CLI_TELEMETRY_OPTOUT']='1'
-        run(['dotnet','run','--project',ROOT/'tests/CoreChecks/CoreChecks.csproj'],env=env)
+        for directory in ('backend', 'tests/meeting'):
+            run([meeting_python(), '-m', 'unittest', 'discover', '-s', directory, '-v'],
+                cwd=ROOT, env=meeting_env(load_settings=False))
+
 
 if __name__=='__main__':
     try:main()

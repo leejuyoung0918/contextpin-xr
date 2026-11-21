@@ -212,6 +212,11 @@ function meshList(spec, binaryLength, rootTransform) {
 export class ModelViewer {
   constructor(canvas, { onPart, onZoom, onLost }) {
     this.canvas = canvas;
+    this.pointerLayer = document.createElement("div");
+    this.pointerLayer.className = "remote-pointers";
+    this.pointerLayer.setAttribute("aria-hidden", "true");
+    canvas.parentElement.append(this.pointerLayer);
+    this.remotePointers = [];
     this.gl = canvas.getContext("webgl2", { alpha: true, antialias: true });
     if (!this.gl) throw new Error("WebGL2를 사용할 수 없습니다. 다른 브라우저에서 모델을 열어 주세요.");
     this.program = program(this.gl);
@@ -219,6 +224,7 @@ export class ModelViewer {
       .map(name => [name, this.gl.getUniformLocation(this.program, name)]));
     this.meshes = [];
     this.parts = [];
+    this.pointerLayer.replaceChildren();
     this.selection = new Set();
     this.onZoom = onZoom;
     this.reset();
@@ -248,7 +254,10 @@ export class ModelViewer {
     });
     canvas.addEventListener("pointerup", event => {
       if (gesture?.id !== event.pointerId) return;
-      if (!gesture.moved) onPart(this.partAt(event.clientX, event.clientY));
+      if (!gesture.moved) {
+        const part = this.partAt(event.clientX, event.clientY);
+        onPart(part, part ? this.hitAt(event.clientX, event.clientY, part) : null);
+      }
       gesture = null;
     });
     canvas.addEventListener("lostpointercapture", () => { gesture = null; });
@@ -296,6 +305,8 @@ export class ModelViewer {
     const frameCenter = frameMin.map((value, index) => (value + frameMax[index]) / 2);
     const frameRadius = Math.hypot(...frameMax.map((value, index) => value - frameMin[index])) / 2;
     this.clear();
+    this.binary = new DataView(binary.buffer, binary.byteOffset, binary.byteLength);
+    this.placement = placement;
     const gl = this.gl;
     this.vertexBuffer = gl.createBuffer();
     this.indexBuffer = gl.createBuffer();
@@ -330,6 +341,7 @@ export class ModelViewer {
     if (this.indexBuffer) gl.deleteBuffer(this.indexBuffer);
     this.meshes = [];
     this.parts = [];
+    this.pointerLayer.replaceChildren();
     this.vertexBuffer = null;
     this.indexBuffer = null;
     this.schedule();
@@ -381,6 +393,74 @@ export class ModelViewer {
       gl.drawElements(gl.TRIANGLES, mesh.indices.count, mesh.indices.componentType, mesh.indices.offset);
     }
     gl.bindVertexArray(null);
+    if (!target) this.drawPointers(width / height);
+  }
+
+  setPointers(pointers) {
+    this.remotePointers = pointers;
+    this.schedule();
+  }
+
+  drawPointers(aspect) {
+    this.pointerLayer.replaceChildren();
+    const camera = cameraMatrix(this.center, this.radius, this.yaw, this.pitch, this.zoom, aspect);
+    for (const pointer of this.remotePointers) {
+      const point = pointer.hit_point_asset_m;
+      if (!Array.isArray(point) || point.length !== 3) continue;
+      const world = applyTransform(this.placement || identity, [-point[0], point[1], point[2]]);
+      const [x, y] = applyTransform(camera, world);
+      if (Math.abs(x) > 1 || Math.abs(y) > 1) continue;
+      const mark = document.createElement("span");
+      mark.textContent = pointer.label;
+      mark.style.left = ((x + 1) * 50) + "%";
+      mark.style.top = ((1 - y) * 50) + "%";
+      this.pointerLayer.append(mark);
+    }
+  }
+
+  hitAt(clientX, clientY, partId) {
+    const rect = this.canvas.getBoundingClientRect();
+    const halfY = this.radius * 1.16 * Math.max(1, rect.height / rect.width) / this.zoom;
+    const halfX = halfY * rect.width / rect.height;
+    const forward = [Math.cos(this.pitch) * Math.sin(this.yaw), Math.sin(this.pitch), Math.cos(this.pitch) * Math.cos(this.yaw)];
+    const right = unit(cross([0, 1, 0], forward));
+    const up = cross(forward, right);
+    const nx = 2 * (clientX - rect.left) / rect.width - 1;
+    const ny = 1 - 2 * (clientY - rect.top) / rect.height;
+    const origin = this.center.map((value, axis) => value + forward[axis] * this.radius * 3 +
+      right[axis] * nx * halfX + up[axis] * ny * halfY);
+    const direction = forward.map(value => -value);
+    const subtract = (left, right) => left.map((value, axis) => value - right[axis]);
+    let nearest = Infinity;
+    for (const mesh of this.meshes.filter(item => item.partId === partId)) {
+      const bytes = mesh.indices.componentType === 5125 ? 4 : mesh.indices.componentType === 5123 ? 2 : 1;
+      const vertex = index => {
+        const offset = mesh.indices.offset + index * bytes;
+        const id = bytes === 4 ? this.binary.getUint32(offset, true) : bytes === 2 ?
+          this.binary.getUint16(offset, true) : this.binary.getUint8(offset);
+        const position = mesh.position.offset + id * (mesh.position.stride || 12);
+        return applyTransform(mesh.transform, [0, 4, 8].map(axis => this.binary.getFloat32(position + axis, true)));
+      };
+      for (let index = 0; index < mesh.indices.count; index += 3) {
+        const a = vertex(index), b = vertex(index + 1), c = vertex(index + 2);
+        const edge1 = subtract(b, a), edge2 = subtract(c, a);
+        const h = cross(direction, edge2), determinant = dot(edge1, h);
+        if (Math.abs(determinant) < 1e-14) continue;
+        const delta = subtract(origin, a);
+        const u = dot(delta, h) / determinant;
+        if (u < 0 || u > 1) continue;
+        const q = cross(delta, edge1), v = dot(direction, q) / determinant;
+        if (v < 0 || u + v > 1) continue;
+        const distance = dot(edge2, q) / determinant;
+        if (distance > 0 && distance < nearest) nearest = distance;
+      }
+    }
+    if (!Number.isFinite(nearest)) return null;
+    const point = origin.map((value, axis) => value + direction[axis] * nearest);
+    const mount = this.placement || identity;
+    const delta = point.map((value, axis) => value - mount[12 + axis]);
+    const local = [0, 1, 2].map(axis => dot(delta, [mount[axis * 4], mount[axis * 4 + 1], mount[axis * 4 + 2]]));
+    return [-local[0], local[1], local[2]];
   }
 
   ensurePickTarget() {

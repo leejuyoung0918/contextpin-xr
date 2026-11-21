@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="190mm" height="154mm" viewBox="0 0 190 154" role="img" aria-labelledby="title description">
+  <title id="title">ContextPin 예제 조립체 QR 정렬 카드</title>
+  <desc id="description">QR 검은 영역은 가로 80mm이고, 예제 CAD 원점은 QR 중심에서 오른쪽으로 90mm입니다. 100% 배율로 인쇄하세요.</desc>
+  <rect width="190" height="154" fill="#fff"/>
+  <g font-family="Apple SD Gothic Neo, Malgun Gothic, Noto Sans, sans-serif" fill="#132423">
+    <text x="11" y="10" font-size="6.2" font-weight="700">3D 설계 회의 · 받침 정렬 카드</text>
+    <text x="11" y="17" font-size="3.6">인쇄 배율 100% · 페이지 맞춤 끄기</text>
+    <line x1="11" y1="21" x2="179" y2="21" stroke="#c3ceca" stroke-width=".4"/>
+    <g id="demo-qr" transform="translate(19 40) scale(3.2)" shape-rendering="crispEdges">
+      <rect x="-4" y="-4" width="33" height="33" fill="#fff"/>
+      <path fill="#000" d="M0 0h7v1h-7z M8 0h1v1h-1z M10 0h1v1h-1z M12 0h2v1h-2z M16 0h1v1h-1z M18 0h7v1h-7z
+      M0 1h1v1h-1z M6 1h1v1h-1z M9 1h4v1h-4z M18 1h1v1h-1z M24 1h1v1h-1z M0 2h1v1h-1z
+      M2 2h3v1h-3z M6 2h1v1h-1z M8 2h3v1h-3z M13 2h1v1h-1z M15 2h2v1h-2z M18 2h1v1h-1z
+      M20 2h3v1h-3z M24 2h1v1h-1z M0 3h1v1h-1z M2 3h3v1h-3z M6 3h1v1h-1z M8 3h3v1h-3z
+      M12 3h4v1h-4z M18 3h1v1h-1z M20 3h3v1h-3z M24 3h1v1h-1z M0 4h1v1h-1z M2 4h3v1h-3z
+      M6 4h1v1h-1z M8 4h1v1h-1z M11 4h3v1h-3z M15 4h2v1h-2z M18 4h1v1h-1z M20 4h3v1h-3z
+      M24 4h1v1h-1z M0 5h1v1h-1z M6 5h1v1h-1z M10 5h2v1h-2z M13 5h1v1h-1z M18 5h1v1h-1z
+      M24 5h1v1h-1z M0 6h7v1h-7z M8 6h1v1h-1z M10 6h1v1h-1z M12 6h1v1h-1z M14 6h1v1h-1z
+      M16 6h1v1h-1z M18 6h7v1h-7z M10 7h1v1h-1z M12 7h1v1h-1z M16 7h1v1h-1z M0 8h4v1h-4z
+      M6 8h1v1h-1z M8 8h1v1h-1z M10 8h2v1h-2z M15 8h3v1h-3z M20 8h3v1h-3z M24 8h1v1h-1z
+      M0 9h2v1h-2z M4 9h2v1h-2z M7 9h1v1h-1z M10 9h1v1h-1z M12 9h3v1h-3z M16 9h1v1h-1z
+      M19 9h1v1h-1z M22 9h1v1h-1z M0 10h1v1h-1z M2 10h1v1h-1z M4 10h1v1h-1z M6 10h1v1h-1z
+      M8 10h7v1h-7z M16 10h1v1h-1z M18 10h3v1h-3z M22 10h1v1h-1z M0 11h2v1h-2z M5 11h1v1h-1z
+      M7 11h4v1h-4z M13 11h1v1h-1z M18 11h7v1h-7z M6 12h2v1h-2z M9 12h2v1h-2z M13 12h3v1h-3z
+      M18 12h1v1h-1z M20 12h1v1h-1z M22 12h2v1h-2z M3 13h3v1h-3z M8 13h1v1h-1z M14 13h3v1h-3z
+      M18 13h4v1h-4z M23 13h2v1h-2z M1 14h1v1h-1z M3 14h1v1h-1z M6 14h1v1h-1z M8 14h3v1h-3z
+      M13 14h2v1h-2z M18 14h2v1h-2z M22 14h2v1h-2z M0 15h1v1h-1z M5 15h1v1h-1z M7 15h2v1h-2z
+      M11 15h1v1h-1z M23 15h1v1h-1z M0 16h5v1h-5z M6 16h1v1h-1z M9 16h1v1h-1z M11 16h3v1h-3z
+      M16 16h5v1h-5z M22 16h2v1h-2z M8 17h1v1h-1z M10 17h4v1h-4z M15 17h2v1h-2z M20 17h3v1h-3z
+      M0 18h7v1h-7z M9 18h2v1h-2z M12 18h1v1h-1z M14 18h1v1h-1z M16 18h1v1h-1z M18 18h1v1h-1z
+      M20 18h1v1h-1z M23 18h2v1h-2z M0 19h1v1h-1z M6 19h1v1h-1z M9 19h1v1h-1z M15 19h2v1h-2z
+      M20 19h2v1h-2z M24 19h1v1h-1z M0 20h1v1h-1z M2 20h3v1h-3z M6 20h1v1h-1z M10 20h3v1h-3z
+      M14 20h1v1h-1z M16 20h6v1h-6z M24 20h1v1h-1z M0 21h1v1h-1z M2 21h3v1h-3z M6 21h1v1h-1z
+      M8 21h2v1h-2z M11 21h3v1h-3z M16 21h4v1h-4z M21 21h4v1h-4z M0 22h1v1h-1z M2 22h3v1h-3z
+      M6 22h1v1h-1z M8 22h5v1h-5z M17 22h4v1h-4z M23 22h1v1h-1z M0 23h1v1h-1z M6 23h1v1h-1z
+      M8 23h1v1h-1z M11 23h5v1h-5z M19 23h1v1h-1z M21 23h2v1h-2z M0 24h7v1h-7z M8 24h7v1h-7z
+      M17 24h3v1h-3z M22 24h3v1h-3z"/>
+    </g>
+    <text x="59" y="137" font-size="3.6" text-anchor="middle">QR 중심</text>
+    <g transform="translate(11 16)">
+    <text x="138" y="39" font-size="4.6" font-weight="700" text-anchor="middle">예제 CAD 원점</text>
+    <text x="138" y="45" font-size="3.6" text-anchor="middle">받침과 부품의 기준을 표시하는 점</text>
+    <g fill="none" stroke="#235858" stroke-width=".55">
+      <line x1="132" y1="64" x2="144" y2="64"/>
+      <line x1="138" y1="58" x2="138" y2="70"/>
+      <line x1="138" y1="64" x2="164" y2="64"/>
+      <path d="M161 62.5L164 64 161 65.5"/>
+      <line x1="138" y1="64" x2="138" y2="48"/>
+      <path d="M136.5 51L138 48 139.5 51"/>
+    </g>
+    <circle cx="138" cy="64" r="1" fill="#235858"/>
+    <text x="167" y="65.4" font-size="3.6">+X</text>
+    <text x="142" y="51" font-size="3.6">+Y</text>
+    <text x="110" y="82" font-size="3.8">가이드로 쓰는 예제 위치입니다.</text>
+    <text x="110" y="88" font-size="3.8">실물 부품의 기준이 다르면</text>
+    <text x="110" y="94" font-size="3.8">프로필의 장착 변환을 맞추세요.</text>
+    </g>
+    <text x="149" y="137" font-size="3.6" text-anchor="middle">CAD 원점</text>
+    <g fill="none" stroke="#235858" stroke-width=".45">
+      <path d="M59 141v5 M149 141v5 M59 143.5H93 M115 143.5H149"/>
+    </g>
+    <text x="104" y="144.8" font-size="3.8" text-anchor="middle">90 mm</text>
+  </g>
+</svg>

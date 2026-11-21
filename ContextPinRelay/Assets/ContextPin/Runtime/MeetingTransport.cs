@@ -4,6 +4,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Net.WebSockets;
+using System.Net;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -28,9 +29,18 @@ namespace ContextPin
         public MeetingTransport(string address)
         {
             if (!Uri.TryCreate(address, UriKind.Absolute, out var uri) || !string.IsNullOrEmpty(uri.UserInfo) ||
-                (uri.Scheme != Uri.UriSchemeHttps && (uri.Scheme != Uri.UriSchemeHttp || !uri.IsLoopback)))
-                throw new ArgumentException("회의 서버에 HTTPS 주소 또는 USB 루프백 주소를 입력하세요.");
+                (uri.Scheme != Uri.UriSchemeHttps && (uri.Scheme != Uri.UriSchemeHttp || !LocalMeetingHost(uri))))
+                throw new ArgumentException("회의 서버의 HTTPS 주소 또는 현장 PC의 사설 IP 주소를 입력하세요.");
             Address = new Uri(uri.GetLeftPart(UriPartial.Authority));
+        }
+
+        static bool LocalMeetingHost(Uri uri)
+        {
+            if (uri.IsLoopback) return true;
+            if (!IPAddress.TryParse(uri.Host, out var address)) return false;
+            var bytes = address.GetAddressBytes();
+            return bytes.Length == 4 && (bytes[0] == 10 || bytes[0] == 192 && bytes[1] == 168 ||
+                bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31);
         }
 
         public Uri Endpoint(string path)
@@ -71,20 +81,26 @@ namespace ContextPin
             => SendJson(path, "POST", body, "audio/wav", (reply, error, _) => completed(reply, error));
 
         public IEnumerator UploadPhoto(string path, byte[] photo, string version, string part, JObject timestamp,
-            Action<JObject, string> completed)
+            Action<JObject, string> completed, string sourceMode = "live_capture")
+            => UploadPhotoWithStatus(path, photo, version, part, timestamp,
+                (reply, error, _) => completed(reply, error), sourceMode);
+
+        public IEnumerator UploadPhotoWithStatus(string path, byte[] photo, string version, string part, JObject timestamp,
+            Action<JObject, string, long> completed, string sourceMode)
         {
             var sections = new List<IMultipartFormSection>
             {
                 new MultipartFormFileSection("file", photo, "reference.jpg", "image/jpeg"),
                 new MultipartFormDataSection("version_id", version),
-                new MultipartFormDataSection("source_mode", "live_capture"),
+                new MultipartFormDataSection("source_mode", sourceMode),
             };
             if (!string.IsNullOrEmpty(part)) sections.Add(new MultipartFormDataSection("part_id", part));
             foreach (var field in timestamp.Properties())
-                sections.Add(new MultipartFormDataSection(field.Name, field.Value.ToString(Formatting.None)));
+                sections.Add(new MultipartFormDataSection(field.Name, field.Value.Type == JTokenType.String
+                    ? field.Value.Value<string>() : field.Value.ToString(Formatting.None)));
             var boundary = UnityWebRequest.GenerateBoundary();
             return SendJson(path, "POST", UnityWebRequest.SerializeFormSections(sections, boundary),
-                "multipart/form-data; boundary=" + Encoding.ASCII.GetString(boundary), (reply, error, _) => completed(reply, error));
+                "multipart/form-data; boundary=" + Encoding.ASCII.GetString(boundary), completed);
         }
 
         IEnumerator SendJson(string path, string method, byte[] body, string contentType, Action<JObject, string, long> completed)
@@ -100,7 +116,7 @@ namespace ContextPin
                 completed(result, null, request.responseCode);
                 yield break;
             }
-            var detail = result?["detail"];
+            var detail = result?["detail"] ?? result?["error"];
             completed(null, detail?.Type == JTokenType.String ? detail.Value<string>() :
                 (detail as JObject)?.Value<string>("message") ?? request.error ?? "서버 응답을 읽을 수 없습니다.", request.responseCode);
         }

@@ -38,8 +38,10 @@ export function unitValue(value, unit) {
 }
 
 export const versionLabel = (versionId, versions) => {
+  const model = versions.find(version => version.version_id === versionId);
+  if (model?.design_version) return model.design_version;
   const index = versions.findIndex(version => version.version_id === versionId);
-  return index < 0 ? "" : "v" + (index + 1);
+  return index < 0 ? "" : index === 0 ? "V1" : "검토 초안";
 };
 
 const roundLabels = {
@@ -78,7 +80,7 @@ function operationChanges(candidate, round, snapshot) {
     const oldValue = base?.parameters?.[id];
     const before = oldValue === undefined ? "" : unitValue(oldValue, definition.unit) + " → ";
     const after = unitValue(operation.value, definition.unit);
-    const provenance = snapshot.assembly && operation.source === "AI_PROPOSAL" ? " (비교용 제안값)" : "";
+    const provenance = snapshot.assembly && ["AI_PROPOSAL", "REGISTERED_COMPARISON"].includes(operation.source) ? " (비교용 제안값)" : "";
     return (definition.label || id) + " " + before + after + provenance;
   }).filter(Boolean);
 }
@@ -122,7 +124,7 @@ function renderCandidates(round, snapshot, activeCandidate, callbacks) {
     heading.append(element("h3", letter(index) + " · " + (candidate.title || "수정안")));
     if (candidate.status === "valid" && candidate.version_id) {
       heading.append(makeButton(candidate.candidate_id === activeCandidate ? "보고 있음" : "모델 보기",
-        "", () => callbacks.view(round, candidate)));
+        "", () => callbacks.view(round, candidate), Boolean(snapshot.edit_draft?.lease_id)));
     }
     card.append(heading);
     if (candidate.interpretation) card.append(element("p", candidate.interpretation, "candidate-description"));
@@ -333,9 +335,10 @@ export function renderTranscripts(snapshot, partial, listen) {
     const source = ({
       replay: "예시 발화",
       manual: "직접 입력",
+      manual_input: "직접 입력",
       live_capture: "녹음 전사",
     })[item.source_mode] || "발화";
-    const context = snapshot.rounds.findLast(round => round.context?.utterance.utterance_id === item.utterance_id &&
+    const context = snapshot.rounds.findLast(round => round.context?.utterance?.utterance_id === item.utterance_id &&
       round.context.utterance.revision === item.revision)?.context;
     const part = snapshot.profile.semantic_parts.find(part => part.part_id === context?.part_ids?.[0]);
     const meta = (item.status === "partial" ? "전사 중" : source) + " · " + name(
@@ -365,7 +368,7 @@ export function renderMinutes(snapshot, callbacks) {
     const version = snapshot.versions.find(item =>
       item.version_id === (decision.selected_model_version_id ?? decision.version_id));
     const outcome = decisionLabels[decision.outcome ?? decision.type] || "결정";
-    const versionName = version ? " · " + versionLabel(version.version_id, snapshot.versions) : "";
+    const versionName = version ? " · " + (decision.design_version || versionLabel(version.version_id, snapshot.versions)) : "";
     const heading = element("h3", outcome + versionName +
       (snapshot.assembly && decision.candidate_title ? " · " + decision.candidate_title : ""));
     card.append(heading, element("p", decision.reason || decision.rationale_text || "이유 미기록"));

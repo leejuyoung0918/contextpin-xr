@@ -14,44 +14,19 @@ namespace ContextPin.Editor
         {
             EditorApplication.playModeStateChanged+=state=>
             {
-                if(state==PlayModeStateChange.EnteredPlayMode && SessionState.GetBool("RelaySmoke",false))
-                {
-                    SessionState.SetBool("RelaySmoke",false);
-                    RelaySmokeDriver.Begin();
-                }
-                if(state==PlayModeStateChange.EnteredPlayMode && SessionState.GetBool("TraceSimulatorSmoke",false))
-                {
-                    SessionState.SetBool("TraceSimulatorSmoke",false);
-                    TraceSimulatorSmoke.Begin();
-                }
                 if(state==PlayModeStateChange.EnteredPlayMode && SessionState.GetBool("MeetingSmoke",false))
                 {
                     SessionState.SetBool("MeetingSmoke",false);
                     MeetingSmoke.Begin(SessionState.GetBool("ContextPinExplicitSimulator",false));
                 }
-                if(state==PlayModeStateChange.EnteredEditMode && SessionState.GetBool("TraceSimulatorExit",false))
+                if(state==PlayModeStateChange.EnteredEditMode && SessionState.GetBool("MeetingSmokeExit",false))
                 {
-                    SessionState.SetBool("TraceSimulatorExit",false);
-                    var code=SessionState.GetInt("TraceSimulatorExitCode",2);
+                    SessionState.SetBool("MeetingSmokeExit",false);
+                    var code=SessionState.GetInt("MeetingSmokeExitCode",2);
                     EditorApplication.delayCall+=()=>EditorApplication.Exit(code);
                 }
             };
         }
-        public static void Run()
-        {
-            var root=Environment.GetEnvironmentVariable("RELAY_WORKSPACE")??Path.GetFullPath(Path.Combine(Application.dataPath,"../.."));
-            var data=Path.Combine(root,"artifacts","smoke-data-"+DateTime.UtcNow.ToString("yyyyMMddHHmmss"));
-            Environment.SetEnvironmentVariable("RELAY_TEST_DATA",data);
-            RelaySetup.Configure();
-            SessionState.SetBool("RelaySmoke",true);
-            RelaySetup.DesktopPreview();
-        }
-
-        public static void RunSimulator()
-        {
-            SetupSimulator("TraceSimulatorSmoke");
-        }
-
         public static void RunMeeting()
         {
             SessionState.SetBool("MeetingSmoke",true);

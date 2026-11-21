@@ -239,3 +239,15 @@ dialog::backdrop { background: #141b2e9e; }
 .result-decisions { margin: .6rem 0 0; padding-left: 1.3rem; font-size: .84rem; }
 .result-decisions li + li { margin-top: .5rem; }
 .result-decisions p { margin-top: .18rem; color: var(--muted); }
+
+.draft-editor { border-top: 1px solid var(--line); padding-top: .8rem; margin-top: .8rem; }
+.draft-editor label { display: block; margin-top: .7rem; }
+.draft-editor input[type="range"] { width: 100%; padding: 0; accent-color: var(--blue-dark); }
+.draft-editor .file-actions { margin-top: .7rem; }
+#draft-sliders output { float: right; font-variant-numeric: tabular-nums; }
+#invite-qr { display: block; width: min(100%, 340px); height: auto; aspect-ratio: 1; margin: .8rem auto; background: #fff; }
+#invite-address { overflow-wrap: anywhere; }
+#verification-form { display: grid; gap: .35rem; margin-top: .7rem; }
+
+.remote-pointers { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.remote-pointers span { position: absolute; padding: .15rem .35rem; background: #fff1c8; color: #55370a; border: 2px solid #b6790f; border-radius: .35rem; font-size: .72rem; transform: translate(-4px, -4px); }
