@@ -61,11 +61,14 @@ namespace ContextPin
         }
 
         public IEnumerator Json(string path, JObject payload, Action<JObject, string> completed)
+            => JsonWithStatus(path, payload, (reply, error, _) => completed(reply, error));
+
+        public IEnumerator JsonWithStatus(string path, JObject payload, Action<JObject, string, long> completed)
             => SendJson(path, payload == null ? "GET" : "POST",
                 payload == null ? null : Encoding.UTF8.GetBytes(payload.ToString(Formatting.None)), "application/json", completed);
 
         public IEnumerator UploadWave(string path, byte[] body, Action<JObject, string> completed)
-            => SendJson(path, "POST", body, "audio/wav", completed);
+            => SendJson(path, "POST", body, "audio/wav", (reply, error, _) => completed(reply, error));
 
         public IEnumerator UploadPhoto(string path, byte[] photo, string version, string part, JObject timestamp,
             Action<JObject, string> completed)
@@ -81,10 +84,10 @@ namespace ContextPin
                 sections.Add(new MultipartFormDataSection(field.Name, field.Value.ToString(Formatting.None)));
             var boundary = UnityWebRequest.GenerateBoundary();
             return SendJson(path, "POST", UnityWebRequest.SerializeFormSections(sections, boundary),
-                "multipart/form-data; boundary=" + Encoding.ASCII.GetString(boundary), completed);
+                "multipart/form-data; boundary=" + Encoding.ASCII.GetString(boundary), (reply, error, _) => completed(reply, error));
         }
 
-        IEnumerator SendJson(string path, string method, byte[] body, string contentType, Action<JObject, string> completed)
+        IEnumerator SendJson(string path, string method, byte[] body, string contentType, Action<JObject, string, long> completed)
         {
             using var request = Request(path, method, body, contentType);
             yield return request.SendWebRequest();
@@ -94,13 +97,16 @@ namespace ContextPin
             catch (JsonException) { }
             if (request.result == UnityWebRequest.Result.Success && result != null)
             {
-                completed(result, null);
+                completed(result, null, request.responseCode);
                 yield break;
             }
             var detail = result?["detail"];
             completed(null, detail?.Type == JTokenType.String ? detail.Value<string>() :
-                (detail as JObject)?.Value<string>("message") ?? request.error ?? "서버 응답을 읽을 수 없습니다.");
+                (detail as JObject)?.Value<string>("message") ?? request.error ?? "서버 응답을 읽을 수 없습니다.", request.responseCode);
         }
+
+        public Uri SocketEndpoint(string path) => new UriBuilder(Endpoint(path))
+        { Scheme = Address.Scheme == Uri.UriSchemeHttps ? "wss" : "ws", Port = Address.Port }.Uri;
 
         public IEnumerator Download(string path, int limit, Action<byte[], string> completed)
         {

@@ -125,7 +125,7 @@ namespace ContextPin
                 meetingModel = pivot;
                 meetingPartRenderers.Clear();
                 foreach (var filter in filters) AddMeetingPart(filter, partIds, id);
-                if (IsAssemblyMeeting) SetAssemblyMeshMaterial(filters, id);
+                if (IsAssemblyMeeting) SetAssemblyMeshMaterial(filters);
                 meetingModel.SetActive(true);
                 meetingModel.transform.GetChild(0).gameObject.SetActive(true);
                 PrepareMeetingLighting();
@@ -174,7 +174,7 @@ namespace ContextPin
                 renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                 renderer.receiveShadows = false;
             }
-            if (part == null) return;
+            if (part == null || SpatialAssembly) return;
             string id = part.name;
             filter.gameObject.AddComponent<MeshCollider>().sharedMesh = filter.sharedMesh;
             var hit = filter.gameObject.AddComponent<RelayHit>();
@@ -198,7 +198,6 @@ namespace ContextPin
                 if (renderer == null) continue;
                 overlay.Clear();
                 if (id == meetingPartId) overlay.SetColor(MeetingColor, new Color(.97f, .69f, .25f, IsAssemblyMeeting ? .62f : 1));
-                else if (IsAssemblyMeeting && id == AssemblyFixedPartId) overlay.SetColor(MeetingColor, AssemblyReferenceColor);
                 renderer.SetPropertyBlock(overlay);
             }
         }

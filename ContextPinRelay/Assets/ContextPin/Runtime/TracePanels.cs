@@ -69,6 +69,12 @@ namespace ContextPin
             if(ownedPhoto!=null){Destroy(ownedPhoto);ownedPhoto=null;}
             feedbackText=recordCount=recordSpeech=null;
             SyncSourceAudio();
+            if(screen==ScreenState.Meeting && SpatialAssembly)
+            {
+                DrawSpatialMeeting();
+                Physics.SyncTransforms();
+                return;
+            }
             content=Rect("Screen-"+screen,panel,0,0,W,H);
             RoundBox("Background",content,0,0,W,H,Ink,18);
             DrawHeader();

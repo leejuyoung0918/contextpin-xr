@@ -31,14 +31,18 @@ def plan_live(context):
         prompt += ("\nThis is a fixed two-object assembly. Edit only the editable exterior of object_2. "
                    "The reference object, coupling region, clearances and mounting datum are fixed. "
                    "Do not propose changes to them. Do not invent interference or fit results. "
-                   "A request to go a little further in this candidate must refine its parameters.")
+                   "A request to go a little further in this candidate must refine its parameters. "
+                   "Conversation, preferences, negative requests and recalls are not adoption or edits. "
+                   "Return context_version and a brief Korean discussion label in summary_patch for a proposed change only.")
         # Only information needed for the suggested edits goes to the provider.
         utterance = context["utterance"]
         related = context["related_utterances"][-5:]
         changed_base = context.get("changed_base_parameters", [])
-        context = {k: context[k] for k in ("request_id", "context_hash", "edit_base_version_id",
-                   "expected_committed_version_id", "generation_epoch", "object_id", "parameters",
-                   "constraints", "part_ids", "clarification_of", "evidence_ids")}
+        keys = ("request_id", "context_hash", "edit_base_version_id", "expected_committed_version_id",
+                "generation_epoch", "object_id", "parameters", "constraints", "part_ids", "clarification_of",
+                "evidence_ids", "session_id", "context_version", "adopted_version_id", "adopted_parameters",
+                "source_version", "preview_candidate_id", "candidate_set_id", "active_candidates", "unresolved_question")
+        context = {k: context[k] for k in keys if k in context}
         context.update({"utterance": {"text": utterance["text"], "evidence_id": utterance["evidence_id"]},
                         "related_utterances": [{"text": item["text"], "evidence_id": item["evidence_id"]} for item in related],
                         "changed_base_parameters": changed_base,

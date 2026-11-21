@@ -31,6 +31,10 @@ class Option(StrictModel):
     operations: list[Operation] = Field(min_length=1, max_length=10)
 
 
+class SummaryPatch(StrictModel):
+    discussion: str = Field(max_length=100)
+
+
 class Plan(StrictModel):
     schema_version: Literal[1]
     request_id: str
@@ -43,6 +47,8 @@ class Plan(StrictModel):
     options: list[Option] = Field(max_length=3)
     question: str | None = Field(max_length=300)
     evidence_ids: list[str] = Field(max_length=20)
+    summary_patch: SummaryPatch | None = None
+    context_version: int | None = None
 
 
 IDENTITY = ("request_id", "context_hash", "edit_base_version_id",
@@ -51,6 +57,12 @@ SYSTEM = Path(__file__).with_name("planner-v1.txt").read_text()
 NUMBER = re.compile(r"(-?\d+(?:\.\d+)?)\s*(?:mm|밀리미터)", re.IGNORECASE)
 DEICTIC = ("이 부분", "여기", "이 부위")
 ORDINAL = re.compile(r"([123])\s*(?:번째|번\s*안)|(첫|두|세)\s*번째")
+CANDIDATE_LETTER = re.compile(r"(?<![A-Za-z])([ABC])(?![A-Za-z])", re.I)
+
+
+def assembly_remark(line):
+    return bool(re.search(r"했었|말했지|얘기했지|어땠|했다면|했으면|좋네|좋아 보이|괜찮네", line)
+                and not re.search(r"바꿔|수정해|바꾸자|해보자|더 둥글게|더 곡선적", line))
 
 
 def contains(text, aliases):
@@ -74,9 +86,13 @@ def resolve_reference(utterance, view):
     if not view:
         return None, None
     ordinal = ORDINAL.search(line)
-    if not ordinal:
+    letter = CANDIDATE_LETTER.search(line)
+    if not ordinal and not letter:
         return view.get("candidate_id"), view["version_id"]
-    index = int(ordinal.group(1)) if ordinal.group(1) else {"첫": 1, "두": 2, "세": 3}[ordinal.group(2)]
+    if ordinal:
+        index = int(ordinal.group(1)) if ordinal.group(1) else {"첫": 1, "두": 2, "세": 3}[ordinal.group(2)]
+    else:
+        index = ord(letter.group(1).upper()) - ord("A") + 1
     order = view.get("display_order_candidate_ids", [])
     candidate_id = order[index - 1] if index <= len(order) else None
     return candidate_id, view.get("candidate_versions", {}).get(candidate_id)
@@ -134,6 +150,19 @@ def compile_context(state, utterance, view, version, round_id, epoch, previous=N
         "evidence_ids": evidence, "clarification_of": answer_to, "images_used": False, "related_image_ids": images,
         "relevant_decisions": state["decisions"][-3:],
     }
+    if state.get("assembly"):
+        adopted = next(model for model in state["versions"] if model["version_id"] == state["committed_version_id"])
+        candidates = next((item for item in reversed(state["rounds"]) if item["status"] == "reviewable" or
+                           (view and item["round_id"] == view.get("round_id"))), {})
+        parameters_by_id = {model["version_id"]: model["parameters"] for model in state["versions"]}
+        body.update(context_version=state["design_revision"], adopted_version_id=adopted["version_id"],
+                    adopted_parameters=adopted["parameters"], source_version=version["source_hash"],
+                    preview_candidate_id=(view or {}).get("candidate_id"), candidate_set_id=candidates.get("candidate_set_id"),
+                    active_candidates=[{"candidate_id": candidate["candidate_id"], "interpretation": candidate["interpretation"],
+                                        "parameters": parameters_by_id.get(candidate["version_id"])}
+                                       for candidate in candidates.get("candidates", []) if candidate["status"] == "valid"],
+                    unresolved_question=next((item.get("question") for item in reversed(state["rounds"])
+                                              if item["status"] == "needs_input"), None))
     semantic = {**body, "utterance": utterance["evidence_id"] + ":" + str(utterance["revision"]),
                 "related_utterances": [[item["evidence_id"], item["revision"]] for item in related],
                 "constraints": [{k: v for k, v in item.items() if k != "constraint_id"}
@@ -169,6 +198,8 @@ def fixture_plan(context):
 
     if context["readiness"] == "UNSUPPORTED":
         return {**result, "action": "unsupported"}
+    if assembly and assembly_remark(line):
+        return result
     if assembly and re.search(r"(?:연결\s*부(?:분)?|결합\s*부(?:분)?|끼움\s*구조|고정\s*구멍)(?:을|를)?\s*(?:바꿔|바꾸|넓혀|좁혀|옮겨|키워|변경)", line):
         return ask("결합부는 고정되어 있습니다. 대신 바꿀 외형 요소를 알려 주세요.")
     if re.search(r"규칙.*무시|셸\s*코드|shell|실행\s*명령|삭제하지|높이지\s*말|바꾸지\s*말|변경하지\s*말", line, re.I):
@@ -263,6 +294,8 @@ def gateway_request(path, payload):
 
 
 def validated_plan(context, mode):
+    if context["profile"].get("assembly") and assembly_remark(context["utterance"]["text"]):
+        return Plan.model_validate(fixture_plan(context)).model_dump()
     if context.get("reference_missing") or (
             contains(context["utterance"]["text"], DEICTIC) and context["target_resolution"] == "missing"):
         raw = fixture_plan(context)
@@ -276,6 +309,8 @@ def validated_plan(context, mode):
         raise MeetingError("후보 계획을 받지 못했습니다. 수동 치수 수정은 계속할 수 있습니다.", 502) from error
     if any(getattr(plan, key) != context[key] for key in IDENTITY):
         raise MeetingError("다른 요청의 응답을 받았습니다.")
+    if plan.context_version is not None and plan.context_version != context.get("context_version"):
+        raise MeetingError("다른 설계 문맥의 응답을 받았습니다.")
     if not set(plan.evidence_ids).issubset(context["evidence_ids"]):
         raise MeetingError("요청에 포함되지 않은 근거를 참조했습니다.")
     if plan.action == "propose_preview" and len(plan.options) != 1:

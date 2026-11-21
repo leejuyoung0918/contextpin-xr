@@ -61,7 +61,10 @@ class AudioCapture:
         self.last_voiced = 0
         self.stamp = clock_stamp({**body, "source_monotonic_ms": body.get("stream_start_source_monotonic_ms")}, now_ms())
         self.started_ms = self.stamp["captured_session_time_ms"]
-        self.actor, self.device = coordinator.audio_start(self.sid, body["token"], stream_id, body.get("device_id"))
+        self.opened = False
+        self.reported_sample = 0
+        self.actor, self.device = coordinator.audio_start(self.sid, body["token"], stream_id, body.get("device_id"),
+                                                          continuous=True, sample_rate=self.rate)
         self.view_actor = self.actor if body.get("bind_view") is True else None
 
     def add(self, frame):
@@ -74,12 +77,18 @@ class AudioCapture:
             return
         if sample > self.rate * 60 * 60:
             raise MeetingError("한 시간 이상 녹음하려면 새 녹음을 시작해 주세요.")
+        if not self.opened:
+            self.coordinator.audio_opened(self.sid, self.stream_id, self.started_ms)
+            self.opened = True
         if seq != self.expected_sequence or sample != self.expected_sample:
             self.finish(self.expected_sample)
             self.preroll.clear()
-            self.coordinator.audio_gap(self.sid, self.stream_id, sample, "non_contiguous_pcm")
+            self.coordinator.audio_gap(self.sid, self.stream_id, sample, "non_contiguous_pcm", self.expected_sample)
         self.expected_sequence = seq + 1
         self.expected_sample = sample + count
+        if self.expected_sample - self.reported_sample >= self.rate:
+            self.coordinator.audio_progress(self.sid, self.stream_id, self.expected_sample)
+            self.reported_sample = self.expected_sample
         pcm = frame[16:]
         values = array.array("h", pcm)
         if sys.byteorder != "little":
@@ -113,12 +122,19 @@ class AudioCapture:
         self.segment += 1
         start = self.started_ms + round(start_sample / self.rate * 1000)
         end = self.started_ms + round(end_sample / self.rate * 1000)
+        cutoff = self.coordinator.audio_cutoff(self.sid, self.stream_id)
+        if cutoff is not None and end > cutoff:
+            if start >= cutoff:
+                return
+            pcm = pcm[:2 * round((cutoff - start) * self.rate / 1000)]
+            end = cutoff
         self.coordinator.audio_submit(self.sid, self.stream_id, self.segment, start, end,
                                       encode_wav(pcm, self.rate), self.actor, self.device, self.view_actor,
                                       {k: v for k, v in self.stamp.items() if k not in ("received_at", "captured_session_time_ms")})
 
-    def close(self):
+    def close(self, eos=False, last_sequence=None):
         try:
             self.finish()
         finally:
-            self.coordinator.audio_stop(self.sid, self.stream_id)
+            self.coordinator.audio_stop(self.sid, self.stream_id, eos, self.expected_sample,
+                                        last_sequence, self.expected_sequence - 1)

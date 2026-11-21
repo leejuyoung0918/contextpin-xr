@@ -19,7 +19,6 @@ namespace ContextPin
         bool AssemblySampling => assemblyAlignment is AssemblyAlignment.CaptureOrigin or AssemblyAlignment.CaptureRight or AssemblyAlignment.CaptureUp;
         bool AssemblyOverlayAligned => assemblyAlignment is AssemblyAlignment.Preview or AssemblyAlignment.Confirmed;
         string AssemblyOriginalId => TextValue(Values(meetingSnapshot, "versions").FirstOrDefault(), "version_id");
-        string AssemblyFixedPartId => TextValue(meetingSnapshot?["assembly"], "fixed_part_id");
         static readonly Color AssemblyReferenceColor = new Color(.16f, .8f, .86f, .5f);
 
         void ReadAssemblyMount()
@@ -43,8 +42,8 @@ namespace ContextPin
             assemblyAlignment = AssemblyAlignment.CaptureOrigin;
             assemblyUntrackedSince = -1;
             SetMeetingViewedVersion(AssemblyOriginalId);
-            SetPassthrough(true);
-            MoveAssemblyPanel(view.transform.position + view.transform.forward);
+            if (OVRManager.IsInsightPassthroughSupported()) SetPassthrough(true);
+            if (assemblyRecoveryPanel) RestoreSpatialPanel();
             notice = "고정된 기준물의 원점부터 짚으세요.";
             Draw();
         }
@@ -81,7 +80,6 @@ namespace ContextPin
             {
                 case AssemblyAlignment.CaptureOrigin:
                     assemblyOrigin = point;
-                    MoveAssemblyPanel(point);
                     assemblyAlignment = AssemblyAlignment.CaptureRight;
                     notice = "기준 원점에서 +X 방향 점을 짚으세요.";
                     break;
@@ -114,6 +112,12 @@ namespace ContextPin
             if (!AssemblyHeadTracked() || assemblyAlignment != AssemblyAlignment.Preview || meetingLoadedVersion != AssemblyOriginalId) return;
             assemblyAlignment = AssemblyAlignment.Confirmed;
             notice = "원본 정렬을 확인했습니다. 모든 후보를 이 장착 기준에서 봅니다.";
+            if (SpatialAssembly)
+            {
+                assemblyCompare = assemblyMenu = false;
+                SetMeetingViewedVersion(null);
+                RestoreSpatialPanel();
+            }
             Draw();
         }
 
@@ -137,7 +141,7 @@ namespace ContextPin
 
         void PositionAssemblyPreview()
         {
-            bool visible = assemblyHasMount && !AssemblySampling && assemblyAlignment != AssemblyAlignment.Lost;
+            bool visible = assemblyHasMount && (!SpatialAssembly || AssemblyOverlayAligned);
             if (meetingModel.activeSelf != visible) meetingModel.SetActive(visible);
             if (!visible) return;
             var reference = AssemblyOverlayAligned ? assemblyReference : new Pose(
@@ -149,23 +153,13 @@ namespace ContextPin
             meetingModel.transform.localScale = Vector3.one;
         }
 
-        void MoveAssemblyPanel(Vector3 referencePoint)
-        {
-            var forward = Vector3.ProjectOnPlane(referencePoint - view.transform.position, Vector3.up).normalized;
-            if (forward.sqrMagnitude < .1f) return;
-            var side = Quaternion.AngleAxis(48, Vector3.up) * forward;
-            panel.localScale = Vector3.one * .00105f;
-            panel.SetPositionAndRotation(view.transform.position + side * 1.35f + Vector3.up * .08f,
-                Quaternion.LookRotation(side, Vector3.up));
-        }
-
-        void SetAssemblyMeshMaterial(MeshFilter[] filters, string id)
+        void SetAssemblyMeshMaterial(MeshFilter[] filters)
         {
             var shader = Resources.Load<Shader>("MeetingAssemblyOverlay");
             if (shader == null) throw new InvalidOperationException("원본과 수정안의 반투명 표시를 준비하지 못했습니다.");
             assemblyMaterial = new Material(shader)
             {
-                color = id == AssemblyOriginalId ? AssemblyReferenceColor : new Color(1f, .68f, .21f, .53f),
+                color = AssemblyReferenceColor,
             };
             foreach (var filter in filters)
                 if (filter.TryGetComponent<MeshRenderer>(out var renderer)) renderer.sharedMaterial = assemblyMaterial;

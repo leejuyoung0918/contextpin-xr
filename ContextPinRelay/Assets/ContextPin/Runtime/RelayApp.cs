@@ -145,7 +145,9 @@ namespace ContextPin
             UpdateSourceAudio();
             if(awaitingTrackedHead && InputDevices.GetDeviceAtXRNode(XRNode.Head).TryGetFeatureValue(UnityEngine.XR.CommonUsages.isTracked,out var tracked) && tracked)
             {awaitingTrackedHead=false;Recenter();}
-            if(Keyboard.current?.rKey.wasPressedThisFrame==true)Recenter();
+            if(Keyboard.current?.rKey.wasPressedThisFrame==true && !RecallSpatialPanel())Recenter();
+            if(xr && screen==ScreenState.Meeting && SpatialAssembly && OVRInput.GetDown(OVRInput.Button.One, OVRInput.Controller.LTouch))
+                RecallSpatialPanel();
             if(screen==ScreenState.Meeting)UpdateMeeting();
             UpdateGuideTracking();
             UpdatePhysicalBoardVisibility();
@@ -156,6 +158,7 @@ namespace ContextPin
             }
             foreach(var label in worldLabels)label.rotation=Quaternion.LookRotation(label.position-view.transform.position,view.transform.up);
             var ray=ReadUiPointer(out bool clicked,out bool controllerPointer);
+            if(PlaceSpatialPanelFromInput(ray,clicked))clicked=false;
             bool hitSomething=Physics.Raycast(ray,out var r,12);
             var hit=hitSomething?r.collider.GetComponent<RelayHit>():null;
             if(hit!=hovered){if(hovered!=null)hovered.Hover(false);hovered=hit;if(hit!=null)hit.Hover(true);}

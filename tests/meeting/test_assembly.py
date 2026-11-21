@@ -159,3 +159,162 @@ class AssemblyTest(unittest.TestCase):
         self.assertIn("OpenSCAD", item["candidates"][0]["error"])
         self.assertEqual(self.state()["committed_version_id"], self.initial["version_id"])
         self.assertEqual(self.get(self.initial["preview_url"]).content[:4], b"glTF")
+
+    def wait_session(self, desired):
+        deadline = time.monotonic() + 25
+        while time.monotonic() < deadline:
+            state = self.state()
+            if state["session_status"] == desired:
+                return state
+            if state["session_status"] == "save_error":
+                self.fail(str(state["result"]))
+            time.sleep(.04)
+        self.fail(f"Expected {desired}, got {state['session_status']}")
+
+    def show_candidate(self, review, index, share=True):
+        item = review["candidates"][index]
+        self.command("view", {"version_id": item["version_id"], "round_id": review["round_id"],
+                              "candidate_id": item["candidate_id"], "share": share}, 200)
+        return item
+
+    def test_meeting_freezes_adopted_a_while_b_is_shared_and_exports_all_records(self):
+        self.command("meeting_start", {"mode": "replay"}, 200)
+        response = self.command("replay", {"sample": "curves"})
+        review = self.wait(response)
+        state = self.state()
+        self.assertIsNone(state["shared_preview"])
+        self.assertEqual(state["adopted_version_id"], self.initial["version_id"])
+        self.assertGreaterEqual(state["summary"]["proposal_count"], 2)
+        self.assertGreater(state["design_revision"], 0)
+        note = self.command("text", {"text": "B가 좋네"})
+        self.wait(note, "answered")
+        self.assertEqual(self.state()["design_revision"], state["design_revision"])
+        a = self.show_candidate(review, 0)
+        decided = self.command("decide", {"outcome": "commit", "round_id": review["round_id"], "revision": review["revision"],
+                              "candidate_id": a["candidate_id"], "expected_adopted_revision": 0,
+                              "expected_committed_version_id": self.initial["version_id"], "reason": "모서리 각을 줄임"}, 200)
+        self.assertEqual(decided["evidence_utterances"][0]["utterance_id"], response["utterance_id"])
+        b = self.show_candidate(review, 1)
+        self.assertEqual(self.state()["shared_preview"]["version_id"], b["version_id"])
+        self.assertEqual(self.state()["adopted_version_id"], a["version_id"])
+        end = {"command_id": "repeat-end", "type": "meeting_end", "payload": {}}
+        for _ in range(2):
+            self.assertEqual(self.client.post(self.parent + "/commands", json=end, headers=self.headers).status_code, 200)
+        saved = self.wait_session("completed")
+        self.assertEqual(saved["result"]["revision"], 1)
+        finalized = self.get(saved["result"]["api_url"]).json()
+        self.assertEqual(finalized["manifest"]["adopted_version_id"], a["version_id"])
+        self.assertEqual(finalized["manifest"]["utterance_count"], 2)
+        self.assertIn("B가 좋네", finalized["transcript_text"])
+        self.assertIn(response["utterance_id"], finalized["summary_markdown"])
+        self.assertIn("모서리 각을 줄임", finalized["summary_markdown"])
+        self.assertEqual(finalized["manifest"]["final_scad"], "cad/final.scad")
+        adopted = self.version(a["version_id"])
+        saved_zip = self.get(saved["result"]["zip_url"]).content
+        with zipfile.ZipFile(io.BytesIO(saved_zip)) as export:
+            self.assertEqual(export.read("cad/final.stl"), self.get(adopted["stl_url"]).content)
+            self.assertEqual(export.read("cad/final.scad"), self.get(adopted["assets"]["candidate.scad"]["url"]).content)
+            self.assertEqual(json.loads(export.read("cad/parameters.json")), adopted["parameters"])
+            self.assertIn(f"candidates/{b['candidate_id']}/review.json", export.namelist())
+            for file, props in finalized["manifest"]["files"].items():
+                self.assertEqual(hashlib.sha256(export.read(file)).hexdigest(), props["sha256"])
+        self.command("transcript_correction", {"utterance_id": response["utterance_id"], "text": "외형 중 모서리 쪽을 강조"}, 200)
+        limit = time.monotonic() + 10
+        while time.monotonic() < limit and self.state()["result"]["revision"] == 1:
+            time.sleep(.04)
+        corrected = self.get(self.parent + "/result").json()
+        self.assertEqual(corrected["manifest"]["revision"], 2)
+        self.assertEqual(corrected["manifest"]["stl_sha256"], finalized["manifest"]["stl_sha256"])
+        self.assertIn("이후 정정되었습니다", corrected["summary_markdown"])
+        self.assertEqual(self.get(saved["result"]["zip_url"]).content, saved_zip)
+
+    def test_failed_publish_preserves_frozen_original_and_retries(self):
+        self.command("meeting_start", {"mode": "replay"}, 200)
+        talk = self.command("text", {"text": "회의 목적을 공유했습니다"})
+        self.wait(talk, "answered")
+        with patch("backend.meeting.meeting_result.build_result", side_effect=OSError("disk fault")):
+            self.command("meeting_end", {}, 200)
+            deadline = time.monotonic() + 4
+            while self.state()["session_status"] == "finalizing" and time.monotonic() < deadline:
+                time.sleep(.04)
+            failed = self.state()
+            self.assertEqual(failed["session_status"], "save_error")
+            self.assertEqual(failed["meeting"]["adopted_version_id"], self.initial["version_id"])
+        self.assertEqual(self.client.get(self.parent + "/result.zip", headers=self.headers).status_code, 404)
+        self.command("meeting_retry", {}, 200)
+        saved = self.wait_session("completed")
+        result = self.get(saved["result"]["api_url"]).json()
+        self.assertEqual(result["manifest"]["adopted_version_id"], self.initial["version_id"])
+        self.assertIn("변경 채택 없음", result["summary_markdown"])
+        self.assertIn("회의 목적", result["transcript_text"])
+
+    def test_single_continuous_audio_waits_for_eos_and_late_stt_revises_only_transcript(self):
+        import struct
+        coord = self.client.app.state.coordinator
+        coord.mode = "live"
+        coord.speech_available = True
+        coord.planner = lambda context, mode: fixture_plan(context)
+        first = threading.Event()
+        tail = threading.Event()
+        release_tail = threading.Event()
+        segments = []
+        def provider(path, _):
+            self.assertEqual(path, "/v1/transcriptions")
+            segments.append(True)
+            if len(segments) == 1:
+                first.set()
+                return {"status": "final", "transcript": "시제품 회의 목적을 공유합니다."}
+            tail.set()
+            release_tail.wait(12)
+            return {"status": "final", "transcript": "두 번째 발화는 가장자리를 더 둥글게 하자는 제안입니다."}
+
+        armed = self.command("meeting_start", {"mode": "live"}, 200)["snapshot"]
+        self.assertEqual(armed["session_status"], "ready")
+        self.assertEqual(armed["capture_state"], "off")
+        rate = 8000
+        instant = int(time.time() * 1000) - 2500
+        try:
+            with patch.dict(os.environ, {"VAD_END_SILENCE_MS": "160", "MEETING_FINALIZE_WAIT_SECONDS": ".2"}), patch(
+                    "backend.meeting.planner.gateway_request", side_effect=provider):
+                with self.client.websocket_connect("/v1/audio-streams/continuous") as socket:
+                    hello = {"session_id": self.initial["preview_url"].split("/")[3],
+                             "token": self.headers["Authorization"].split()[1], "device_id": "pc",
+                             "stream_id": "continuous", "actual_sample_rate_hz": rate, "channels": 1,
+                             "codec": "pcm_s16le", "stream_start_sample_index": 0,
+                             "stream_start_source_monotonic_ms": 100, "clock_offset_ms": instant - 100,
+                             "clock_uncertainty_ms": 8}
+                    socket.send_json(hello)
+                    self.assertEqual(socket.receive_json()["type"], "ready")
+                    self.assertEqual(self.state()["capture_state"], "starting")
+                    def frame(index, voiced):
+                        count = 320
+                        socket.send_bytes(struct.pack("<IQI", index, index * count, count) +
+                                          struct.pack("<h", 2500 if voiced else 0) * count)
+                    for index in range(11):
+                        frame(index, index < 6)
+                    self.assertTrue(first.wait(4))
+                    self.assertEqual(self.state()["session_status"], "recording")
+                    for index in range(11, 17):
+                        frame(index, True)
+                    self.command("meeting_end", {}, 200)
+                    socket.send_json({"type": "stop", "last_sequence": 16})
+                    self.assertEqual(socket.receive_json()["type"], "stopped")
+                    self.assertTrue(tail.wait(4))
+                saved = self.wait_session("completed")
+                self.assertEqual(saved["result"]["status"], "partial")
+                original = self.get(saved["result"]["api_url"]).json()
+                self.assertEqual(original["manifest"]["utterance_count"], 1)
+                planned = len(saved["rounds"])
+                release_tail.set()
+                deadline = time.monotonic() + 10
+                while self.state()["result"].get("revision", 0) < 2 and time.monotonic() < deadline:
+                    time.sleep(.04)
+                new = self.get(self.parent + "/result").json()
+                self.assertEqual(new["manifest"]["status"], "complete")
+                self.assertEqual(new["manifest"]["revision"], 2)
+                self.assertEqual(len(new["transcript"]), 2)
+                self.assertIsNone(new["transcript"][-1]["speaker_id"])
+                self.assertEqual(new["manifest"]["stl_sha256"], original["manifest"]["stl_sha256"])
+                self.assertEqual(len(self.state()["rounds"]), planned)
+        finally:
+            release_tail.set()

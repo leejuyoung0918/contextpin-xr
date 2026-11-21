@@ -127,10 +127,27 @@ async function assemblySmoke(host) {
   const frame = await host.evaluate("window.lastModelFrame");
   assert(frame.radius > .05 && frame.radius < .07);
   checks.push("actual 100 mm OpenSCAD original shown in one fixed meter-scale viewer frame");
+  const managed = Boolean((await host.evaluate(snapshotExpression)).session_status);
+  if (managed) {
+    await host.click("#meeting-main");
+    await host.wait(textContains("#meeting-state", "예시 회의 진행 중"), "explicit replay meeting started");
+    await host.click("#meeting-pause");
+    await host.wait(textContains("#meeting-state", "일시정지"), "meeting paused");
+    await host.click("#meeting-main");
+    await host.wait(textContains("#meeting-state", "예시 회의 진행 중"), "same meeting resumed");
+    assert.equal((await host.evaluate(snapshotExpression)).capture_state, "off");
+    checks.push("PC start, pause and resume report replay honestly with no live capture");
+  }
 
   await host.click("#param-section summary");
   await host.set("#param-outer_rounding", 5);
   await host.click("#edit-submit");
+  if (managed) {
+    await host.wait("document.querySelectorAll('.candidate-list article button').length === 1",
+      "manual proposal ready without automatic view");
+    assert.equal(await host.evaluate(currentVersion), original);
+    await host.click(".candidate-list article:first-child button");
+  }
   const manual = await host.wait(`(${currentVersion}) !== ${JSON.stringify(original)} && (${currentVersion})`, "OpenSCAD manual edit");
   assert.deepEqual(await host.evaluate("window.lastModelFrame"), frame);
   let snapshot = await host.evaluate(snapshotExpression);
@@ -191,6 +208,49 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     assert hashlib.sha256(archive.read("object_2.scad")).hexdigest() == sys.argv[3]
 `, resolve(output, zipFile), refine.candidates[0].candidate_id, versionInfo.assets["object_2.scad"].sha256]);
   checks.push("selected candidate, reason, original SCAD, parameters, and exact STL persisted in ZIP");
+
+  if (managed) {
+    await host.set("#speech-text", "옆면 굴곡을 4mm로 바꿔줘");
+    await host.click("#text-submit");
+    const previewRound = await waitFor(async () => {
+      const current = await host.evaluate(snapshotExpression);
+      const newest = current.rounds.at(-1);
+      return newest.round_id !== refine.round_id && newest.status === "reviewable" ? newest : null;
+    }, "unadopted assembly preview available");
+    assert.equal(await host.evaluate(currentVersion), refined);
+    await host.click(".candidate-list article:first-child button");
+    const preview = previewRound.candidates[0].version_id;
+    await host.wait(`${currentVersion} === ${JSON.stringify(preview)}`, "unadopted compared model shown");
+    await waitFor(async () => (await host.evaluate(snapshotExpression)).shared_preview?.version_id === preview,
+      "explicit shared preview synchronized");
+    assert.equal((await host.evaluate(snapshotExpression)).adopted_version_id, refined);
+    await host.click("#meeting-main");
+    const finalized = await waitFor(async () => {
+      const current = await host.evaluate(snapshotExpression);
+      return current.session_status === "completed" ? current : null;
+    }, "whole meeting saved");
+    assert.equal(finalized.adopted_version_id, refined);
+    assert.equal(await host.evaluate("document.getElementById('meeting-result').hidden"), true);
+    await host.click("#meeting-main");
+    await host.wait("document.querySelector('#result-download').disabled === false", "result review opened explicitly");
+    assert.match(await host.evaluate("document.querySelector('#result-transcript').textContent"), /좀 더 곡선적으로/);
+    assert.match(await host.evaluate("document.querySelector('#result-transcript').textContent"), /모서리 반경을 8mm/);
+    assert.match(await host.evaluate("document.querySelector('#result-summary').textContent"), /더 둥근 후보를 선택/);
+    assert.match(await host.evaluate("document.querySelector('#result-scad').textContent"), /outer_rounding\s*=\s*8/);
+    const resultZip = finalized.session_id + "-r" + finalized.result.revision + ".zip";
+    await host.click("#result-download");
+    await waitFor(async () => (await readdir(output)).includes(resultZip), "download complete-meeting ZIP");
+    execFileSync("python3", ["-c", `import hashlib, json, sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    assert hashlib.sha256(archive.read("cad/final.stl")).hexdigest() == sys.argv[2]
+    assert b"outer_rounding = 8" in archive.read("cad/final.scad")
+    assert len(archive.read("transcript.jsonl").splitlines()) >= 3
+`, resolve(output, resultZip), versionInfo.assets["print.stl"].sha256]);
+    checks.push("unadopted shared preview stays separate; ended result shows full transcript, summary and exact adopted SCAD/STL");
+    const savedView = await host.send("Page.captureScreenshot", { format: "png" });
+    await writeFile(resolve(output, "assembly-result.png"), Buffer.from(savedView.data, "base64"));
+    await host.click("#result-close");
+  }
 
   const image = await host.send("Page.captureScreenshot", { format: "png" });
   await writeFile(resolve(output, "assembly-observer.png"), Buffer.from(image.data, "base64"));

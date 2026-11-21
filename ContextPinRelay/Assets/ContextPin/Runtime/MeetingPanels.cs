@@ -51,7 +51,7 @@ namespace ContextPin
             var part = meetingPartId == null ? "모델에서 부위를 선택할 수 있어요" : "선택한 부위  " + MeetingPartLabel(meetingPartId);
             if (meetingLocalPlacement) part += "  ·  기기별 수동 배치";
             if (IsAssemblyMeeting)
-                part = AssemblyOverlayAligned ? "청록 · 유지한 결합부   금색 · 수정한 외형" : "원본과 수정안은 같은 장착 변환을 사용합니다.";
+                part = "원본과 수정안은 같은 장착 변환을 사용합니다.";
             Label("MeetingSelectedPart", content, 56, 453, 568, 34, part, 21, Light);
             var dimensions = ReadMeetingVector(requestedVersion?["bounds_mm"]?["size"]);
             if (dimensions.HasValue && meetingLoadedVersion == requestedId)

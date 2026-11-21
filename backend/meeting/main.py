@@ -172,6 +172,29 @@ def create_app(root=None, planner=None):
                 "decisions": state["decisions"], "utterances": state["utterances"],
                 "rounds": state["rounds"], "print_results": state["print_results"]}
 
+    @app.get("/v1/sessions/{sid}/result")
+    def meeting_review(sid: str, revision: int | None = None, authorization: str = Header(default="")):
+        folder, result = edge().result_folder(sid, bearer(authorization), revision)
+        try:
+            manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+            return {"manifest": manifest, "transcript": [json.loads(line) for line in
+                    (folder / "transcript.jsonl").read_text(encoding="utf-8").splitlines() if line],
+                    "transcript_text": (folder / "transcript.txt").read_text(encoding="utf-8"),
+                    "summary_markdown": (folder / "summary.md").read_text(encoding="utf-8"),
+                    "decisions": json.loads((folder / "decisions.json").read_text(encoding="utf-8")),
+                    "final_scad": (folder / manifest["final_scad"]).read_text(encoding="utf-8"),
+                    "zip_url": result["zip_url"]}
+        except (OSError, ValueError, KeyError) as error:
+            raise MeetingError("저장한 결과를 읽을 수 없습니다.", 409) from error
+
+    @app.get("/v1/sessions/{sid}/result.zip")
+    def meeting_zip(sid: str, revision: int | None = None, authorization: str = Header(default="")):
+        folder, result = edge().result_folder(sid, bearer(authorization), revision)
+        if not (folder / "result.zip").is_file():
+            raise MeetingError("저장한 ZIP 파일을 찾을 수 없습니다.", 409)
+        return FileResponse(folder / "result.zip", media_type="application/zip",
+                            filename=f"contextpin-{sid}-r{result['revision']}.zip")
+
     def asset_file(version, name, download=False):
         asset = version["assets"].get(name)
         if not asset:
@@ -233,7 +256,9 @@ def create_app(root=None, planner=None):
                 f"model.stl / print.stl SHA-256 {version['assets']['print.stl']['sha256']}",
                 f"원본 SHA-256 {version['source_hash']} · 어댑터 {version['adapter_id']}/{version['adapter_revision']}",
                 "엔진 버전은 engine.json에서 확인할 수 있습니다.",
-                *(["원본 SCAD와 parameters.json의 -D 값을 함께 사용하면 같은 버전을 열 수 있습니다."]
+                *(["candidate_source.zip을 풀고 build.json의 input_path를 OpenSCAD에서 엽니다."]
+                  if "candidate_source.zip" in version["assets"] else
+                  ["원본 SCAD와 parameters.json의 -D 값을 함께 사용하면 같은 버전을 열 수 있습니다."]
                   if state.get("assembly") else []),
                 "슬라이서에서 100% 배율과 지지대·재질을 따로 확인하세요.",
                 "형상 검사 결과는 geometry_report.json에 있습니다. 강도·맞음새·실제 출력은 별도 검증입니다.",
@@ -361,13 +386,17 @@ def create_app(root=None, planner=None):
                     return
                 if message.get("bytes") is not None:
                     await run_in_threadpool(capture.add, message["bytes"])
-                elif message.get("text") == '{"type":"stop"}' or (
-                        message.get("text") and json.loads(message["text"]) == {"type": "stop"}):
-                    await run_in_threadpool(capture.close)
-                    capture = None
-                    await socket.send_json({"type": "stopped"})
-                    await socket.close()
-                    return
+                elif message.get("text"):
+                    packet = json.loads(message["text"])
+                    if isinstance(packet, dict) and packet.get("type") == "stop":
+                        last_sequence = packet.get("last_sequence")
+                        if last_sequence is not None and (type(last_sequence) is not int or last_sequence < -1):
+                            raise MeetingError("마지막 오디오 번호가 올바르지 않습니다.")
+                        await run_in_threadpool(capture.close, True, last_sequence)
+                        capture = None
+                        await socket.send_json({"type": "stopped"})
+                        await socket.close()
+                        return
         except (WebSocketDisconnect, OSError, RuntimeError):
             return
         except (MeetingError, ValueError, asyncio.TimeoutError) as error:

@@ -37,6 +37,12 @@ export class MeetingMicrophone {
   }
 
   async start(deviceId, bindView) {
+    await this.prepare();
+    await this.begin(deviceId, bindView);
+  }
+
+  async prepare() {
+    if (this.prepared) return;
     this.context = new AudioContext({ latencyHint: "interactive", sampleRate: 48000 });
     try {
       await this.context.resume();
@@ -44,18 +50,34 @@ export class MeetingMicrophone {
         audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
       });
       if (this.closed) throw new Error("이 회의의 마이크 연결이 종료되었습니다.");
+      for (const track of this.stream.getAudioTracks()) {
+        track.enabled = false;
+        track.addEventListener("ended", () => this.fail("마이크 사용이 중단되었습니다."), { once: true });
+      }
       await this.context.audioWorklet.addModule("/meeting/pcm.js");
       if (this.closed) throw new Error("이 회의의 마이크 연결이 종료되었습니다.");
       this.source = this.context.createMediaStreamSource(this.stream);
       this.processor = new AudioWorkletNode(this.context, "meeting-pcm");
       this.silent = this.context.createGain();
       this.silent.gain.value = 0;
-      this.bindView = bindView;
+      this.prepared = true;
+    } catch (error) {
+      if (this.closed) this.releaseDevice();
+      else this.close();
+      throw error;
+    }
+  }
+
+  async begin(deviceId, bindView) {
+    if (!this.prepared || this.closed || this.stopping || this.begun) {
+      throw new Error("마이크를 준비한 뒤 시작하세요.");
+    }
+    this.begun = true;
+    this.bindView = bindView;
+    try {
+      await this.context.resume();
       if (!this.frames) await this.startSocket(deviceId, bindView);
-      if (this.closed) throw new Error("이 회의의 마이크 연결이 종료되었습니다.");
-      for (const track of this.stream.getAudioTracks()) {
-        track.addEventListener("ended", () => this.fail("마이크 사용이 중단되었습니다."), { once: true });
-      }
+      if (this.closed || this.stopping) throw new Error("이 회의의 마이크 연결이 종료되었습니다.");
       this.processor.port.onmessage = message => {
         if (message.data === "flushed") this.flush();
         else this.send(message.data);
@@ -63,11 +85,11 @@ export class MeetingMicrophone {
       this.processor.connect(this.silent).connect(this.context.destination);
       const offset = this.session.clock?.clock_offset_ms;
       if (Number.isFinite(offset)) this.startMs = Math.round(performance.now() + offset);
+      for (const track of this.stream.getAudioTracks()) track.enabled = true;
       this.source.connect(this.processor);
       if (this.frames) this.clipTimer = setTimeout(() => this.stop(), clipSeconds * 1000);
     } catch (error) {
-      if (this.closed) this.releaseDevice();
-      else this.close();
+      this.close();
       throw error;
     }
   }
@@ -121,7 +143,6 @@ export class MeetingMicrophone {
       if (data.type === "error") this.fail(data.message || "음성 처리가 중단되었습니다.");
       if (data.type === "stopped") this.close();
     });
-
   }
 
   send(samples) {
@@ -149,10 +170,27 @@ export class MeetingMicrophone {
     this.socket.send(frame);
   }
 
+  quiesce() {
+    this.deferSequence = true;
+    if (!this.begun) {
+      this.close();
+      return;
+    }
+    this.deferEos = true;
+    this.stop();
+  }
+
+  finish() {
+    this.deferEos = false;
+    if (this.flushed) this.sendEos();
+  }
+
   stop() {
     if (this.closed || this.stopping) return;
     this.stopping = true;
     clearTimeout(this.clipTimer);
+    for (const track of this.stream?.getAudioTracks() || []) track.enabled = false;
+    this.source?.disconnect();
     this.processor?.port.postMessage("flush");
     this.flushTimer = setTimeout(() => this.flush(), 300);
   }
@@ -162,12 +200,20 @@ export class MeetingMicrophone {
     this.flushed = true;
     clearTimeout(this.flushTimer);
     this.releaseDevice();
-    if (this.frames) {
-      this.submitClip();
-    } else if (this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(JSON.stringify({ type: "stop" }));
-      this.stopTimer = setTimeout(() => this.close(), 8000);
-    } else this.close();
+    if (this.frames) this.submitClip();
+    else if (!this.deferEos) this.sendEos();
+  }
+
+  sendEos() {
+    if (this.closed || this.eosSent) return;
+    this.eosSent = true;
+    if (this.socket?.readyState !== WebSocket.OPEN) {
+      this.close();
+      return;
+    }
+    const stop = this.deferSequence ? { type: "stop", last_sequence: this.sequence - 1 } : { type: "stop" };
+    this.socket.send(JSON.stringify(stop));
+    this.stopTimer = setTimeout(() => this.close(), 8000);
   }
 
   async submitClip() {

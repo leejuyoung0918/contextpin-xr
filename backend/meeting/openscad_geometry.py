@@ -8,6 +8,7 @@ import json
 import math
 import os
 from pathlib import Path
+import posixpath
 import re
 import shutil
 import struct
@@ -26,17 +27,101 @@ SAMPLE = Path(__file__).with_name("openscad_sample") / "assembly.json"
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
 MAX_STL_BYTES = 8 * 1024 * 1024
 PARAMETER_NAME = re.compile(r"[a-zA-Z_][a-zA-Z_0-9]*\Z")
+SCAD_TOKENS = re.compile(
+    r'(?P<comment>//[^\r\n]*|/\*[\s\S]*?\*/)|(?P<string>"(?:\\[\s\S]|[^"\\])*")|'
+    r'(?P<directive>\b(?:include|use)\s*<[^>\r\n]+>)|(?P<identifier>[a-zA-Z_$][a-zA-Z_0-9$]*)|[^\s]'
+)
+SCAD_NUMBER = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
+STL_ARGUMENTS = ("--export-format", "binstl")
 AXES = {"x": 0, "y": 1, "z": 2}
 _baselines = OrderedDict()
-_baselines_lock = threading.Lock()
+_rendered = OrderedDict()
+_cache_lock = threading.Lock()
 
 
 def _is_number(value):
     return type(value) in (int, float) and -1e9 <= value <= 1e9
 
 
+def _file_info(data):
+    return {"sha256": digest(data), "size_bytes": len(data)}
+
+
+def _tokens(source):
+    return [token for token in SCAD_TOKENS.finditer(source) if token.lastgroup != "comment"]
+
+
+def _assignments(tokens, names):
+    """Locate declarations at file scope without reading comments, strings, or module locals as code."""
+    result = {}
+    depth = 0
+    for index, token in enumerate(tokens):
+        value = token.group()
+        if token.lastgroup == "identifier" and value in names and depth == 0:
+            following = tokens[index + 1:index + 3]
+            if len(following) == 2 and following[0].group() == "=" and following[1].group() != "=":
+                if value in result:
+                    raise GeometryError(f"OpenSCAD의 최상위 매개변수 {value}가 중복됩니다.")
+                result[value] = index + 2
+        depth += (value in ("{", "(", "[")) - (value in ("}", ")", "]"))
+    return result
+
+
+def _literal_edits(tokens, defaults):
+    assignments = _assignments(tokens, defaults)
+    edits = {}
+    for name, value in defaults.items():
+        start = assignments.get(name)
+        if start is None:
+            raise GeometryError(f"OpenSCAD 원본의 맨 위에서 {name}의 기본값을 선언해 주세요.")
+        end = next((index for index in range(start, len(tokens)) if tokens[index].group() == ";"), start)
+        raw = "".join(item.group() for item in tokens[start:end])
+        if isinstance(value, str) and end == start + 1 and tokens[start].lastgroup == "string":
+            actual = json.loads(raw)
+        elif type(value) in (int, float) and SCAD_NUMBER.fullmatch(raw):
+            # Read the untouched token span to reject adjacent tokens such as `1 2`.
+            first, last = tokens[start], tokens[end - 1]
+            literal = first.string[first.start():last.end()]
+            actual = float(literal) if SCAD_NUMBER.fullmatch(literal) else None
+        else:
+            actual = None
+        if actual != value:
+            raise GeometryError(f"OpenSCAD의 {name}에는 설정과 같은 숫자 또는 enum 기본값을 선언해 주세요.")
+        edits[name] = (tokens[start].start(), tokens[end - 1].end())
+    return edits
+
+
+def _static_assets(tokens):
+    for index, token in enumerate(tokens):
+        value = token.group()
+        if token.lastgroup == "directive":
+            prefix, path = value.split("<", 1)
+            yield prefix.strip(), path[:-1].strip()
+        if value not in {"import", "surface"} or index + 1 == len(tokens) or tokens[index + 1].group() != "(":
+            continue
+        arguments = []
+        argument = []
+        depth = 0
+        for item in tokens[index + 2:]:
+            symbol = item.group()
+            if depth == 0 and symbol in {",", ")"}:
+                arguments.append(argument)
+                if symbol == ")":
+                    break
+                argument = []
+                continue
+            depth += (symbol in ("[", "(")) - (symbol in ("]", ")"))
+            argument.append(item)
+        filename = next((arg[2:] for arg in arguments if [t.group() for t in arg[:2]] == ["file", "="]),
+                        arguments[0] if arguments else [])
+        if len(filename) != 1 or filename[0].lastgroup != "string":
+            raise GeometryError("OpenSCAD import()와 surface()의 파일에는 상대 경로 문자열을 사용해 주세요.")
+        yield value, json.loads(filename[0].group())
+
+
 class OpenScadAdapter(ModelAdapter):
     def __init__(self, config_path):
+        config_path = Path(config_path).resolve()
         super().__init__(config_path)
         try:
             if config_path.stat().st_size > 256 * 1024:
@@ -46,6 +131,9 @@ class OpenScadAdapter(ModelAdapter):
             self.guard = self.config["coupling_guard"]
             self.mounting = self.config["mounting"]
             self.check_assembly()
+            self.check_source()
+        except GeometryError:
+            raise
         except (OSError, TypeError, ValueError, AttributeError, KeyError) as error:
             raise GeometryError("OpenSCAD 조립체 설정의 파일, 부위, 장착 좌표와 고정 영역을 확인해 주세요.") from error
 
@@ -109,6 +197,31 @@ class OpenScadAdapter(ModelAdapter):
                 raise ValueError()
         self.validate_parameters(self.describe(), default_parameters(profile))
 
+    def check_source(self):
+        original = self.config["source_file"]
+        self.original_text = self.sources[original].decode("utf-8")
+        defaults = default_parameters(self.config["profile"])
+        main_tokens = _tokens(self.original_text)
+        self.parameter_edits = _literal_edits(main_tokens, defaults)
+        self.resolved_entry = str(Path(original).with_name("candidate.scad"))
+        if self.resolved_entry != original and self.resolved_entry in self.sources:
+            raise GeometryError("candidate.scad 파일 이름은 실행 가능한 수정안에 사용됩니다.")
+        checked = set()
+        pending = [(original, main_tokens, True)]
+        while pending:
+            name, tokens, shares_globals = pending.pop()
+            if (name, shares_globals) in checked:
+                continue
+            checked.add((name, shares_globals))
+            if name != original and shares_globals and _assignments(tokens, defaults):
+                raise GeometryError("편집할 OpenSCAD 매개변수의 최상위 선언은 원본 진입 파일 하나에만 두세요.")
+            for dependency_kind, target in _static_assets(tokens):
+                path = posixpath.normpath(posixpath.join(posixpath.dirname(name), target))
+                if path not in self.sources or target.startswith("/") or "\\" in target or path == original:
+                    raise GeometryError(f"OpenSCAD 참조 파일 {target}을 source_files에 상대 경로로 등록해 주세요.")
+                if dependency_kind in {"include", "use"}:
+                    pending.append((path, _tokens(self.sources[path].decode("utf-8")), shares_globals and dependency_kind == "include"))
+
     def describe(self):
         config = self.config
         profile = dict(config["profile"])
@@ -142,11 +255,33 @@ class OpenScadAdapter(ModelAdapter):
         size = bounds(geometry.vertices)["size"]
         return {field["property_id"]: size[field["axis"]] for field in self.config["profile"].get("measured_properties", [])}
 
-    def freeze(self, folder):
-        for name, data in self.sources.items():
+    def resolve(self, params):
+        source = self.original_text
+        changes = [(start, end, json.dumps(params[name], ensure_ascii=False, allow_nan=False))
+                   for name, (start, end) in self.parameter_edits.items()]
+        for start, end, replacement in sorted(changes, reverse=True):
+            source = source[:start] + replacement + source[end:]
+        return source.encode("utf-8")
+
+    def write_source(self, folder, source):
+        for name, data in self.source_dependencies().items():
             target = folder / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
+        entry = folder / self.resolved_entry
+        entry.parent.mkdir(parents=True, exist_ok=True)
+        entry.write_bytes(source)
+        return entry
+
+    def source_dependencies(self):
+        return {name: data for name, data in self.sources.items() if name != self.config["source_file"]}
+
+    def resolved_archive(self, source):
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as archive:
+            for name, data in sorted({**self.source_dependencies(), self.resolved_entry: source}.items()):
+                archive.writestr(zipfile.ZipInfo(name), data, zipfile.ZIP_DEFLATED)
+        return output.getvalue()
 
     def archive(self):
         output = io.BytesIO()
@@ -188,7 +323,7 @@ def _environment():
 @lru_cache(maxsize=4)
 def _version(path, _modified_at):
     try:
-        result = subprocess.run([path, "--version"], env=_environment(), capture_output=True, timeout=4, check=True)
+        result = subprocess.run([path, "--version"], env=_environment(), capture_output=True, timeout=10, check=True)
     except (OSError, subprocess.SubprocessError) as exc:
         raise GeometryError("OpenSCAD CLI를 시작하지 못했습니다. 실행 파일을 확인해 주세요.") from exc
     match = re.search(rb"OpenSCAD version\s+([^\r\n]+)", result.stdout + result.stderr)
@@ -197,11 +332,8 @@ def _version(path, _modified_at):
     return match[1].decode(errors="replace")[:100]
 
 
-def _render(path, entry, params, artifact, deadline, cancelled):
-    args = [path, "--export-format", "binstl", "-o", str(artifact)]
-    for name, value in sorted(params.items()):
-        args.extend(["-D", f"{name}={json.dumps(value, ensure_ascii=False, allow_nan=False)}"])
-    args.append(str(entry))
+def _render(path, entry, artifact, deadline, cancelled):
+    args = [path, *STL_ARGUMENTS, "-o", str(artifact), entry.name]
     try:
         with subprocess.Popen(args, cwd=entry.parent, env=_environment(), stdout=subprocess.DEVNULL,
                               stderr=subprocess.PIPE) as worker:
@@ -294,47 +426,52 @@ def build_model(root, version_id, profile, params, constraints=(), *, cancelled=
         _check_job(deadline, cancelled)
         with tempfile.TemporaryDirectory(prefix=".openscad-", dir=root) as name:
             sandbox = Path(name)
-            source = sandbox / "source"
-            model.freeze(source)
-            entry = source / model.config["source_file"]
+            source = model.resolve(params)
+            entry = model.write_source(sandbox / "source", source)
             modified = Path(path).stat().st_mtime_ns
             engine = {"name": "openscad", "version": _version(path, modified), "stl_format": "binary"}
-            stl = _render(path, entry, params, sandbox / "candidate.stl", deadline, cancelled)
+            cache_key = (current["source_hash"], path, engine["version"], modified, STL_ARGUMENTS)
+            render_key = (*cache_key, digest(source))
+            with _cache_lock:
+                cached = _rendered.get(render_key)
+            stl = cached if cached is not None else _render(path, entry, sandbox / "candidate.stl", deadline, cancelled)
             mesh, faces = _convert(stl, model)
             guard = _guard(faces, model.guard)
             shape = _surface_hash(faces)
             initial = default_parameters(current)
-            cache_key = (current["source_hash"], path, engine["version"], modified)
             if params != initial:
-                with _baselines_lock:
+                with _cache_lock:
                     baseline = _baselines.get(cache_key)
                 if baseline is None:
-                    original = _render(path, entry, initial, sandbox / "original.stl", deadline, cancelled)
+                    original_entry = model.write_source(sandbox / "baseline", model.resolve(initial))
+                    original = _render(path, original_entry, sandbox / "original.stl", deadline, cancelled)
                     _, original_faces = _convert(original, model)
                     baseline = (_guard(original_faces, model.guard), _surface_hash(original_faces))
-                    _cache_baseline(cache_key, baseline)
+                    _cache_set(_baselines, cache_key, baseline)
                 if baseline[0] != guard:
                     raise GeometryError("수정안이 고정 결합 영역을 변경했습니다. 이 후보는 표시하지 않습니다.")
                 if baseline[1] == shape:
                     raise GeometryError("매개변수 값을 바꿨지만 실제 OpenSCAD 형상이 동일합니다.")
             result = _register(sandbox, root, version_id, model, current, params, constraints, mesh, stl, guard,
-                               shape, engine, deadline, cancelled)
+                               shape, engine, source, deadline, cancelled)
+            _cache_set(_rendered, render_key, stl)
             if params == initial:
-                _cache_baseline(cache_key, (guard, shape))
+                _cache_set(_baselines, cache_key, (guard, shape))
             return result
     finally:
         _slots.release()
 
 
-def _cache_baseline(key, value):
-    with _baselines_lock:
-        _baselines[key] = value
-        _baselines.move_to_end(key)
-        while len(_baselines) > 4:
-            _baselines.popitem(last=False)
+def _cache_set(entries, key, value):
+    with _cache_lock:
+        entries[key] = value
+        entries.move_to_end(key)
+        while len(entries) > 4:
+            entries.popitem(last=False)
 
 
-def _register(sandbox, root, version, model, profile, params, constraints, mesh, stl, guard, shape, engine, deadline, cancelled):
+def _register(sandbox, root, version, model, profile, params, constraints, mesh, stl, guard, shape, engine,
+              source, deadline, cancelled):
     report = inspect_mesh(mesh)
     measured = model.measure(mesh)
     violations = violated_constraints(profile, measured, constraints)
@@ -350,14 +487,33 @@ def _register(sandbox, root, version, model, profile, params, constraints, mesh,
                   surface_sha256=shape,
                   fixed_mounting=profile["assembly"]["mounting"], print_process_validation="not_performed",
                   physical_interference_validation="not_performed")
-    raw_source = model.sources[model.config["source_file"]]
+    original_entry = model.config["source_file"]
+    raw_source = model.sources[original_entry]
+    parameters = json_bytes(params)
+    resolved_archive = model.resolved_archive(source)
+    build = {
+        "schema_version": 1, "engine": engine,
+        "source_hash": profile["source_hash"], "original_entry": original_entry,
+        "resolved_entry": model.resolved_entry, "input_path": model.resolved_entry,
+        "argument_template": [*STL_ARGUMENTS, "-o", "<output.stl>", model.resolved_entry],
+        "parameters_via": "top_level_literal_assignments", "parameter_overrides": [],
+        "original_source": _file_info(raw_source), "resolved_source": _file_info(source),
+        "dependencies": {path: _file_info(data) for path, data in model.source_dependencies().items()},
+        "candidate_source_archive": _file_info(resolved_archive), "parameters": _file_info(parameters),
+        "stl": {**_file_info(stl), "units": "mm", "surface_sha256": shape},
+        "preview": {**_file_info(preview), "from_stl_sha256": digest(stl), "units": "m",
+                    "coordinate_transform": "(x,z,-y)/1000", "simplification": "none"},
+    }
     files = {"print.stl": stl, "preview.glb": preview, "semantic_parts.json": json_bytes(semantic),
-             "parameters.json": json_bytes(params), "geometry_report.json": json_bytes(report),
+             "parameters.json": parameters, "geometry_report.json": json_bytes(report),
              "constraints.json": json_bytes(list(constraints)), "object_profile.json": json_bytes(profile),
              "object_2.scad": raw_source, "adapter_source_snapshot.zip": model.archive(),
+             "candidate.scad": source, "candidate_source.zip": resolved_archive, "build.json": json_bytes(build),
              "assembly_config.json": json_bytes(model.config), "engine.json": json_bytes(engine)}
     assets = {name: describe_asset(version, name, data) for name, data in files.items()}
     assets["object_2.scad"]["media_type"] = "text/plain"
+    assets["candidate.scad"]["media_type"] = "text/plain"
+    assets["candidate_source.zip"]["media_type"] = "application/zip"
     assets["preview.glb"].update(bounds_m=report["bounds_m"], semantic_part_map_asset_id=assets["semantic_parts.json"]["asset_id"])
     assets["print.stl"]["bounds_mm"] = report["stl_bounds_mm"]
     geometry_hash = digest(stl)
@@ -378,7 +534,7 @@ def _register(sandbox, root, version, model, profile, params, constraints, mesh,
             "adapter_revision": profile["adapter_revision"], "source_hash": profile["source_hash"],
             "design_units": "mm", "full_parameters": params, "bounds_mm": report["bounds_mm"],
             "bounds_m": report["bounds_m"], "measured_dimensions_mm": measured, "geometry_hash": geometry_hash, "surface_sha256": shape,
-            "build_mode": "generated", "engine": engine, "assets": assets,
+            "build_mode": "generated", "engine": engine, "assets": assets, "candidate_input_path": model.resolved_entry,
             "preview_asset_id": assets["preview.glb"]["asset_id"], "stl_asset_id": assets["print.stl"]["asset_id"],
             "semantic_part_map_asset_id": assets["semantic_parts.json"]["asset_id"],
             "validation_report_asset_id": assets["geometry_report.json"]["asset_id"]}

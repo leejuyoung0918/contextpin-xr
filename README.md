@@ -12,7 +12,9 @@
 artifacts/meeting-venv/bin/python -m backend.meeting assembly
 ```
 
-[PC 화면 열기](http://127.0.0.1:8788/meeting/) · [설치·수동 정렬·실제 SCAD 등록](docs/openscad-assembly.md)
+[PC 화면 열기](http://127.0.0.1:8788/meeting/) · [공간 회의·연속 녹음·종료 결과](docs/spatial-meeting.md) · [실제 SCAD 등록](docs/openscad-assembly.md)
+
+헤드셋에서는 모델, 회의 조작, 작은 요약이 기본으로 보입니다. 회의를 종료하면 그 시점에 채택돼 있던 버전의 실행 가능한 SCAD와 정확한 STL, 확정 전사·요약·결정을 한 묶음으로 저장합니다.
 
 OpenSCAD와 아래 가상 환경 설치가 필요합니다. 기본 설정에는 실제 대상 대신 분리된 예시 조립체가 들어 있습니다. 다음 절에는 이전 범용 회의 모드의 실행 방법이 있습니다.
 

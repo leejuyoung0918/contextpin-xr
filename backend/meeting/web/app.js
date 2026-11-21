@@ -1,6 +1,7 @@
 import { ModelViewer } from "./viewer.js";
 import { canRecord, MeetingMicrophone } from "./audio.js";
 import { MeetingConnection, randomId, request } from "./edge.js";
+import { MeetingLifecycle } from "./lifecycle.js";
 import { byId, element, makeButton, renderMinutes, renderRound, renderRoundsMenu, renderTranscripts, unitValue, versionLabel } from "./panels.js";
 
 const state = {
@@ -26,6 +27,11 @@ const deviceId = storage.get(deviceKey) || "web-" + randomId();
 storage.set(deviceKey, deviceId);
 const show = (id, visible = true) => { byId(id).hidden = !visible; };
 const write = (id, value) => { byId(id).textContent = value; };
+
+const lifecycle = new MeetingLifecycle(deviceId, {
+  edge: () => state.edge, caps: () => state.serviceCaps,
+  beforeUtterance, pendingDecision: () => state.decisionPromise, notice, errorMessage: message, download,
+});
 
 function notice(text = "", error = false) {
   const area = byId("notice");
@@ -108,6 +114,7 @@ function candidateRound(id) {
 function startSession(identity) {
   state.identity = identity;
   const { session_id, participant_id, token } = identity;
+  if (new URLSearchParams(location.search).get("result") === session_id) lifecycle.requestedResult = session_id;
   storage.set(storageKey, JSON.stringify({ session_id, participant_id, token }));
   show("setup", false);
   show("meeting");
@@ -119,6 +126,7 @@ function startSession(identity) {
       state.lastUtterance = snapshot.utterances?.at(-1)?.utterance_id;
       const changedProfile = state.snapshot?.profile.object_id !== snapshot.profile.object_id;
       state.snapshot = snapshot;
+      followSharedPreview(snapshot);
       if (changedProfile) buildPartButtons();
       if (state.target?.kind === "candidate") {
         const compatible = candidateRound(state.target.roundId);
@@ -131,6 +139,7 @@ function startSession(identity) {
       selectReadyEdit();
       updateModel();
       paint();
+      lifecycle.observe(snapshot);
     },
     connection: setStatus,
     event: (event, snapshot) => {
@@ -169,6 +178,7 @@ function startSession(identity) {
 function exitSession() {
   state.mic?.close();
   state.mic = null;
+  lifecycle.reset();
   state.edge?.close();
   state.controller?.abort();
   state.loadId++;
@@ -178,7 +188,8 @@ function exitSession() {
   Object.assign(state, { identity: null, edge: null, snapshot: null, selected: [], target: null, view: null,
     loadedVersion: null, autoPreview: null, pinnedRound: null, viewReports: Promise.resolve(), partial: null,
     mediaUrl: null, switching: false, displayedView: null, lastViewSignature: null,
-    pending: 0, lastUtterance: null, micStarting: false, transcribing: false, failedView: false });
+    pending: 0, lastUtterance: null, micStarting: false, transcribing: false, failedView: false,
+    sharedPreviewKey: null, shareIntent: null, decisionPromise: null });
   storage.clear(storageKey);
   byId("invite-dialog").close();
   byId("mic-dialog").close();
@@ -256,7 +267,28 @@ bindEntry("create-form", "/v1/sessions", values => ({ profile_id: values.profile
 bindEntry("join-form", "/v1/join", values => ({ join_code: values.code.value.trim().toUpperCase() }));
 byId("leave-button").addEventListener("click", exitSession);
 
-async function runCommand(type, payload, form) {
+function canChangeMeeting() {
+  return state.snapshot?.status === "active" &&
+    !["finalizing", "completed", "save_error"].includes(state.snapshot.session_status);
+}
+
+function runCommand(type, payload, form) {
+  const adoption = type === "decide" || type === "meeting_readopt";
+  if (adoption && lifecycle.busy === "meeting_end") {
+    notice("회의 종료 중입니다. 마지막으로 제출한 채택을 확인하고 있습니다.", true);
+    return Promise.resolve(null);
+  }
+  const result = executeCommand(type, payload, form);
+  if (adoption) {
+    state.decisionPromise = result;
+    result.finally(() => {
+      if (state.decisionPromise === result) state.decisionPromise = null;
+    });
+  }
+  return result;
+}
+
+async function executeCommand(type, payload, form) {
   const edge = state.edge;
   if (!edge) return null;
   const buttons = form ? Array.from(form.querySelectorAll("button:not(:disabled)")) : [];
@@ -267,7 +299,7 @@ async function runCommand(type, payload, form) {
     if (state.edge !== edge) return null;
     if (result.round_id && ["edit", "restore"].includes(type)) {
       state.pinnedRound = result.round_id;
-      state.autoPreview = result.round_id;
+      state.autoPreview = lifecycle.enabled(state.snapshot) ? null : result.round_id;
       selectReadyEdit();
       updateModel();
       paint();
@@ -281,10 +313,30 @@ async function runCommand(type, payload, form) {
   }
 }
 
+function followSharedPreview(snapshot) {
+  if (!lifecycle.enabled(snapshot)) return;
+  const shared = snapshot.shared_preview;
+  const key = JSON.stringify(shared || null);
+  if (key === state.sharedPreviewKey) return;
+  state.sharedPreviewKey = key;
+  if (!shared) {
+    if (state.target?.kind === "candidate") state.target = null;
+    return;
+  }
+  const round = candidateRound(shared.round_id);
+  const candidate = round?.candidates.find(item => item.candidate_id === shared.candidate_id && item.status === "valid");
+  if (!candidate || candidate.version_id !== shared.version_id) return;
+  if (state.shareIntent?.versionId !== shared.version_id) state.shareIntent = null;
+  changeView(round, candidate, false);
+}
+
 function visualContext() {
   const displayed = state.displayedView;
   const round = shownRound();
   const candidateId = round?.round_id === displayed?.roundId ? displayed?.candidateId : null;
+  const intent = state.shareIntent;
+  const share = canChangeMeeting() && intent?.versionId === state.loadedVersion?.version_id &&
+    (intent.clear || intent.candidateId === candidateId);
   return {
     version_id: state.loadedVersion?.version_id,
     part_ids: state.selected,
@@ -292,18 +344,21 @@ function visualContext() {
     candidate_id: candidateId,
     display_order_candidate_ids: round?.candidates.map(candidate => candidate.candidate_id) || [],
     tracking_state: "desktop_view",
+    ...(share ? { share: true } : {}),
   };
 }
 
 function reportView() {
-  if (state.switching) return;
+  if (state.switching || !canChangeMeeting()) return;
   const payload = visualContext();
   const signature = JSON.stringify(payload);
   if (!payload.version_id || signature === state.lastViewSignature) return;
   state.lastViewSignature = signature;
   const edge = state.edge;
+  const intent = payload.share ? state.shareIntent : null;
   state.viewReports = state.viewReports.catch(() => {}).then(async () => {
-    if (state.edge !== edge) return;
+    if (state.edge !== edge || (intent && intent !== state.shareIntent)) return;
+    if (intent) state.shareIntent = null;
     try {
       await edge.command("view", payload);
     } catch (error) {
@@ -379,6 +434,9 @@ function changeView(round, candidate, render = true) {
     candidateId: candidate.candidate_id, highlight: changed, label: candidate.title,
   };
   if (render) {
+    if (lifecycle.enabled(state.snapshot) && state.target.kind === "candidate" && canChangeMeeting()) {
+      state.shareIntent = { versionId: candidate.version_id, candidateId: candidate.candidate_id };
+    }
     if (state.failedView) state.view = null;
     updateModel();
     paint();
@@ -488,10 +546,14 @@ function paintModelHeader() {
     .filter(Boolean).join(" · "));
   show("head-view", state.view?.kind !== "head");
   show("original-view", Boolean(scene && !isOriginal));
+  show("readopt-original", Boolean(lifecycle.enabled(state.snapshot) && canChangeMeeting() &&
+    version && isOriginal && !isHead && !state.switching));
   show("part-controls", !scene);
   show("assembly-view-hint", Boolean(scene));
   show("model-files", Boolean(version?.stl_url && state.snapshot.profile.capabilities?.can_export_stl));
-  show("download-scad", Boolean(version?.assets?.["object_2.scad"]?.url));
+  const entry = version?.assets?.["candidate.scad"] || version?.assets?.["object_2.scad"];
+  show("download-scad", Boolean(entry?.url));
+  write("download-scad", version?.assets?.["candidate.scad"] ? "현재 SCAD" : "SCAD 원본");
   show("download-zip", Boolean(version?.export_url));
   write("download-zip", scene ? "SCAD · 매개변수 · STL" : "버전 내보내기");
   show("media-label", !scene && Boolean(version) && state.snapshot.status === "active");
@@ -524,8 +586,17 @@ byId("original-view").addEventListener("click", () => {
   updateModel();
   paint();
 });
+byId("readopt-original").addEventListener("click", () => {
+  if (state.loadedVersion?.version_id !== state.snapshot?.original_version_id) return;
+  runCommand("meeting_readopt", {
+    version_id: state.loadedVersion.version_id, expected_adopted_revision: state.snapshot.adopted_revision,
+  });
+});
 byId("head-view").addEventListener("click", () => {
   state.target = null;
+  if (lifecycle.enabled(state.snapshot) && canChangeMeeting()) {
+    state.shareIntent = { versionId: headModel()?.version_id, clear: true };
+  }
   if (state.failedView) state.view = null;
   updateModel();
   paint();
@@ -538,8 +609,9 @@ byId("download-stl").addEventListener("click", () => {
   if (version?.stl_url) download(version.stl_url, "contextpin-" + version.version_id + ".stl");
 });
 byId("download-scad").addEventListener("click", () => {
-  const asset = state.loadedVersion?.assets?.["object_2.scad"];
-  if (asset?.url) download(asset.url, "object_2.scad");
+  const assets = state.loadedVersion?.assets;
+  const name = assets?.["candidate.scad"] ? "candidate.scad" : "object_2.scad";
+  if (assets?.[name]?.url) download(assets[name].url, name);
 });
 byId("download-zip").addEventListener("click", () => exportVersion(state.loadedVersion));
 byId("download-minutes").addEventListener("click", () => {
@@ -552,7 +624,7 @@ function paintParameters(version = state.loadedVersion) {
   const destination = byId("parameters");
   const host = currentPerson()?.role === "host";
   const canEdit = Boolean(version && !state.switching && profile.capabilities?.can_parametric_edit &&
-    state.snapshot.status === "active");
+    canChangeMeeting());
   const locks = (state.snapshot.constraints || []).filter(item => item.status === "active");
   const key = JSON.stringify([version?.version_id, state.snapshot.constraint_revision, canEdit, host]);
   if (destination.dataset.key === key) return;
@@ -684,7 +756,8 @@ function paint() {
   renderRoundsMenu(rounds, round?.round_id, roundShort);
   const candidateId = !state.switching && state.displayedView?.roundId === round?.round_id ?
     state.displayedView?.candidateId : null;
-  renderRound(round, snapshot, { actor: state.identity.participant_id, presenter: presenter || Boolean(scene), candidateId }, {
+  renderRound(round, snapshot, { actor: state.identity.participant_id, presenter: presenter || Boolean(scene), candidateId,
+    interactive: canChangeMeeting() }, {
     view: changeView, command: runCommand, error: text => notice(text, true),
     refine: current => {
       const input = byId("speech-text");
@@ -701,13 +774,16 @@ function paint() {
       paint();
     },
     export: exportVersion, audio: loadAudio,
+    readopt: lifecycle.enabled(snapshot) && canChangeMeeting() ? version => runCommand("meeting_readopt", {
+      version_id: version.version_id, expected_adopted_revision: snapshot.adopted_revision,
+    }) : null,
   });
   renderMedia(snapshot);
   paintStatus(round);
   paintDebug(round);
   if (scene) show("print-panel", false);
   else paintPrintResults(snapshot);
-  byId("text-submit").disabled = snapshot.status !== "active" || state.switching;
+  byId("text-submit").disabled = !canChangeMeeting() || state.switching;
   reportView();
 }
 
@@ -730,7 +806,21 @@ function paintStatus(round) {
   capture.textContent = (uploading ? "녹음 전송 중" : recording ? "녹음 중" :
     state.transcribing ? "발화 전사 중" : "마이크 꺼짐") +
     (snapshot.raw_audio_saved ? " · 원음 저장" : " · 원음 미보관");
-  const active = snapshot.status === "active";
+  const active = canChangeMeeting();
+  const managed = lifecycle.enabled(snapshot);
+  if (managed) {
+    const statuses = {
+      ready: "대기 중", recording: snapshot.capture_state === "recording" ? "지정 마이크 녹음 중" : "회의 진행 중",
+      paused: "일시정지", finalizing: "결과 저장 중", completed: "회의 종료됨", save_error: "저장 실패",
+    };
+    capture.textContent = statuses[snapshot.session_status];
+    show("audio-host", false);
+    show("record-button", false);
+    write("mic-note", "");
+    show("sample-button", active && (snapshot.provider_mode === "fixture" || snapshot.meeting?.mode === "replay") &&
+      Boolean(snapshot.profile.demo_utterance));
+    return;
+  }
   const host = snapshot.audio_host_device_id === deviceId;
   const available = canRecord();
   const canSpeech = available && state.serviceCaps.microphone === true;
@@ -793,7 +883,7 @@ async function beforeUtterance() {
     throw new Error(assembly() ? "현재 모델의 연결을 확인한 뒤 다시 시도하세요." :
       "선택 부위가 아직 공유되지 않았습니다. 부위를 다시 선택한 뒤 입력하세요.");
   }
-  if (!state.edge || !state.loadedVersion || state.switching) throw new Error("모델이 열린 뒤 부위를 확인해 주세요.");
+  if (!state.edge || !state.loadedVersion || state.switching) throw new Error("모델이 표시된 뒤 다시 시도하세요.");
 }
 
 byId("round-select").addEventListener("change", event => {
@@ -1049,15 +1139,24 @@ byId("print-form").addEventListener("submit", async event => {
 
 window.addEventListener("pagehide", () => {
   state.mic?.close();
+  lifecycle.reset();
   releaseAudio();
 });
 let savedIdentity;
 try { savedIdentity = JSON.parse(storage.get(storageKey)); } catch { storage.clear(storageKey); }
 if (savedIdentity?.token) startSession(savedIdentity);
-else checkHealth();
+else {
+  checkHealth();
+  if (new URLSearchParams(location.search).has("result")) {
+    notice("이 회의에 연결한 PC 브라우저에서 결과를 열거나 PC에 저장된 회의 ZIP을 확인하세요.");
+  }
+}
 loadProfiles();
 
 request("/v1/capabilities").then(capabilities => {
   state.serviceCaps = capabilities;
-  if (state.snapshot) paintStatus(shownRound());
+  if (state.snapshot) {
+    paintStatus(shownRound());
+    lifecycle.paint();
+  }
 }).catch(() => {});

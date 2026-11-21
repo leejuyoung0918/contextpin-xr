@@ -123,12 +123,15 @@ export class MeetingConnection {
     this.clock = best;
   }
 
-  async command(type, payload) {
-    const body = {
+  commandBody(type, payload) {
+    return {
       command_id: randomId(),
       type,
       payload: { ...payload, ...this.clock, source_monotonic_ms: performance.now() },
     };
+  }
+
+  async command(type, payload, body = this.commandBody(type, payload)) {
     this.handlers.pending(1);
     try {
       for (const delay of [0, 450, 900, 1800, 3600]) {

@@ -29,7 +29,7 @@ namespace ContextPin
         JObject MeetingVersion(string id) => Values(meetingSnapshot, "versions").OfType<JObject>().FirstOrDefault(v => TextValue(v, "version_id") == id);
         JObject MeetingLatestRound => Values(meetingSnapshot, "rounds").OfType<JObject>().LastOrDefault();
         JObject RequestedMeetingVersion() => MeetingVersion(IsAssemblyMeeting && (AssemblySampling || assemblyAlignment == AssemblyAlignment.Preview)
-            ? AssemblyOriginalId : meetingViewedVersion ?? TextValue(meetingSnapshot, "committed_version_id"));
+            ? AssemblyOriginalId : meetingViewedVersion ?? assemblyAdoptedTakesEffect ?? TextValue(meetingSnapshot, "committed_version_id"));
         JToken MeetingCandidate(string version) => Values(MeetingLatestRound, "candidates").LastOrDefault(c => TextValue(c, "version_id") == version);
         string MeetingVersionLabel(string value) => string.IsNullOrEmpty(value) ? "" : "v·" + value.Substring(Math.Max(0, value.Length - 7));
         string MeetingPartLabel(string id) => Values(meetingSnapshot?["profile"], "semantic_parts")
@@ -120,8 +120,10 @@ namespace ContextPin
             if (connected != meetingEventsConnected) { meetingEventsConnected = connected; changed = true; }
             if (changed) Draw();
             if (!connected && !meetingRefresh && !meetingBusy && Time.unscaledTime >= meetingRefreshAt) RefreshMeetingSnapshot();
-            if (meetingCapture != null && meetingCapture.Recording && Time.unscaledTime >= meetingAutoSendAt) SendMeetingAudio();
+            if (SpatialAssembly) UpdateSpatialMicrophone();
+            else if (meetingCapture != null && meetingCapture.Recording && Time.unscaledTime >= meetingAutoSendAt) SendMeetingAudio();
             UpdateAssemblyTracking();
+            UpdateSpatialPanelPosition();
             PositionMeetingModel();
         }
 
@@ -177,6 +179,7 @@ namespace ContextPin
             var oldCommitted = TextValue(meetingSnapshot, "committed_version_id");
             meetingSnapshot = snapshot;
             if (IsAssemblyMeeting) ReadAssemblyMount();
+            SpatialSnapshotUpdated();
             if (oldCommitted != TextValue(meetingSnapshot, "committed_version_id")) SetMeetingViewedVersion(null);
             if (meetingFailureDisplayed != null)
             {
@@ -219,8 +222,10 @@ namespace ContextPin
         void ReportMeetingView()
         {
             if (string.IsNullOrEmpty(meetingLoadedVersion) || meetingLoadedVersion != TextValue(RequestedMeetingVersion(), "version_id")) return;
-            var candidate = MeetingCandidate(meetingLoadedVersion);
-            var round = meetingPage == MeetingPage.Candidates || candidate != null ? MeetingLatestRound : null;
+            var nonSpatialCandidate = SpatialAssembly ? null : MeetingCandidate(meetingLoadedVersion);
+            var round = SpatialViewingShared ? SpatialRound() : !SpatialAssembly &&
+                (meetingPage == MeetingPage.Candidates || nonSpatialCandidate != null) ? MeetingLatestRound : null;
+            var candidate = !SpatialAssembly || SpatialViewingShared ? Values(round, "candidates").LastOrDefault(c => TextValue(c, "version_id") == meetingLoadedVersion) : null;
             var displayed = Values(round, "candidates").Where(c => !string.IsNullOrEmpty(TextValue(c, "version_id")))
                 .Select(c => TextValue(c, "candidate_id"));
             SendMeetingCommand("view", new JObject
@@ -230,6 +235,7 @@ namespace ContextPin
                 ["round_id"] = round == null ? null : TextValue(round, "round_id"),
                 ["candidate_id"] = candidate == null ? null : TextValue(candidate, "candidate_id"),
                 ["display_order_candidate_ids"] = new JArray(displayed),
+                ["share"] = SpatialViewingShared || SpatialSharesCommitted,
             }, false);
         }
 
@@ -351,6 +357,7 @@ namespace ContextPin
             transport?.Dispose();
             ReleaseMeetingPreview();
             ResetAssemblyPreview();
+            ResetSpatialAssembly();
             meetingSnapshot = null;
             meetingViewedVersion = meetingSelectedParameter = meetingFailureDisplayed = null;
             meetingBusy = meetingRefresh = meetingEventsConnected = meetingHttpAvailable = false;

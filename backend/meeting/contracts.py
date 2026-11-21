@@ -38,6 +38,7 @@ class Command(BaseModel):
         "view", "edit", "text", "clarify", "response", "decide", "cancel",
         "replay", "audio_host", "constraint", "ack", "printed",
         "restore", "end", "transcript_correction", "renew_code", "capabilities",
+        "meeting_start", "meeting_pause", "meeting_end", "meeting_retry", "meeting_readopt",
     ]
     payload: dict = Field(default_factory=dict)
 

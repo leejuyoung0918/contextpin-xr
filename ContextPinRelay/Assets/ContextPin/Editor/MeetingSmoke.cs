@@ -1,8 +1,11 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.IO.Compression;
+using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.UI;
@@ -17,6 +20,7 @@ namespace ContextPin.Editor
         sealed class Report
         {
             public bool success, simulator, assembly, fixedMount, syntheticReference, invalidatedOverlay;
+            public bool compactSpatialPanel, replayMeeting, quietProposal, explicitAdoption, savedMeeting, syntheticPcm;
             public string runtime, initialVersion, finalVersion, error;
             public float initialWidthM, finalWidthM, stlWidthMm;
             public int renderViews;
@@ -27,7 +31,7 @@ namespace ContextPin.Editor
         static double deadline;
         static int step, performedFrame;
         static string candidateControl;
-        static Vector3 originalPosition;
+        static Vector3 originalPosition, panelPosition;
         static Quaternion originalRotation;
         static Vector3[] originalVertices;
         static readonly List<XRDisplaySubsystem> displays = new List<XRDisplaySubsystem>();
@@ -37,7 +41,7 @@ namespace ContextPin.Editor
             report = new Report { simulator = simulator, assembly = Environment.GetEnvironmentVariable("MEETING_SMOKE_ASSEMBLY") == "1" };
             step = 0;
             performedFrame = -1;
-            deadline = EditorApplication.timeSinceStartup + 65;
+            deadline = EditorApplication.timeSinceStartup + (report.assembly && simulator ? 125 : 65);
             EditorApplication.update += Tick;
         }
 
@@ -58,7 +62,7 @@ namespace ContextPin.Editor
                     report.runtime = OpenXRRuntime.name;
                     if (report.renderViews < 2 || report.runtime.IndexOf("simulat", StringComparison.OrdinalIgnoreCase) < 0) return;
                 }
-                if (report.assembly ? RunAssemblyStep() : RunStep()) { step++; performedFrame = Time.frameCount; }
+                if (report.assembly ? (report.simulator ? RunSpatialStep() : RunAssemblyStep()) : RunStep()) { step++; performedFrame = Time.frameCount; }
             }
             catch (Exception error) { Finish(error); }
         }
@@ -155,13 +159,8 @@ namespace ContextPin.Editor
                     Require(report.fixedMount, "Original and OpenSCAD candidate must use the exact same placement.");
                     Require(!originalVertices.SequenceEqual(pivot.GetComponentsInChildren<MeshFilter>().SelectMany(f => f.sharedMesh.vertices)),
                         "The manual parameter edit must change generated exterior geometry.");
-                    if (report.simulator) return Click("AssemblyAlignmentStart");
                     return Click("MeetingAdopt");
-                case 6:
-                    if (!report.simulator) return Click("MeetingExportStl");
-                    if (!CheckSyntheticAssemblyReference()) return false;
-                    Finish(null);
-                    return true;
+                case 6: return Click("MeetingExportStl");
                 case 7:
                     var path = Path.Combine(Application.persistentDataPath, "MeetingExports", report.finalVersion + ".stl");
                     if (!File.Exists(path)) return false;
@@ -190,17 +189,120 @@ namespace ContextPin.Editor
                 renderer.sharedMaterial.color.a < 1f), "Assembly meshes must render with the translucent overlay material.");
         }
 
+        static bool RunSpatialStep()
+        {
+            var pivot = GameObject.Find("MeetingPreviewPivot");
+            switch (step)
+            {
+                case 0: return Click("HomeMeeting");
+                case 1: return Click("MeetingCreate");
+                case 2: return Click("AssemblyAlignmentStart");
+                case 3: return CheckSyntheticAssemblyReference();
+                case 4: return Click("AssemblyAlignmentConfirm");
+                case 5:
+                    if (pivot == null || GameObject.Find("SpatialSummary") == null) return false;
+                    CheckSpatialPcmPacket();
+                    report.compactSpatialPanel = GameObject.Find("MeetingModelTab") == null && GameObject.Find("Masthead") == null;
+                    Require(report.compactSpatialPanel, "Spatial view must omit desk navigation.");
+                    RequireAssemblyMesh(pivot);
+                    originalPosition = pivot.transform.position;
+                    originalRotation = pivot.transform.rotation;
+                    panelPosition = GameObject.Find("SpatialAssemblyMeeting").transform.parent.position;
+                    report.initialVersion = Version(pivot);
+                    report.initialWidthM = ModelWidth(pivot);
+                    return Click("SpatialSessionAction");
+                case 6:
+                    report.replayMeeting = SpatialButtonText("SpatialSessionAction").Contains("예시 진행");
+                    return report.replayMeeting && Click("SpatialMenu");
+                case 7: return Click("SpatialReplayUtterance");
+                case 8:
+                    if (GameObject.Find("SpatialOpenComparison") == null || pivot == null) return false;
+                    report.quietProposal = Version(pivot) == report.initialVersion;
+                    Require(report.quietProposal, "A prepared proposal cannot change the shown model.");
+                    return Click("SpatialOpenComparison");
+                case 9:
+                    var candidate = UnityEngine.Object.FindObjectsByType<RelayHit>(FindObjectsSortMode.None)
+                        .FirstOrDefault(hit => hit.name.StartsWith("SpatialCandidate-", StringComparison.Ordinal));
+                    return candidate != null && Click(candidate.name);
+                case 10:
+                    if (pivot == null || Version(pivot) == report.initialVersion || GameObject.Find("SpatialAdopt") == null) return false;
+                    RequireAssemblyMesh(pivot);
+                    report.finalVersion = Version(pivot);
+                    report.finalWidthM = ModelWidth(pivot);
+                    report.fixedMount = Vector3.Distance(pivot.transform.position, originalPosition) < .00001f &&
+                        Quaternion.Angle(pivot.transform.rotation, originalRotation) < .1f &&
+                        Vector3.Distance(GameObject.Find("SpatialAssemblyMeeting").transform.parent.position, panelPosition) < .00001f;
+                    Require(report.fixedMount, "A loaded candidate must preserve the spatial mount and panel pose.");
+                    return Click("SpatialAdopt");
+                case 11:
+                    if (GameObject.Find("SpatialSummary") == null) return false;
+                    report.explicitAdoption = GameObject.Find("SpatialValue결정")?.GetComponent<Text>()?.text.Contains("채택") == true;
+                    if (!report.explicitAdoption) return false;
+                    var app = UnityEngine.Object.FindAnyObjectByType<RelayApp>();
+                    typeof(RelayApp).GetMethod("InvalidateRegisteredPoses", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(app, null);
+                    report.invalidatedOverlay = GameObject.Find("MeetingPreviewPivot") == null &&
+                        GameObject.Find("SpatialAlignmentStatus")?.GetComponent<Text>()?.text.Contains("추적 끊김") == true;
+                    Require(report.invalidatedOverlay, "Lost tracking must hide overlay.");
+                    return true;
+                case 12: return Click("SpatialSessionAction");
+                case 13: return Click("SpatialResult");
+                case 14:
+                    var session = UnityEngine.Object.FindAnyObjectByType<RelayApp>();
+                    var snapshot = (JObject)typeof(RelayApp).GetField("meetingSnapshot", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(session);
+                    var name = snapshot.Value<string>("session_id") + "-r" + (snapshot["result"]?.Value<int?>("revision") ?? 1) + ".zip";
+                    var path = Path.Combine(Application.persistentDataPath, "MeetingExports", name);
+                    if (!File.Exists(path)) return false;
+                    using (var zip = ZipFile.OpenRead(path))
+                    using (var manifest = new StreamReader(zip.GetEntry("manifest.json").Open()))
+                    {
+                        var file = JObject.Parse(manifest.ReadToEnd());
+                        report.savedMeeting = file.ToString().Contains(report.finalVersion) && zip.GetEntry("cad/final.stl") != null &&
+                            zip.GetEntry("summary.md") != null && zip.GetEntry("transcript.jsonl") != null;
+                    }
+                    Require(report.savedMeeting, "The completed meeting ZIP must refer to the adopted model.");
+                    Finish(null);
+                    return true;
+                default: throw new InvalidOperationException("Unknown spatial smoke step");
+            }
+        }
+
+        static string SpatialButtonText(string id) => GameObject.Find(id)?.GetComponentInChildren<Text>()?.text ?? "";
+
+        static void CheckSpatialPcmPacket()
+        {
+            var clip = AudioClip.Create("PCM smoke data", 4000, 2, 16000, false);
+            try
+            {
+                var data = Enumerable.Range(0, 8000).Select(i => i % 2 == 0 ? .5f : -.25f).ToArray();
+                Require(clip.SetData(data, 0), "Synthetic PCM test clip could not be written.");
+                var type = typeof(RelayApp).Assembly.GetType("ContextPin.MeetingPcmStream");
+                using var stream = (IDisposable)Activator.CreateInstance(type, new object[] { clip });
+                var observe = type.GetMethod("ObservePosition");
+                var read = type.GetMethod("ReadPacket");
+                observe.Invoke(stream, new object[] { 2000 });
+                var first = (byte[])read.Invoke(stream, new object[] { false });
+                observe.Invoke(stream, new object[] { 2500 });
+                var tail = (byte[])read.Invoke(stream, new object[] { true });
+                report.syntheticPcm = first.Length == 4016 && tail.Length == 1016 &&
+                    BinaryPrimitives.ReadUInt32LittleEndian(first.AsSpan(0, 4)) == 0 &&
+                    BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan(0, 4)) == 1 &&
+                    BinaryPrimitives.ReadUInt64LittleEndian(tail.AsSpan(4, 8)) == 2000 &&
+                    BinaryPrimitives.ReadInt16LittleEndian(first.AsSpan(16, 2)) == 4096;
+                Require(report.syntheticPcm, "Synthetic stereo clip must become a continuous ordered mono stream with a final partial packet.");
+            }
+            finally { UnityEngine.Object.Destroy(clip); }
+        }
+
         static bool CheckSyntheticAssemblyReference()
         {
             // No real contact points exist in the simulator. Exercise the registration and
             // hide-on-invalidation code by providing known test measurements.
             var pivot = UnityEngine.Object.FindObjectsByType<Transform>(FindObjectsInactive.Include, FindObjectsSortMode.None)
-                .FirstOrDefault(candidate => candidate.name == "MeetingPreviewPivot" && Version(candidate.gameObject) == report.initialVersion);
+                .FirstOrDefault(candidate => candidate.name == "MeetingPreviewPivot");
             if (pivot == null) return false;
             var app = UnityEngine.Object.FindAnyObjectByType<RelayApp>();
             var flags = BindingFlags.Instance | BindingFlags.NonPublic;
             var recordPoint = typeof(RelayApp).GetMethod("RecordAssemblyPoint", flags);
-            var invalidate = typeof(RelayApp).GetMethod("InvalidateRegisteredPoses", flags);
             var camera = Camera.main.transform;
             var origin = camera.position + camera.forward * .8f - Vector3.up * .17f;
             var rotation = Quaternion.Euler(14, 32, 0);
@@ -211,10 +313,6 @@ namespace ContextPin.Editor
                 Quaternion.Angle(pivot.rotation, rotation) < .1f && GameObject.Find("AssemblyAlignmentConfirm") != null,
                 "The synthetic reference must place the original at its recorded origin and axes before confirmation.");
             report.syntheticReference = true;
-            invalidate.Invoke(app, null);
-            report.invalidatedOverlay = !pivot.gameObject.activeInHierarchy &&
-                GameObject.Find("MeetingDrawingMode")?.GetComponent<Text>()?.text.Contains("추적 끊김") == true;
-            Require(report.invalidatedOverlay, "Invalidated registration must hide the overlay and report the lost state.");
             return true;
         }
 

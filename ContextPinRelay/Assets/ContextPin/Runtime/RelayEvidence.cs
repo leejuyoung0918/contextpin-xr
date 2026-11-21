@@ -12,6 +12,7 @@ namespace ContextPin
     {
         public string serverUrl="http://127.0.0.1:8787";
         public string meetingServerUrl="http://127.0.0.1:8788";
+        public float meetingPanelWidthMeters=.32f, meetingPanelDistanceMeters=1.15f, meetingPanelTextScale=1f;
         // Optional for providers without speech recognition. Never put an API key here.
         public string suppliedTranscript="";
     }

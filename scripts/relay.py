@@ -203,7 +203,7 @@ def smoke_meeting(simulator, assembly=False):
             # The native simulator can keep an editor window alive after Unity
             # writes its report. Bound teardown for the editor this check owns.
             with subprocess.Popen([str(arg) for arg in command], env=env) as child:
-                deadline = time.monotonic() + 160
+                deadline = time.monotonic() + (220 if assembly else 160)
                 try:
                     while child.poll() is None and time.monotonic() < deadline:
                         if report.is_file():

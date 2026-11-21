@@ -117,7 +117,8 @@ class ModelAdapter(ABC):
     def export_print(self, geometry):
         return {"print.stl": export_stl(geometry)}
 
-    def get_diff(self, profile, before, after):
+    @staticmethod
+    def get_diff(profile, before, after):
         return [{"parameter_id": field["parameter_id"], "label": field["label"], "unit": field["unit"],
                  "before": before[field["parameter_id"]], "after": after[field["parameter_id"]]}
                 for field in profile["parameters"] if before[field["parameter_id"]] != after[field["parameter_id"]]]
@@ -156,6 +157,8 @@ def validate_patch(profile, base_params, operations, constraints=()):
 
 
 def get_diff(profile, before, after):
+    if profile.get("assembly"):
+        return ModelAdapter.get_diff(profile, before, after)
     return _adapter(profile["object_id"]).get_diff(profile, before, after)
 
 

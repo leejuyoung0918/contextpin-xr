@@ -191,7 +191,7 @@ function renderResponse(round, kind, actor, callbacks) {
   return form;
 }
 
-function renderDecision(round, snapshot, activeCandidate, oldReason, callbacks) {
+function renderDecision(round, snapshot, activeCandidate, reasonDraft, callbacks) {
   const form = element("form", null, "decision-form");
   const label = element("label", "결정 이유");
   label.htmlFor = "decision-reason";
@@ -199,7 +199,22 @@ function renderDecision(round, snapshot, activeCandidate, oldReason, callbacks) 
   reason.id = label.htmlFor;
   reason.maxLength = 600;
   reason.placeholder = "선택 사항";
-  if (oldReason) reason.value = oldReason;
+  if (reasonDraft?.text) reason.value = reasonDraft.text;
+  let source;
+  if (snapshot.session_status) {
+    const recent = [...new Map((snapshot.utterances || []).filter(item => item.status === "final")
+      .map(item => [item.utterance_id, item])).values()].slice(-6).reverse();
+    const select = element("select");
+    select.id = "decision-source";
+    const sourceLabel = element("label", "결정 이유로 연결할 최근 발언");
+    sourceLabel.htmlFor = select.id;
+    setOptions(select, [["", "발언 선택 안 함"], ...recent.map(item => [item.utterance_id,
+      item.text.length > 72 ? item.text.slice(0, 71) + "…" : item.text])], reasonDraft?.source || "");
+    if (recent.length) {
+      form.append(label, reason, sourceLabel, select);
+      source = select;
+    }
+  }
   const candidate = round.candidates.find(item =>
     item.candidate_id === activeCandidate && item.status === "valid" && item.version_id);
   const actions = element("div", null, "file-actions");
@@ -207,32 +222,38 @@ function renderDecision(round, snapshot, activeCandidate, oldReason, callbacks) 
     round_id: round.round_id,
     revision: round.revision,
     expected_committed_version_id: snapshot.committed_version_id,
+    expected_adopted_revision: snapshot.adopted_revision,
     expected_constraint_revision: snapshot.constraint_revision,
     candidate_id: outcome === "commit" ? candidate?.candidate_id : undefined,
     reason: reason.value.trim() || undefined,
+    reason_utterance_id: reason.value.trim() ? undefined : source?.value || undefined,
     outcome,
   }, form);
   if (snapshot.assembly) {
-    actions.append(makeButton("이 모델로 결정", "primary", () => save("commit"), !candidate),
+    actions.append(makeButton(snapshot.session_status ? "이 안 채택" : "이 모델로 결정", "primary", () => save("commit"), !candidate),
       makeButton("새 수정 요청", "", () => callbacks.refine(false)));
     if (candidate) actions.append(makeButton("이 후보에서 후속 수정", "", () => callbacks.refine(true)));
   } else {
     actions.append(makeButton("이 모델로 결정", "primary", () => save("commit"), !candidate),
       makeButton("보류", "", () => save("defer")), makeButton("기각", "", () => save("reject")));
   }
-  form.append(label, reason, actions);
+  if (!source) form.append(label, reason);
+  form.append(actions);
   if (!candidate) form.append(element("p", "채택하려는 후보의 모델을 먼저 여세요.", "subtle"));
   form.addEventListener("submit", event => event.preventDefault());
   return form;
 }
 
-export function renderRound(round, snapshot, { actor, presenter, candidateId }, callbacks) {
+export function renderRound(round, snapshot, { actor, presenter, candidateId, interactive = true }, callbacks) {
   byId("round-status").textContent = roundLabel(round);
   const destination = byId("round-content");
   const key = JSON.stringify([round?.round_id, round?.revision, round?.status, round?.question, round?.candidates,
-    round?.responses, round?.acks, candidateId, presenter, snapshot.committed_version_id, snapshot.constraint_revision]);
+    round?.responses, round?.acks, candidateId, presenter, interactive, snapshot.committed_version_id, snapshot.constraint_revision,
+    snapshot.session_status ? snapshot.utterances.slice(-6).map(item => [item.utterance_id, item.revision]) : null]);
   if (key === destination.dataset.key) return;
-  const oldReason = destination.dataset.round === round?.round_id ? byId("decision-reason")?.value : null;
+  const oldReason = destination.dataset.round === round?.round_id ? {
+    text: byId("decision-reason")?.value, source: byId("decision-source")?.value,
+  } : null;
   destination.dataset.key = key;
   destination.dataset.round = round?.round_id || "";
   destination.replaceChildren();
@@ -248,11 +269,12 @@ export function renderRound(round, snapshot, { actor, presenter, candidateId }, 
     });
     destination.append(element("p", "유지 조건 · " + values.join(", "), "subtle"));
   }
-  if (round.status === "needs_input") {
+  if (round.status === "needs_input" && interactive) {
     if (round.actor_id === actor) destination.append(renderClarification(round, callbacks));
     else destination.append(element("p", typeof round.question === "string" ? round.question : round.question?.text, "question"));
   }
   if (round.candidates?.length) destination.append(renderCandidates(round, snapshot, candidateId, callbacks));
+  if (!interactive) return;
   if (round.status === "reviewable") {
     if (snapshot.assembly) {
       if (round.candidates.filter(candidate => candidate.status === "valid").length > 1) {
@@ -333,7 +355,7 @@ const consensusLabels = { confirmed: "전원 확인", partial: "일부 참가자
 export function renderMinutes(snapshot, callbacks) {
   const root = byId("minutes-list");
   const decisions = snapshot.decisions || [];
-  const key = JSON.stringify([decisions, (snapshot.utterances || []).filter(item => item.revision > 1)]);
+  const key = JSON.stringify([decisions, (snapshot.utterances || []).filter(item => item.revision > 1), Boolean(callbacks.readopt)]);
   if (root.dataset.key === key) return;
   root.dataset.key = key;
   root.replaceChildren();
@@ -399,6 +421,9 @@ export function renderMinutes(snapshot, callbacks) {
       const actions = element("div", null, "file-actions");
       actions.append(makeButton("결정 모델 보기", "", () => callbacks.view(version)));
       if (version.export_url) actions.append(makeButton("내보내기", "", () => callbacks.export(version)));
+      if (callbacks.readopt && version.version_id !== snapshot.adopted_version_id) {
+        actions.append(makeButton("이 버전 다시 채택", "", () => callbacks.readopt(version)));
+      }
       card.append(actions);
     }
     root.append(card);

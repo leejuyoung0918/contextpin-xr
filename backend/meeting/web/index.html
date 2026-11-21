@@ -65,6 +65,52 @@
         <div><strong id="assembly-target"></strong><p id="assembly-protection" class="subtle"></p></div>
         <p class="subtle">PC 미리보기 · 실제 장착 위치와 물체 간섭은 Quest와 실물에서 확인하세요.</p>
       </section>
+      <section id="meeting-controls" class="panel meeting-controls" aria-label="회의 진행" hidden>
+        <div>
+          <h2 id="meeting-state" role="status">회의 준비</h2>
+          <p id="meeting-state-note" class="subtle"></p>
+        </div>
+        <div class="file-actions">
+          <button id="prepare-pc-mic" class="button small" hidden>PC 마이크 준비</button>
+          <button id="meeting-pause" class="button small" hidden>일시정지</button>
+          <button id="meeting-main" class="button primary">회의 시작</button>
+        </div>
+        <div class="meeting-summary" aria-label="회의 핵심 요약">
+          <p><strong>논의</strong><span id="meeting-discussion">아직 없음</span></p>
+          <p><strong>유지</strong><span id="meeting-preserved">아직 없음</span></p>
+          <p><strong>결정</strong><span id="meeting-decision">아직 미정</span></p>
+        </div>
+        <p id="shared-model" class="subtle" aria-live="polite"></p>
+      </section>
+      <section id="meeting-result" class="panel meeting-result" tabindex="-1" aria-labelledby="result-heading" hidden>
+        <div class="panel-head">
+          <div>
+            <h2 id="result-heading">회의 결과</h2>
+            <p id="result-meta" class="subtle" role="status"></p>
+          </div>
+          <div class="file-actions">
+            <button id="result-download" class="button primary small">회의 ZIP 다운로드</button>
+            <button id="result-close" class="button small">닫기</button>
+          </div>
+        </div>
+        <p id="result-missing" class="notice error" hidden></p>
+        <section aria-labelledby="result-summary-heading">
+          <h3 id="result-summary-heading">상세 요약</h3>
+          <div id="result-summary" class="result-summary"></div>
+        </section>
+        <details>
+          <summary>전체 전사</summary>
+          <pre id="result-transcript" class="result-text"></pre>
+        </details>
+        <details>
+          <summary>채택 이력</summary>
+          <ol id="result-decisions" class="result-decisions"></ol>
+        </details>
+        <details>
+          <summary>최종 OpenSCAD 코드</summary>
+          <pre class="result-text"><code id="result-scad"></code></pre>
+        </details>
+      </section>
       <div class="workspace">
         <div class="left-column">
           <section class="panel viewport-panel" aria-labelledby="model-heading">
@@ -75,6 +121,7 @@
               </div>
               <div class="file-actions">
                 <button id="original-view" class="button small" hidden>원본 비교</button>
+                <button id="readopt-original" class="button small" hidden>원본 다시 채택</button>
                 <button id="head-view" class="button small" hidden>확정 모델로</button>
               </div>
             </div>
@@ -185,6 +232,15 @@
     <p id="invite-hint">검토자가 이 화면의 주소를 열고 아래 코드를 입력하면 같은 모델을 볼 수 있습니다.</p>
     <p id="invite-code" class="join-code"></p>
     <button class="button primary" id="copy-code">코드 복사</button>
+  </dialog>
+
+  <dialog id="pc-mic-dialog" aria-labelledby="pc-mic-heading">
+    <div class="panel-head">
+      <h2 id="pc-mic-heading">회의용 PC 마이크</h2>
+      <form method="dialog"><button class="button small">취소</button></form>
+    </div>
+    <p id="pc-mic-consent"></p>
+    <button class="button primary" id="pc-mic-allow">동의 확인 후 마이크 준비</button>
   </dialog>
 
   <dialog id="mic-dialog" aria-labelledby="mic-heading">
