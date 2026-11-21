@@ -164,6 +164,7 @@ namespace ContextPin
             UpdateAssemblyTracking();
             UpdateSpatialPanelPosition();
             PositionMeetingModel();
+            UpdatePaperSync();
             UpdateMeetingCollaboration();
         }
 
@@ -221,6 +222,7 @@ namespace ContextPin
             var oldCommitted = TextValue(meetingSnapshot, "committed_version_id");
             meetingSnapshot = snapshot;
             if (IsAssemblyMeeting) ReadAssemblyMount();
+            ReceivePaperState();
             SpatialSnapshotUpdated();
             ReceiveSharedComparison();
             ReceiveCollaborativeDraft();
@@ -422,6 +424,7 @@ namespace ContextPin
 
         void CloseMeeting()
         {
+            ResetPaperState();
             ReleaseMeetingCollaboration();
             ReleaseMeetingCapture();
             var transport = meetingTransport;

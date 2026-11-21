@@ -170,7 +170,7 @@ namespace ContextPin
         bool ReadExplicitTargetButton(bool panelOwnsPointer)
         {
             var right = XRController.rightHand;
-            if (BundleOnPaper)
+            if (BundleOnPaper && !CapturingPaperEdit)
             {
                 if (!panelOwnsPointer && TryReadTrackedAim(right, out var candidateRay))
                 {
@@ -178,6 +178,8 @@ namespace ContextPin
                 }
                 else SetBundleHover(null);
             }
+            if (SharedPaperMeeting && !CapturingPaperEdit && !panelOwnsPointer && RightAWasPressed(right) &&
+                TryReadTrackedAim(right, out var paperRay) && SharePaperRay(paperRay)) return true;
             if (!ExplicitDesignReady || OtherDeviceRecordsDesign || panelOwnsPointer || AssemblySampling || AssemblyQrScanning ||
                 movingMeetingPanel || explicitRequest?.Conflict == true) return false;
             if (CaptureBundleMeeting && (explicitRequest?.Speech != DesignSpeech.Final ||

@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import bundle_candidates, cable_demo, geometry, meeting_state, meeting_result, shared_workflows
+from . import bundle_candidates, cable_demo, geometry, meeting_state, meeting_result, paper_space, shared_workflows
 from .contracts import MeetingError, canonical, clock_stamp, digest, now_ms, text_field, uid
 from .planner import CANDIDATE_LETTER, NUMBER, ORDINAL, compile_context, contains, explicit_parameters, resolve_reference, validated_plan
 
@@ -111,11 +111,17 @@ class SessionCoordinator:
             for row in self.db.execute("SELECT state FROM sessions").fetchall():
                 state = json.loads(row["state"])
                 interrupted = []
+                lost_participants = []
                 meeting_state.initialize(state)
                 bundle_candidates.interrupted(self, state)
                 if state.get("edit_draft"):
                     shared_workflows.clear(self, state, "서버가 재시작되어 편집권을 해제했습니다.")
                 if state.get("assembly"):
+                    if state["status"] == "active":
+                        for participant in state["participants"]:
+                            actor = participant["participant_id"]
+                            if paper_space.lose_alignment(state, actor):
+                                lost_participants.append(actor)
                     state["meeting"]["capture_requested"] = False
                     for capture in state["meeting_audio"].values():
                         if capture["status"] == "open":
@@ -135,9 +141,13 @@ class SessionCoordinator:
                     if item["status"] in RUNNING:
                         self.finish_round(item, "failed", "서버 재시작으로 작업이 중단되었습니다. 새로 요청해 주세요.")
                         interrupted.append(item["round_id"])
+                if lost_participants:
+                    # Reconnecting clients discard snapshots at or before their last sequence.
+                    self.emit(state, "paper.alignments_lost", {"paper_frame_revision": state["paper_frame"]["paper_frame_revision"],
+                                                              "participant_ids": lost_participants})
                 if interrupted:
                     self.emit(state, "jobs.interrupted", {"round_ids": interrupted})
-                else:
+                if not lost_participants and not interrupted:
                     self.save(state)
         for sid in restart_results:
             self.submit(sid, "result", "", 0)
@@ -199,10 +209,17 @@ class SessionCoordinator:
     @staticmethod
     def public(state, actor):
         private = {"explicit_design_targets", "design_target_history", "view_history", "audio_segments", "shared_view_history",
-                   "meeting_audio", "result_exports", "pending_minutes_export"}
+                   "meeting_audio", "result_exports", "pending_minutes_export", "paper_frame", "last_paper_candidate_request"}
         public = {k: v for k, v in state.items() if k not in private}
         if state.get("assembly"):
             public.update(meeting_state.snapshot_fields(state))
+            public["spatial"] = paper_space.snapshot(state)
+            if state.get("paper_frame") and "edit_requests" in public:
+                public["edit_requests"] = dict(state["edit_requests"])
+                for rid, bundle in state["edit_requests"].items():
+                    if bundle["participant_id"] != actor:
+                        public["edit_requests"][rid] = {**bundle, "selection": paper_space.public_evidence(bundle["selection"]),
+                                                       "visual_evidence": paper_space.public_evidence(bundle["visual_evidence"])}
             public["edit_draft"] = shared_workflows.public_draft(state)
             if state.get("session_status") == "completed":
                 saved = shared_workflows.saved_design_utterance(state)
@@ -415,6 +432,8 @@ class SessionCoordinator:
     def apply(self, state, actor, kind, payload, stamp):
         profile = state["profile"]
         sid = state["session_id"]
+        if kind in paper_space.COMMAND_FIELDS:
+            return paper_space.apply(self, state, actor, kind, payload)
         if kind == "generate_edit_candidates":
             request_id = text_field(payload, "request_id", 100)
             bundle = state.get("edit_requests", {}).get(request_id)
@@ -812,6 +831,10 @@ class SessionCoordinator:
         if state.get("assembly"):
             state["adopted_revision"] += 1
             state["design_revision"] += 1
+            state["last_paper_candidate_request"] = None
+            if frame := state.get("paper_frame"):
+                frame.update(layout_set=None, candidate_poses_paper={}, selected_candidate_id=None,
+                             selected_by_participant_id=None, shared_selection=None)
             meeting_state.reset_preview(state, now_ms())
 
     def assembly_candidate_record(self, state, candidate):
@@ -1575,6 +1598,9 @@ class SessionCoordinator:
             if self.event_connections[key]:
                 return
             state = self.load(sid)
+            if state["status"] == "active" and paper_space.lose_alignment(state, actor):
+                self.emit(state, "paper.alignment_changed", {"paper_frame_revision": state["paper_frame"]["paper_frame_revision"],
+                                                            "participant_id": actor, "status": "lost"}, actor)
             draft = state.get("edit_draft")
             if draft and draft["owner_id"] == actor:
                 shared_workflows.clear(self, state, "편집자의 연결이 종료되었습니다.")

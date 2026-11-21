@@ -354,7 +354,7 @@ namespace ContextPin
         {
             bool held = xr ? leftTriggerWasDown || rightTriggerWasDown || wasPressed : Mouse.current?.leftButton.isPressed == true;
             if (held && hit != null) hit.dragged?.Invoke(point);
-            if (meetingSnapshot == null || hit == null || string.IsNullOrEmpty(hit.meetingVersion) ||
+            if (SharedPaperMeeting || meetingSnapshot == null || hit == null || string.IsNullOrEmpty(hit.meetingVersion) ||
                 SpatialAssembly && assemblyAlignment != AssemblyAlignment.Confirmed || Time.unscaledTimeAsDouble < pointerDue) return;
             var root = ModelRootForHit(hit.transform);
             if (root == null) return;
@@ -373,7 +373,7 @@ namespace ContextPin
         {
             var pointers = meetingSnapshot?["pointers"] as JObject;
             foreach (var marker in participantPointers.Values) marker.SetActive(false);
-            if (!SpatialAssembly || assemblyAlignment != AssemblyAlignment.Confirmed || pointers == null) return;
+            if (SharedPaperMeeting || !SpatialAssembly || assemblyAlignment != AssemblyAlignment.Confirmed || pointers == null) return;
             foreach (var pair in pointers.Properties())
             {
                 if (pair.Name == meetingParticipant || TextValue(pair.Value, "tracking_state") != "tracking") continue;
@@ -401,7 +401,7 @@ namespace ContextPin
 
         void PublishTrackingLoss()
         {
-            if (meetingTransport != null && !string.IsNullOrEmpty(AssemblyAdoptedId))
+            if (!SharedPaperMeeting && meetingTransport != null && !string.IsNullOrEmpty(AssemblyAdoptedId))
                 SendMeetingCommand("pointer", new JObject { ["version_id"] = AssemblyAdoptedId,
                     ["part_id"] = selectedTargetPart ?? "outer_shell", ["hit_point_asset_m"] = new JArray(0, 0, 0), ["tracking_state"] = "lost" }, false);
         }
@@ -444,6 +444,7 @@ namespace ContextPin
 
         void RestoreLocalCandidateReview()
         {
+            if (SharedPaperMeeting && !MeetingHost) return;
             if (SpatialAssembly && AssemblyActive && MeetingLatestRound != null &&
                 TextValue(meetingSnapshot, "provider_mode") == "live" && TextValue(meetingSnapshot?["meeting"], "input_mode") == "manual")
             {

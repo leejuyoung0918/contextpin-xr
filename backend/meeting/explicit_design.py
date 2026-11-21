@@ -4,7 +4,7 @@ import math
 
 from .contracts import MeetingError, digest, text_field, uid
 from .shared_workflows import check_head, point
-from . import edit_bundle
+from . import edit_bundle, paper_space
 
 
 def check_selection_state(state, actor, request_id, selection_id):
@@ -101,6 +101,18 @@ def apply_selection(coordinator, state, actor, kind, payload, stamp):
     bundle = state["meeting"].get("edit_request_output") == "bundle"
     if bundle:
         reference.update(edit_bundle.evidence(payload["reference_selection"], reference, base))
+        raw = payload["reference_selection"]
+        if any(k in raw for k in (*paper_space.RAY_FIELDS, "paper_frame_revision")):
+            frame = state.get("paper_frame")
+            if not frame or not frame["latest_pose_paper"]:
+                raise MeetingError("종이 기준이 준비될 때까지 기다려 주세요.", 409)
+            paper_space.check_revision(frame, raw)
+            paper_space.check_aligned(frame, actor)
+            evidence = paper_space.ray(raw)
+            point = edit_bundle.transform_point(frame["latest_pose_paper"], reference["hit_model_local_position"])
+            if math.dist(point, evidence["hit_position_paper"]) > .002:
+                raise MeetingError("종이 기준 선택점과 CAD의 선택 좌표가 일치하지 않습니다.", 409)
+            reference.update(evidence, paper_frame_revision=raw["paper_frame_revision"])
     if (kind == "design_request" and (payload.get("output") == "bundle") != bundle):
         raise MeetingError("수정 요청과 회의의 저장 방식이 일치하지 않습니다.", 409)
     target = {"base_version_id": base["version_id"], "expected_adopted_revision": revision, "client_request_id": client_id,
@@ -140,7 +152,9 @@ def apply_selection(coordinator, state, actor, kind, payload, stamp):
             if before["selection_id"] == reference["selection_id"] or reference["captured_at_ms"] <= before["captured_at_ms"]:
                 raise MeetingError("선택 정보가 변경되었습니다. 위치와 사진을 다시 확인하세요.", 409)
         targets[actor] = target
-        return "design.target_selected", target, None
+        shared = ({**target, "reference_selection": paper_space.public_evidence(reference)}
+                  if state.get("paper_frame") else target)
+        return "design.target_selected", shared, None
     if target != prior_target:
         raise MeetingError("먼저 이번 사진과 부위의 선택을 확정하세요.", 409)
     lines = validate_refs(state, actor, speech_id, refs)

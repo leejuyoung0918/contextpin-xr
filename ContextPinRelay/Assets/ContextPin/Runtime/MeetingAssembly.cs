@@ -24,7 +24,7 @@ namespace ContextPin
 
         void StartLocalCandidatePreview()
         {
-            if (!SpatialAssembly || ExplicitDesignMeeting || CanCompareModels || A4PointSampling || A4PreviewActive || view == null) return;
+            if (!SpatialAssembly || SharedPaperMeeting && !MeetingHost || ExplicitDesignMeeting || CanCompareModels || A4PointSampling || A4PreviewActive || view == null) return;
             StopAssemblyQrTracker();
             assemblyQrPoseApplied = false;
             assemblyQrStatus = "";
@@ -176,7 +176,7 @@ namespace ContextPin
         void ConfirmAssemblyAlignment()
         {
             if (!AssemblyHeadTracked() || !AssemblyHasPlacementMount ||
-                assemblyAlignment != AssemblyAlignment.Preview || !OriginalOverlayLoaded) return;
+                assemblyAlignment != AssemblyAlignment.Preview || !OriginalOverlayLoaded && (!SharedPaperMeeting || MeetingHost)) return;
             if (!ConfirmTabletopReviewArea() || !ConfirmA4ReviewArea()) return;
             assemblyAlignment = AssemblyAlignment.Confirmed;
             if (A4PoseApplied) captureWorkspaceRevision++;
@@ -258,11 +258,13 @@ namespace ContextPin
             }
             var paper = A4CornerCount == 4 ? a4Size : reviewTableSize;
             var besideProduct = CenteredPaperLatest ? Vector3.zero : new Vector3(paper.x * .25f, 0, -paper.y * .25f);
-            latestAnchor.SetPositionAndRotation(WorkspaceOrigin + assemblyReference.rotation * besideProduct, WorkspaceRotation);
+            var mount = SharedPaperMeeting && paperLatestPose.HasValue ? PaperToWorldPose(surface, paperLatestPose.Value) :
+                new Pose(WorkspaceOrigin + assemblyReference.rotation * besideProduct, WorkspaceRotation);
+            latestAnchor.SetPositionAndRotation(mount.position, mount.rotation);
             var model = meetingModel.transform;
             var previousError = latestPaperError;
             latestPaperError = null;
-            if (PreparingLivePaperMeeting || CandidateGenerationMeeting)
+            if ((PreparingLivePaperMeeting || CandidateGenerationMeeting) && !(SharedPaperMeeting && paperLatestPose.HasValue))
             {
                 if (sessionOriginalBounds is not Bounds original)
                     latestPaperError = "중앙 실물의 원본 치수를 확인하고 있습니다.";
@@ -304,6 +306,11 @@ namespace ContextPin
 
         void PositionAssemblyPreview()
         {
+            if (SharedPaperMeeting && !MeetingHost && !PaperRenderable)
+            {
+                if (meetingModel.activeSelf) meetingModel.SetActive(false);
+                return;
+            }
             if (SpatialAssembly && A4PoseApplied && AssemblyOverlayAligned)
             {
                 PositionA4Latest();

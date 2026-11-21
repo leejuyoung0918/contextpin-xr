@@ -92,7 +92,7 @@ namespace ContextPin
             if (VerifiedCommitDescriptor(version)) QueueMeetingModelSlot(meetingPreview, version);
             bool needOriginal = paperWorkspace ? !sessionOriginalBounds.HasValue && (A4PointSampling || A4PreviewActive || CandidateGenerationMeeting)
                 : ExplicitDesignMeeting || AssemblyAdoptedId != AssemblyOriginalId;
-            QueueComparisonSlot(physicalOriginal, SpatialAssembly && needOriginal ? MeetingVersion(AssemblyOriginalId) : null);
+            QueueComparisonSlot(physicalOriginal, SpatialAssembly && !(SharedPaperMeeting && !MeetingHost) && needOriginal ? MeetingVersion(AssemblyOriginalId) : null);
 
             bool group = CableComparisonGroup;
             var comparison = group ? null : RequestedSpatialComparison();
@@ -100,8 +100,8 @@ namespace ContextPin
             var candidates = group ? Values(SpatialRound(), "candidates").Take(cableComparisons.Length).ToArray() : Array.Empty<JToken>();
             for (int i = 0; i < cableComparisons.Length; i++)
                 QueueComparisonSlot(cableComparisons[i], i < candidates.Length ? ValidCableCandidate(candidates[i]) : null);
-            QueueBundleReview();
             PositionMeetingModel();
+            QueueBundleReview();
         }
 
         bool CableComparisonGroup => !CollaborativeDraftVisible && SpatialViewingShared && CanCompareModels &&
@@ -308,6 +308,8 @@ namespace ContextPin
                 if (!IsAssemblyMeeting) slot.Root.SetActive(true);
                 PrepareMeetingLighting();
                 PositionMeetingModel();
+                // A late join can finish calibration before the Latest mesh is ready.
+                if (slot == meetingPreview && SharedPaperMeeting) QueueBundleReview();
                 Physics.SyncTransforms();
                 ShowMeetingSelection();
                 Draw();
@@ -435,6 +437,7 @@ namespace ContextPin
                 PositionCableComparisons();
                 PositionGroovePreviews();
                 PositionBundleCandidates();
+                DisplayPaperHit();
                 return;
             }
             if (meetingModel == null) return;

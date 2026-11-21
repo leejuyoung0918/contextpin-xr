@@ -23,7 +23,8 @@ namespace ContextPin
         MeetingModelSlot bundleHover;
 
         bool BundleAssetsFailed => Array.Exists(bundleSlots, slot => slot.FailedVersion != null);
-        bool BundleOnPaper => A4ReviewSurfaceActive && bundleContainer != null && bundleContainer.activeInHierarchy;
+        bool BundleOnPaper => A4ReviewSurfaceActive && bundleContainer != null && bundleContainer.activeInHierarchy &&
+            (!SharedPaperMeeting || PaperRenderable && bundleSetId == paperPoseSetId && paperCandidatePoses.Count == bundleCandidates.Length);
 
         bool VerifiedCommitDescriptor(JToken version)
         {
@@ -128,25 +129,36 @@ namespace ContextPin
                 return;
             }
             if (!A4ReviewSurfaceActive || !AssemblyActive || meetingModel == null || !meetingModel.activeInHierarchy ||
-                !sessionOriginalBounds.HasValue || meetingLoadedVersion != bundleBaseId ||
-                explicitRequest != null && explicitRequest.Id != bundleRequestId ||
+                (!SharedPaperMeeting || MeetingHost) && !sessionOriginalBounds.HasValue || meetingLoadedVersion != bundleBaseId ||
+                !SharedPaperMeeting && explicitRequest != null && explicitRequest.Id != bundleRequestId ||
+                SharedPaperMeeting && bundleSetId != paperPoseSetId ||
                 bundleSlots[0].Root == null || bundleCandidates.Length == 2 && bundleSlots[1].Root == null)
             {
                 if (bundleContainer.activeSelf) bundleContainer.SetActive(false);
                 return;
             }
-            var latest = FootprintOnTable(meetingAssetBounds, latestAnchor.position, latestAnchor.rotation, 0);
-            var physical = OriginalFootprintOnTable(0);
-            if (!TryBundlePositions(physical, latest, out var a, out var b))
+            Vector3 a = default, b = default;
+            bool published = SharedPaperMeeting && paperCandidatePoses.Count == bundleCandidates.Length;
+            if (!published)
             {
-                if (bundleContainer.activeSelf) bundleContainer.SetActive(false);
-                if (bundleReviewError != PaperTooSmall)
+                if (SharedPaperMeeting && !MeetingHost)
                 {
-                    bundleReviewError = PaperTooSmall;
-                    Debug.LogWarning($"{PaperTooSmall} paper={reviewTableSize:F3}, physical={physical}, latest={latest}, candidate_count={bundleCandidates.Length}");
-                    Draw();
+                    if (bundleContainer.activeSelf) bundleContainer.SetActive(false);
+                    return;
                 }
-                return;
+                var latest = FootprintOnTable(meetingAssetBounds, latestAnchor.position, latestAnchor.rotation, 0);
+                var physical = OriginalFootprintOnTable(0);
+                if (!TryBundlePositions(physical, latest, out a, out b))
+                {
+                    if (bundleContainer.activeSelf) bundleContainer.SetActive(false);
+                    if (bundleReviewError != PaperTooSmall)
+                    {
+                        bundleReviewError = PaperTooSmall;
+                        Debug.LogWarning($"{PaperTooSmall} paper={reviewTableSize:F3}, physical={physical}, latest={latest}, candidate_count={bundleCandidates.Length}");
+                        Draw();
+                    }
+                    return;
+                }
             }
             if (bundleReviewError == PaperTooSmall) bundleReviewError = null;
             bool reveal = !bundleContainer.activeSelf;
@@ -154,7 +166,23 @@ namespace ContextPin
             {
                 var slot = bundleSlots[i];
                 var root = slot.Root.transform;
-                root.SetPositionAndRotation(reviewTable.position + reviewTable.rotation * (i == 0 ? a : b), latestAnchor.rotation);
+                if (published)
+                {
+                    if (!paperCandidatePoses.TryGetValue(TextValue(bundleCandidates[i], "candidate_id"), out var local))
+                    {
+                        bundleContainer.SetActive(false);
+                        return;
+                    }
+                    var world = PaperToWorldPose(reviewTable, local);
+                    root.SetPositionAndRotation(world.position, world.rotation);
+                }
+                else root.SetPositionAndRotation(reviewTable.position + reviewTable.rotation * (i == 0 ? a : b), latestAnchor.rotation);
+                if (SharedPaperMeeting && slot.Material != null)
+                {
+                    bool selected = TextValue(PaperState, "selected_candidate_id") == TextValue(bundleCandidates[i], "candidate_id");
+                    var color = BundleColor(slot.BundleKey);
+                    slot.Material.color = selected || bundleHover == slot ? Color.Lerp(color, Color.white, .48f) : color;
+                }
                 root.localScale = Vector3.one;
                 if (!slot.Root.activeSelf) slot.Root.SetActive(true);
                 if (slot.Label == null || view == null) continue;
@@ -219,7 +247,14 @@ namespace ContextPin
             probe.position = hit.point - rightAim.direction * .0015f;
             probe.localScale = Vector3.one * .003f;
             probe.gameObject.SetActive(true);
-            if (pressed) CommitBundleCandidate(Array.IndexOf(bundleSlots, slot));
+            if (pressed)
+            {
+                int index = Array.IndexOf(bundleSlots, slot);
+                if (SharedPaperMeeting && !MeetingHost)
+                    SendPaperCommand("paper_candidate_select", new JObject { ["candidate_set_id"] = bundleSetId,
+                        ["candidate_id"] = bundleCandidates[index]["candidate_id"] });
+                else CommitBundleCandidate(index);
+            }
             return true;
         }
 
@@ -241,6 +276,11 @@ namespace ContextPin
                 ["candidate_set_id"] = setId, ["candidate_id"] = candidate["candidate_id"],
                 ["base_version_id"] = bundleBaseId, ["expected_latest_version_id"] = AssemblyAdoptedId
             };
+            if (SharedPaperMeeting)
+            {
+                if (!MeetingHost || !BundleOnPaper) return;
+                payload["paper_frame_revision"] = PaperFrameRevision;
+            }
             AddMeetingClock(payload);
             bundleCommitPending = true;
             bundleReviewError = null;

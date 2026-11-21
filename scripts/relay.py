@@ -217,7 +217,10 @@ def smoke_meeting(simulator, assembly=False):
     except (OSError, ValueError) as error:
         raise SystemExit(f'회의 EDGE를 먼저 시작하세요. {edge} · {error}') from error
     check = 'assembly' if assembly else 'meeting'
-    if env.get('MEETING_CANDIDATE_COMMIT_SMOKE') == '1':
+    if env.get('MEETING_COLOCATION_SMOKE') == '1':
+        check = 'colocation'
+        env.update(MEETING_CANDIDATE_COMMIT_SMOKE='1', MEETING_PHONE_STAND_SMOKE='1')
+    elif env.get('MEETING_CANDIDATE_COMMIT_SMOKE') == '1':
         check = 'candidate-commit'
     elif env.get('MEETING_CANDIDATE_SET_SMOKE') == '1':
         check = 'candidate-set'
@@ -251,7 +254,7 @@ def smoke_meeting(simulator, assembly=False):
             # The native simulator can keep an editor window alive after Unity
             # writes its report. Bound teardown for the editor this check owns.
             with subprocess.Popen([str(arg) for arg in command], env=env) as child:
-                deadline = time.monotonic() + (650 if check in ('candidate-set', 'candidate-commit') else 220 if assembly else 160)
+                deadline = time.monotonic() + (650 if check in ('candidate-set', 'candidate-commit', 'colocation') else 220 if assembly else 160)
                 try:
                     while child.poll() is None and time.monotonic() < deadline:
                         if report.is_file():

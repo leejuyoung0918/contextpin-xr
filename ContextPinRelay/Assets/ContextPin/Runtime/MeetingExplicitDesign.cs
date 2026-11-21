@@ -42,11 +42,19 @@ namespace ContextPin
         bool ExplicitDesignMeeting => SpatialAssembly && TextValue(meetingSnapshot, "design_submit_mode") == "explicit";
         bool CaptureBundleMeeting => ExplicitDesignMeeting && TextValue(meetingSnapshot?["meeting"], "edit_request_output") == "bundle";
         bool CandidateGenerationMeeting => CaptureBundleMeeting && TextValue(meetingSnapshot?["meeting"], "candidate_generation") == "ai";
+        bool CapturingPaperEdit => SharedPaperMeeting && CaptureBundleMeeting && MeetingHost && explicitRequest != null &&
+            !explicitRequest.BundleSaved && !explicitRequest.Conflict &&
+            explicitRequest.Speech is (DesignSpeech.Marking or DesignSpeech.Transcribing or DesignSpeech.Final);
         JObject CurrentCandidateSet
         {
             get
             {
                 if (!CaptureBundleMeeting || meetingSnapshot["candidate_sets"] is not JObject sets || !sets.HasValues) return null;
+                if (SharedPaperMeeting)
+                {
+                    var active = TextValue(PaperState, "active_request_id");
+                    return active.Length > 0 ? sets[active] as JObject : null;
+                }
                 var requests = meetingSnapshot["edit_requests"] as JObject;
                 var id = explicitRequest?.Id;
                 if (id == null && requests != null)
@@ -81,8 +89,8 @@ namespace ContextPin
                 default: return "저장한 요청의 생성 상태를 확인하고 있습니다.";
             }
         }
-        bool BundleLatestReady => A4ReviewSurfaceActive && meetingModel != null && meetingModel.activeInHierarchy &&
-            meetingLoadedVersion == AssemblyAdoptedId;
+        bool BundleLatestReady => A4ReviewSurfaceActive && (!SharedPaperMeeting || PaperRenderable) &&
+            meetingModel != null && meetingModel.activeInHierarchy && meetingLoadedVersion == AssemblyAdoptedId;
         string PaperLatestPosition => CenteredPaperLatest ? "종이 중앙" : "종이 오른쪽 앞";
         bool OtherDeviceRecordsDesign => !string.IsNullOrEmpty(TextValue(meetingSnapshot?["meeting"], "audio_device_id")) &&
             TextValue(meetingSnapshot["meeting"], "audio_device_id") != meetingDeviceId;
@@ -142,7 +150,10 @@ namespace ContextPin
                 if (CaptureBundleMeeting)
                 {
                     var set = CurrentCandidateSet;
-                    if (set != null) return BundleCandidateStatus(set);
+                    if (set != null && !CapturingPaperEdit && !(p?.Speech == DesignSpeech.Failed && !p.BundleSaved))
+                        return BundleCandidateStatus(set);
+                    if (SharedPaperMeeting && p?.BundleSaved == true && p.BaseId != AssemblyAdoptedId)
+                        return "현재 채택본을 기준으로 다음 수정 요청을 시작할 수 있습니다.";
                     if (CandidateGenerationMeeting && p?.BundleSaved == true) return "저장한 요청의 생성 상태를 확인하고 있습니다.";
                     if (p?.BundleSaved == true) return "수정 요청 저장 완료 · 발언 원음과 선택 이미지를 기록했습니다.";
                     if (p?.Selection != null) return "발언 원음·전사·선택 위치·이미지를 서버에 저장하는 중입니다.";
@@ -192,7 +203,7 @@ namespace ContextPin
 
         void StartExplicitCamera(bool userRequested)
         {
-            if (!ExplicitDesignMeeting || ExplicitCameraReady || explicitCameraStarting || meetingTransport == null) return;
+            if (SharedPaperMeeting && !MeetingHost || !ExplicitDesignMeeting || ExplicitCameraReady || explicitCameraStarting || meetingTransport == null) return;
             // Android's first permission dialog suspends tracking. A4 placement can finish
             // without RGB, and the existing camera button lets the wearer opt in later.
             if (CaptureBundleMeeting && !userRequested &&
@@ -334,6 +345,14 @@ namespace ContextPin
             {
                 ShowExplicitHint(error);
                 return false;
+            }
+            if (PaperRenderable)
+            {
+                var shared = PaperSelectionPayload(reviewTable, PaperFrameRevision, p.BaseId, rightAim, hit.point);
+                foreach (string field in new[] { "paper_frame_revision", "ray_origin_paper", "ray_direction_paper", "hit_position_paper" })
+                    photo.BundleEvidence[field] = shared[field].DeepClone();
+                shared["selection_id"] = photo.Id;
+                SendPaperCommand("paper_selection", shared);
             }
             photo.Reference.Merge(photo.BundleEvidence);
             p.Selection = photo;

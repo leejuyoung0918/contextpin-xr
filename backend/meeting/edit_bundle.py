@@ -134,7 +134,8 @@ def save(coordinator, state, actor, client_id, base_id, ref, lines, fingerprint)
         transcript.update(entered_by=lines[0]["participant_id"], entered_at=iso_time(lines[0]["received_at"]))
     selection = {k: ref[k] for k in ("selection_id", "part_id", "base_version_id", "object_id", "timestamp",
                  "workspace_revision", "ray_origin_world", "ray_direction_world", "hit_world_position",
-                 "hit_model_local_position", "hit_normal_world", "hit_point_asset_m", "workspace_pose", "latest_model_pose") if k in ref}
+                 "hit_model_local_position", "hit_normal_world", "hit_point_asset_m", "workspace_pose", "latest_model_pose",
+                 "paper_frame_revision", "hit_position_paper", "ray_origin_paper", "ray_direction_paper") if k in ref}
     visual = {k: ref[k] for k in ("selection_id", "image_source", "actual_rgb", "capture_timestamp", "camera_pose",
                                   "sensor_timestamp_us", "fallback_reason", "image_uv", "image_uv_origin") if k in ref}
     visual.update(image_asset_id=image["evidence_id"], file=image_file, sha256=image["sha256"])

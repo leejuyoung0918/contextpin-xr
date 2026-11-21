@@ -102,7 +102,7 @@ namespace ContextPin
             DrawPanelHandle(925, 12, 275, 45);
             RoundBox("MeetingSetupNew", content, 36, 206, 537, 398, Card, 16);
             BoldLabel("MeetingSetupCreateTitle", content, 64, 229, 475, 56, "회의 열기", 34, Light);
-            Label("MeetingSetupCreateHelp", content, 65, 300, 470, 74, xr ? "A4 네 점을 지정하고 현재 모델을 확인한 뒤 회의 녹음을 시작하세요." : "회의를 만든 뒤 녹음을 시작하면 대화가 서버에 기록됩니다.", 24, Muted);
+            Label("MeetingSetupCreateHelp", content, 65, 300, 470, 74, xr ? "책상 위 A4에 ①②③④를 표시해 두세요. 함께 볼 사람에게 회의 참가 코드를 알려주세요." : "회의를 만든 뒤 녹음을 시작하면 대화가 서버에 기록됩니다.", 24, Muted);
             Button("MeetingCreate", 65, 385, 471, 66, meetingBusy ? "연결 중…" : xr ? "회의 준비" : "새 회의 만들기", () => BeginMeetingSession(false, xr), true);
             Button("MeetingExample", 65, 475, 222, 48, "대본으로 체험", BeginExampleMeeting);
             if (PlayerPrefs.HasKey(MostRecentMeeting + "Session"))
@@ -115,12 +115,12 @@ namespace ContextPin
             if (!showJoinKeypad)
             {
                 string joinHint = !string.IsNullOrWhiteSpace(AssemblyQrStatus) ? AssemblyQrStatus : xr ?
-                    "진행자 PC의 참가 QR을 읽으세요. 참가 후 받침 QR로 모델 위치를 맞춥니다." : "진행자에게 받은 여섯 자리 참가 코드를 입력하세요.";
+                    "진행자가 보여주는 여섯 자리 코드를 입력한 뒤 같은 A4의 ①→②→③→④를 짚으세요." : "진행자에게 받은 여섯 자리 참가 코드를 입력하세요.";
                 Label("MeetingJoinHint", content, 623, 291, 540, 80, joinHint, 24, Muted);
-                if (xr) Button("MeetingJoinQr", 623, 385, 548, 64, joiningByQr ? "참가 QR 읽기 취소" : "참가 QR 읽기", () =>
+                if (xr) Button("MeetingJoinQr", 623, 475, 258, 49, joiningByQr ? "참가 QR 읽기 취소" : "참가 QR 읽기", () =>
                 { if (joiningByQr) { StopJoinQr(); Draw(); } else BeginJoinQr(); });
-                Button("MeetingShowCode", 623, xr ? 475 : 385, 258, 49, "코드로 참가", () =>
-                { StopJoinQr(); showJoinKeypad = true; Draw(); });
+                Button("MeetingShowCode", 623, 385, 548, 64, "참가 코드 입력", () =>
+                { StopJoinQr(); showJoinKeypad = true; Draw(); }, true);
                 return;
             }
             BoldLabel("MeetingCodeInput", content, 623, 286, 541, 49,

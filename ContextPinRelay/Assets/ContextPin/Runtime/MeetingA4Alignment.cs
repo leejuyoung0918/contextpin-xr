@@ -12,7 +12,6 @@ namespace ContextPin
         int a4Count;
         string a4Status;
         bool a4PoseApplied;
-        Vector3 a4ViewerRight;
         Pose a4Surface;
         Vector2 a4Size;
         bool A4PointSampling => assemblyAlignment == AssemblyAlignment.CaptureA4;
@@ -37,7 +36,7 @@ namespace ContextPin
             if (OVRManager.IsInsightPassthroughSupported()) SetPassthrough(true);
             if (assemblyRecoveryPanel) RestoreSpatialPanel();
             notice = "";
-            Debug.Log("ContextPin A4: waiting for front-left corner");
+            Debug.Log("ContextPin A4: waiting for physical ①");
             PositionMeetingModel();
             Draw();
         }
@@ -47,29 +46,26 @@ namespace ContextPin
             if (!A4PointSampling || movingMeetingPanel || ReviewTableSampling || a4Count >= 4) return false;
             if (view == null || !TryTabletopProbe(out var point))
                 return RejectA4Corner("오른쪽 컨트롤러와 헤드셋 추적을 확인한 뒤 A를 누르세요.");
-            if (a4Count == 0)
-            {
-                a4ViewerRight = Vector3.ProjectOnPlane(view.transform.right, Vector3.up).normalized;
-                if (a4ViewerRight.sqrMagnitude < .9f) return RejectA4Corner("종이의 앞쪽에서 고개를 바로 하고 다시 짚으세요.");
-            }
             var error = ValidateA4Corner(point);
             if (error != null) return RejectA4Corner(error);
             Bounds original = default;
-            if (a4Count == 3 && !TryGetTabletopOriginalBounds(out original))
-                return RejectA4Corner("원본 모델을 준비 중입니다. 준비되면 뒤왼쪽에서 A를 다시 누르세요.");
+            bool guest = SharedPaperMeeting && !MeetingHost;
+            if (a4Count == 3 && !guest && !TryGetTabletopOriginalBounds(out original))
+                return RejectA4Corner("원본 모델 준비 후 ④에서 A를 다시 누르세요.");
             a4Corners[a4Count++] = point;
             a4Status = "";
             if (a4Count == 4)
             {
                 MeasureA4Surface();
-                var bottomCenter = new Vector3(original.center.x, original.min.y, original.center.z);
+                var bottomCenter = guest ? Vector3.zero : new Vector3(original.center.x, original.min.y, original.center.z);
                 assemblyReference = new Pose(a4Surface.position - a4Surface.rotation * bottomCenter, a4Surface.rotation);
                 a4PoseApplied = true;
                 assemblyAlignment = AssemblyAlignment.Preview;
-                Debug.Log($"ContextPin A4: measured {a4Size.x:F3} x {a4Size.y:F3} m · V1 center preview");
+                if (guest) ConfirmAssemblyAlignment();
+                Debug.Log($"ContextPin A4: measured {a4Size.x:F3} x {a4Size.y:F3} m · physical ①→②→③→④");
             }
             else Debug.Log($"ContextPin A4: corner {a4Count}/4 accepted");
-            UpdateA4Marks();
+            if (assemblyAlignment != AssemblyAlignment.Confirmed) UpdateA4Marks();
             PositionMeetingModel();
             Draw();
             return true;
@@ -96,17 +92,15 @@ namespace ContextPin
             var front = Horizontal((a4Count == 1 ? point : a4Corners[1]) - a4Corners[0]);
             if (a4Count == 1)
             {
-                if (Vector3.Dot(front.normalized, a4ViewerRight) < .35f)
-                    return "앞왼쪽에서 오른쪽에 있는 앞오른쪽 모서리를 짚으세요.";
                 if (Mathf.Min(Mathf.Abs(front.magnitude - A4Short), Mathf.Abs(front.magnitude - A4Long)) > A4EdgeTolerance)
-                    return "A4 변 길이와 맞지 않습니다. 앞오른쪽 모서리에서 다시 짚으세요.";
+                    return "A4 변 길이와 맞지 않습니다. ②를 다시 짚으세요.";
                 return null;
             }
             float width = Mathf.Abs(front.magnitude - A4Short) < Mathf.Abs(front.magnitude - A4Long) ? A4Short : A4Long;
             float depth = width == A4Short ? A4Long : A4Short;
             var side = Horizontal((a4Count == 2 ? point : a4Corners[2]) - a4Corners[1]);
             if (!A4RightTurn(front, side) || Mathf.Abs(side.magnitude - depth) > A4EdgeTolerance)
-                return "앞오른쪽에서 종이 뒤쪽으로 직각인 뒤오른쪽 모서리를 짚으세요.";
+                return "②에서 직각으로 이어진 ③을 짚으세요.";
             if (a4Count == 2) return null;
             var rear = Horizontal(point - a4Corners[2]);
             var left = Horizontal(a4Corners[0] - point);
@@ -116,7 +110,7 @@ namespace ContextPin
                 Mathf.Abs(rear.magnitude - width) > A4EdgeTolerance || Mathf.Abs(left.magnitude - depth) > A4EdgeTolerance ||
                 Mathf.Abs(front.magnitude - rear.magnitude) > .025f || Mathf.Abs(side.magnitude - left.magnitude) > .025f ||
                 Mathf.Abs(diagonal1 - diagonal2) > .028f)
-                return "네 점이 A4 사각형과 맞지 않습니다. 뒤왼쪽을 다시 짚거나 이전 점을 취소하세요.";
+                return "네 점이 A4 사각형과 맞지 않습니다. ④를 다시 짚거나 이전 점을 취소하세요.";
             return null;
         }
 

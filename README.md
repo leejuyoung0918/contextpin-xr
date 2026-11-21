@@ -36,6 +36,16 @@ python3 scripts/relay.py deploy
 
 현장 서버는 한국어 발화를 로컬 faster-whisper로 전사하고 선택 이미지, Ray, 현재 CAD와 확정 발화를 로컬 Qwen3-VL로 해석합니다. 외부 AI API 사용료는 0원입니다. 로컬 모델 오류는 회의 화면에 표시됩니다. 팀 키가 있는 PC에서도 이 경로는 로컬 모델만 호출합니다. [후보 해석 구현](backend/meeting/bundle_interpretation.py)
 
+## 두 Quest로 같은 거치대 보기
+
+1. 두 Quest를 같은 PC 회의 서버에 연결합니다. USB로 시연할 때는 `adb devices -l`에서 기기번호를 확인하고 **기기마다** `python3 scripts/relay.py deploy --serial 기기번호`를 실행합니다. 두 USB 연결을 유지합니다. 같은 Wi-Fi에서 무선으로 실행하려면 빌드 전에 `ContextPinRelay/Assets/Resources/relay-local.json`을 열거나 생성해 `meetingServerUrl`을 현장 PC 주소로 설정합니다. 예를 들어 PC 주소가 192.168.1.20이면 `{"meetingServerUrl":"http://192.168.1.20:8791"}`입니다.
+2. A4를 책상에 고정합니다. 진행자가 한쪽에 서서 **왼쪽 아래 ①, 오른쪽 아래 ②, 오른쪽 위 ③, 왼쪽 위 ④**를 종이에 직접 적습니다. 진행자가 **회의 준비**를 누르고 네 모서리를 번호순으로 짚은 뒤 **배치 확인**을 누릅니다.
+3. 참가자는 **참가 코드 입력**에서 진행자 패널의 6자리 코드를 입력합니다. 반대편에 서 있어도 같은 종이에 적힌 **①→②→③→④**를 짚습니다. 정렬되면 현재 Latest와 준비된 후보가 나타납니다. 진행 중인 회의에 들어가도 현재 버전에서 시작합니다.
+4. 참가자가 Latest를 가리키고 오른손 **A**를 누르면 같은 CAD 지점에 표시가 뜹니다. 후보를 가리키고 **A**를 누르면 검토할 후보를 제안합니다. 진행자가 후보에 **A**를 눌러 채택하면 두 Quest의 Latest가 함께 갱신됩니다.
+5. 한 기기만 추적을 잃으면 해당 기기에서 **A4로 다시 맞추기**를 사용합니다. 실제 종이를 옮겼다면 진행자가 **메뉴 → 종이를 옮겼어요 · 공통 기준 변경**을 누르고 모두 새 위치에서 네 점을 다시 짚습니다.
+
+종이 중심이 공통 원점이며 **+X는 ①→②, +Z는 ①→④, +Y는 책상 위쪽**입니다. 위치는 미터, 회전은 Unity 쿼터니언 `[x,y,z,w]`입니다. 서버는 진행자가 확인한 Latest와 실제 배치한 각 후보의 종이 기준 자세를 보관합니다. 각 Quest는 자기 A4 자세에 이 값을 곱합니다. [Unity 변환](ContextPinRelay/Assets/ContextPin/Runtime/MeetingPaperSpace.cs) · [서버 상태](backend/meeting/paper_space.py)
+
 ## 회의 녹음과 수정 요청
 
 1. Quest에서 **회의 준비**를 누르고 A4의 네 점을 지정합니다. 중앙의 거치대 V1과 방향을 확인한 뒤 **배치 확인 → 회의 시작**을 누릅니다. 이때부터 같은 마이크 스트림으로 일반 대화와 후보 검토 중의 대화를 전사합니다.
@@ -104,6 +114,14 @@ MEETING_EDGE_URL=http://127.0.0.1:18897 MEETING_CAPTURE_DATA_DIR="$PWD/artifacts
   MEETING_TIMELINE_PCM_DIR="$PWD/artifacts/phase2-timeline-audio" \
   MEETING_EXPLICIT_PCM="$PWD/artifacts/phase2-timeline-audio/angle.pcm" \
   MEETING_FOLLOWUP_PCM="$PWD/artifacts/phase2-timeline-audio/lip.pcm" \
+  python3 scripts/relay.py smoke-assembly-simulator
+```
+
+같은 QA 서버에서 두 사용자의 좌표 검사를 실행할 수 있습니다. 시뮬레이터 하나에서 진행자와 참가자 역할을 전환하고 별도 참가 토큰과 이벤트 연결을 사용합니다. 서로 다른 추적 원점에서 본 모델의 종이 기준 위치·회전, 공유 Ray, 늦은 참가와 재정렬 결과는 `artifacts/colocation-simulator-report.json`에 기록됩니다.
+
+```sh
+MEETING_EDGE_URL=http://127.0.0.1:18897 MEETING_CAPTURE_DATA_DIR="$PWD/artifacts/phase3-minutes-qa" \
+  MEETING_COLOCATION_SMOKE=1 MEETING_EXPLICIT_PCM="$PWD/artifacts/phase2-timeline-audio/angle.pcm" \
   python3 scripts/relay.py smoke-assembly-simulator
 ```
 

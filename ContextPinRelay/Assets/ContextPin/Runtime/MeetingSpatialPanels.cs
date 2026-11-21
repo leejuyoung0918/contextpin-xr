@@ -12,12 +12,12 @@ namespace ContextPin
         const float SpatialWidth = 420;
         const float SpatialOriginY = 270;
         bool assemblyCompare, assemblyMenu, assemblyPanelReady, assemblyRecoveryPanel;
-        bool movingMeetingPanel, meetingPanelMoved, showJoinKeypad;
+        bool movingMeetingPanel, meetingPanelMoved, showJoinKeypad, confirmPaperChange;
         Ray meetingPanelRay;
         float meetingGrabDistance;
         Vector3 meetingGrabOffset;
         string minutesCode;
-        long minutesCodeExpiresAt;
+        long minutesCodeExpiresAt, visibleJoinCodeExpiresAt;
         bool fetchingMinutesCode, savedFollowUpPending, confirmingMeetingEnd;
         bool assemblyClarify, assemblyHistory, assemblyCableRequest;
         int assemblyHistoryPage;
@@ -64,6 +64,11 @@ namespace ContextPin
         void UpdateSpatialPanelPosition()
         {
             if (!SpatialAssembly || !assemblyPanelReady) return;
+            if (visibleJoinCodeExpiresAt > 0 && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= visibleJoinCodeExpiresAt)
+            {
+                visibleJoinCodeExpiresAt = 0;
+                Draw();
+            }
             if (!string.IsNullOrEmpty(minutesCode) && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= minutesCodeExpiresAt)
             {
                 minutesCode = null;
@@ -133,8 +138,10 @@ namespace ContextPin
             SetupSpatialPanel();
             content = Rect("SpatialAssemblyMeeting", panel, (W - SpatialWidth) / 2f, SpatialOriginY, SpatialWidth, 376);
             var state = AssemblySessionStatus;
+            bool sharedGuest = SharedPaperMeeting && !MeetingHost;
+            if (SharedPaperMeeting && state is not ("finalizing" or "completed")) DrawPaperParticipants();
             var (status, action) = SpatialSessionAction(state);
-            bool pausedActions = state == "paused" && !assemblyStarting && !assemblyStopping && !confirmingMeetingEnd;
+            bool pausedActions = !sharedGuest && state == "paused" && !assemblyStarting && !assemblyStopping && !confirmingMeetingEnd;
             float statusWidth = pausedActions ? 112 : 222;
             if (action == null)
             {
@@ -163,6 +170,14 @@ namespace ContextPin
                 if (assemblyMenu) DrawSpatialMenu(); else DrawSavedResult();
                 return;
             }
+            if (SharedPaperMeeting && assemblyMenu) { DrawSpatialMenu(); return; }
+            if (SharedPaperMeeting && assemblyHistory && PaperRenderable) { DrawSpatialHistory(); return; }
+            if (sharedGuest)
+            {
+                if (PaperLocalStatus != "aligned") DrawA4Alignment();
+                else DrawPaperGuestReview();
+                return;
+            }
             if (PreparingLivePaperMeeting)
             {
                 if (!A4ReviewSurfaceActive) { DrawA4Alignment(); return; }
@@ -175,6 +190,8 @@ namespace ContextPin
                 Button("A4Restart", 12, 163, 188, 32, "A4 다시 지정", BeginA4Alignment);
                 if (AdoptedModelFailed)
                     Button("MeetingRetryModel", 220, 163, 188, 32, "CAD 다시 불러오기", RetryAdoptedModel);
+                else if (SharedPaperMeeting)
+                    Button("SpatialMenu", 220, 163, 188, 32, "메뉴", () => { assemblyMenu = true; Draw(); });
                 return;
             }
             if (ExplicitDesignMeeting && explicitTranscriptPage >= 0 && AssemblyActive) { DrawExplicitTranscript(); return; }
@@ -238,6 +255,48 @@ namespace ContextPin
         }
 
         bool AdoptedModelFailed => !string.IsNullOrEmpty(AssemblyAdoptedId) && meetingFailedVersion == AssemblyAdoptedId;
+
+        void DrawPaperParticipants()
+        {
+            RoundBox("PaperParticipants", content, 0, -43, SpatialWidth, 36, SpatialBackground, 9);
+            string alignment = PaperLocalStatus switch {
+                "aligned" => "공간 정렬 완료", "lost" => "공간 정렬 필요", "calibrating" => "A4 정렬 중", _ => "공간 정렬 필요"
+            };
+            int count = Values(meetingSnapshot, "participants").Count();
+            Label("PaperAlignment", content, 10, -43, MeetingHost ? 235 : 398, 36, $"{alignment} · 참가자 {count}명", SpatialFont(16), HeaderText);
+            if (!MeetingHost) return;
+            var code = TextValue(meetingSnapshot, "join_code");
+            long expiry = meetingSnapshot.Value<long?>("join_expires_at") ?? 0;
+            if (code.Length > 0 && expiry > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+            {
+                visibleJoinCodeExpiresAt = expiry;
+                BoldLabel("SpatialJoinCode", content, 240, -43, 170, 36, "참가 코드 " + code, SpatialFont(16), HeaderText, TextAnchor.MiddleRight);
+            }
+            else
+                Button("MeetingRenewCode", 246, -42, 161, 33, "새 참가 코드", () => SendMeetingCommand("renew_code", new JObject()));
+        }
+
+        void DrawPaperGuestReview()
+        {
+            var card = RoundBox("PaperGuestReview", content, 0, 58, SpatialWidth, 125, SpatialBackground, 12);
+            DrawLatestCaption(12, 65, 288, 32);
+            Button("SpatialMenu", 327, 65, 82, 34, "메뉴", () => { assemblyMenu = true; Draw(); });
+            var set = CurrentCandidateSet;
+            string hint = !PaperSessionReady ? "진행자가 같은 A4의 모델 배치를 확인하면 여기에 표시됩니다." :
+                !PaperRenderable ? "공간 정렬 상태를 서버와 맞추고 있습니다." :
+                AdoptedModelFailed || BundleAssetsFailed ? "CAD를 불러오지 못했습니다." :
+                meetingLoadedVersion != AssemblyAdoptedId ? "현재 채택된 CAD를 불러오는 중입니다." :
+                TextValue(set, "status") == "ready" ? "후보를 가리키고 A를 누르면 진행자에게 제안합니다." :
+                "Latest의 한 지점을 가리키고 오른손 A를 눌러 함께 보세요.";
+            Label("PaperGuestHint", content, 12, 105, 396, 53, hint, SpatialFont(18), HeaderText);
+            float details = PaperRenderable ? DrawBundleCandidateInfo(set, 164) : 0;
+            if (AdoptedModelFailed || BundleAssetsFailed)
+            {
+                Button("MeetingRetryModel", 12, 164 + details, 200, 37, "CAD 다시 불러오기", RetryAdoptedModel);
+                details += 45;
+            }
+            card.rectTransform.sizeDelta = new Vector2(SpatialWidth, 125 + details);
+        }
 
         string ShownLatestLabel()
         {
@@ -333,14 +392,20 @@ namespace ContextPin
             var candidates = Values(set, "candidates").ToArray();
             if (TextValue(set, "status") == "ready")
             {
+                var spatial = meetingSnapshot?["spatial"];
+                string proposed = SharedPaperMeeting ? TextValue(spatial, "selected_candidate_id") : "";
+                string participant = TextValue(spatial, "selected_by_participant_id");
                 foreach (var candidate in candidates)
                 {
                     string values = string.Join(", ", Values(candidate, "parameter_diff").Select(change =>
                         $"{TextValue(change, "label")} {change["before"]} → {change["after"]} {TextValue(change, "unit")}".TrimEnd()));
                     string key = TextValue(candidate, "candidate_key");
-                    string side = CenteredPaperLatest ? (key == "A" ? "종이 왼쪽" : "종이 오른쪽") :
+                    string side = CenteredPaperLatest && SharedPaperMeeting ? (key == "A" ? "①·④ 쪽" : "②·③ 쪽") :
+                        CenteredPaperLatest ? (key == "A" ? "종이 왼쪽" : "종이 오른쪽") :
                         (key == "A" ? "뒤왼쪽" : "뒤오른쪽");
-                    rows.Add(($"후보 {key} · {side} · {values}\n{TextValue(candidate, "interpretation")}", key));
+                    string suggestion = proposed.Length > 0 && proposed == TextValue(candidate, "candidate_id")
+                        ? (participant == meetingParticipant ? " · 내가 제안함" : " · 참가자가 제안함") : "";
+                    rows.Add(($"후보 {key}{suggestion} · {side} · {values}\n{TextValue(candidate, "interpretation")}", key));
                 }
             }
             string reason = TextValue(set, "reason");
@@ -482,6 +547,12 @@ namespace ContextPin
                 if (MinutesStatus == "generation_failed") return ("회의록 생성 실패", null);
                 return (Values(meetingSnapshot?["result"], "missing").Any() ? "누락 포함 저장됨" : "저장됨", null);
             }
+            if (SharedPaperMeeting && !MeetingHost)
+            {
+                if (!meetingEventsConnected && !meetingHttpAvailable) return ("서버 연결 대기", null);
+                return (state switch { "recording" => "회의 진행 중", "paused" => "회의 일시 정지",
+                    "save_error" => "회의 저장 오류", _ => "진행자 대기" }, null);
+            }
             if (state == "save_error") return ("저장 다시 시도", RetrySpatialSave);
             if (RequestedOutputUnavailable && !assemblyStarting && !string.IsNullOrEmpty(assemblyFeedback))
                 return ("저장 모드 연결 다시 시도", StartSpatialMeeting);
@@ -573,7 +644,7 @@ namespace ContextPin
             return true;
         }
 
-        static readonly string[] A4CornerLabels = { "앞 왼쪽", "앞 오른쪽", "뒤 오른쪽", "뒤 왼쪽" };
+        static readonly string[] A4CornerLabels = { "①", "②", "③", "④" };
 
         void DrawA4Alignment()
         {
@@ -604,19 +675,21 @@ namespace ContextPin
             }
             if (!A4PointSampling)
             {
-                string title = assemblyAlignment == AssemblyAlignment.Lost ? "책상 위치를 다시 맞춰 주세요" : "빈 A4를 책상에 놓으세요";
+                string title = assemblyAlignment == AssemblyAlignment.Lost ? "같은 A4에 다시 맞춰 주세요" : "번호를 표시한 A4를 준비하세요";
                 BoldLabel("SpatialAlignmentStatus", content, 12, 67, 396, 40, title, SpatialFont(22), HeaderText);
-                Label("SpatialAlignmentHint", content, 12, 116, 396, 85, "책상 위 빈 A4의 네 모서리를 오른손 컨트롤러로 짚습니다. 가로로 놓으면 실물과 수정안을 비교하기 편합니다.", SpatialFont(18), SpatialMuted);
+                Label("SpatialAlignmentHint", content, 12, 116, 396, 85, "모두 같은 A4의 ①→②→③→④를 짚습니다. 한쪽에 서서 왼쪽 아래에 ①, 오른쪽 아래에 ②, 오른쪽 위에 ③, 왼쪽 위에 ④를 적어 두세요.", SpatialFont(17), SpatialMuted);
                 Button("A4Start", 12, 225, 190, 47, "A4 네 점 지정", BeginA4Alignment, true);
-                Button("A4AlignmentMethods", 215, 225, 192, 47, "다른 정렬 방법", ShowAlignmentMethods);
+                if (SharedPaperMeeting)
+                    Button("PaperAlignmentMenu", 215, 225, 192, 47, "메뉴", () => { assemblyMenu = true; Draw(); });
+                else Button("A4AlignmentMethods", 215, 225, 192, 47, "다른 정렬 방법", ShowAlignmentMethods);
                 return;
             }
 
             int corner = Mathf.Clamp(A4CornerCount, 0, 3);
             BoldLabel("SpatialAlignmentStatus", content, 12, 66, 396, 40,
-                $"A4 {corner + 1}/4 · {A4CornerLabels[corner]} 모서리", SpatialFont(24), HeaderText);
-            string instruction = corner == 0 ? "빈 A4를 책상에 놓으세요.\n가로 권장 · 세로 가능\n오른손 표시점을 모서리에 대고 A를 누르세요." :
-                $"종이를 움직이지 말고 {A4CornerLabels[corner]} 모서리에 오른손 표시점을 대고 A를 누르세요.";
+                $"A4 정렬 {corner + 1}/4 · 종이의 {A4CornerLabels[corner]}", SpatialFont(23), HeaderText);
+            string instruction = corner == 0 ? "모두 같은 A4의 ①→②→③→④를 짚습니다. 종이에 적힌 ①에 오른손 표시점을 대고 A를 누르세요." :
+                $"종이에 적힌 {A4CornerLabels[corner]}에 오른손 표시점을 대고 A를 누르세요.";
             Label("SpatialAlignmentHint", content, 12, 110, 256, 102, instruction, SpatialFont(18), HeaderText);
             DrawA4CornerMap(corner);
             string status = !tabletopTipTracked ? "오른쪽 컨트롤러와 헤드셋의 추적을 확인하세요." :
@@ -628,7 +701,9 @@ namespace ContextPin
                 Button("A4Undo", 12, 281, 121, 44, "한 점 취소", UndoA4Corner);
                 Button("A4Restart", 143, 281, 126, 44, "처음부터", BeginA4Alignment);
             }
-            Button("A4AlignmentMethods", 279, 281, 128, 44, "다른 방법", ShowAlignmentMethods);
+            if (SharedPaperMeeting)
+                Button("PaperAlignmentMenu", 279, 281, 128, 44, "메뉴", () => { assemblyMenu = true; Draw(); });
+            else Button("A4AlignmentMethods", 279, 281, 128, 44, "다른 방법", ShowAlignmentMethods);
         }
 
         void DrawA4CornerMap(int current)
@@ -643,7 +718,7 @@ namespace ContextPin
                 BoldLabel("Index", mark.transform, 0, 0, 29, 29, (i + 1).ToString(), SpatialFont(16),
                     i < current ? Card : Light, TextAnchor.MiddleCenter);
             }
-            Label("A4GuideFront", content, 308, 175, 66, 25, "내 쪽", SpatialFont(15), Light, TextAnchor.MiddleCenter);
+            Label("A4GuideFront", content, 308, 175, 66, 25, "+X →", SpatialFont(15), Light, TextAnchor.MiddleCenter);
         }
 
         void DrawTabletopAlignment()
@@ -953,6 +1028,20 @@ namespace ContextPin
 
         void DrawSpatialMenu()
         {
+            bool changeSetup = SharedPaperMeeting && MeetingHost && PaperSessionReady &&
+                AssemblySessionStatus is ("ready" or "recording" or "paused");
+            if (changeSetup && confirmPaperChange)
+            {
+                RoundBox("PaperRedefine", content, 0, 58, SpatialWidth, 142, SpatialBackground, 12);
+                Label("PaperRedefineHint", content, 12, 68, 396, 65, "종이를 옮겼나요? 기준을 바꾸면 참가자 모두 네 모서리를 다시 짚어야 합니다.", SpatialFont(19), HeaderText);
+                Button("PaperCancelRedefine", 12, 143, 188, 39, "취소", () => { confirmPaperChange = false; Draw(); });
+                Button("PaperConfirmRedefine", 212, 143, 194, 39, "기준 바꾸기", () => {
+                    confirmPaperChange = assemblyMenu = false;
+                    RedefinePaperFrame();
+                });
+                return;
+            }
+            confirmPaperChange = false;
             bool savedRequest = AssemblySessionStatus == "completed" && MinutesStatus is ("generated" or "generation_failed") &&
                                 meetingSnapshot["saved_design_utterance"] is JObject;
             RoundBox("SpatialOptions", content, 0, 58, SpatialWidth, savedRequest ? 209 : 165, SpatialBackground, 12);
@@ -981,14 +1070,20 @@ namespace ContextPin
             }
             Button("SpatialLeave", 12, 126, 188, 39, "회의 목록", LeaveMeeting);
             Button("SpatialMenuClose", 212, 126, 194, 39, "돌아가기", () => { assemblyMenu = false; Draw(); });
-            var code = TextValue(meetingSnapshot, "join_code");
-            Label("SpatialJoinCode", content, 12, savedRequest ? 220 : 177, 396, 35, code.Length > 0 ? "참가 코드  " + code : "왼쪽 컨트롤러 X · 패널 다시 부르기", SpatialFont(18), SpatialMuted);
+            if (changeSetup)
+                Button("PaperRedefineFrame", 12, 177, 394, 36, "종이를 옮겼어요 · 공통 기준 변경", () => { confirmPaperChange = true; Draw(); });
+            else if (!SharedPaperMeeting || AssemblySessionStatus == "completed")
+            {
+                var code = TextValue(meetingSnapshot, "join_code");
+                Label("SpatialJoinCode", content, 12, savedRequest ? 220 : 177, 396, 35, code.Length > 0 ? "참가 코드  " + code : "왼쪽 컨트롤러 X · 패널 다시 부르기", SpatialFont(18), SpatialMuted);
+            }
         }
 
         void ResetSpatialAssembly()
         {
             assemblyCompare = assemblyMenu = movingMeetingPanel = meetingPanelMoved = assemblyPanelReady = assemblyRecoveryPanel = false;
-            showJoinKeypad = false;
+            showJoinKeypad = confirmPaperChange = false;
+            visibleJoinCodeExpiresAt = 0;
             minutesCode = null;
             fetchingMinutesCode = savedFollowUpPending = confirmingMeetingEnd = false;
             assemblyClarify = assemblyStarting = assemblyStopping = assemblyAdopting = assemblyResultDownload = assemblyCaptureFrozen = false;

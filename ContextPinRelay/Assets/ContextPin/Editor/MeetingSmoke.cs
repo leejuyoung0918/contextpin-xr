@@ -46,6 +46,8 @@ namespace ContextPin.Editor
             public bool microphoneWaitedForStart, silentCommandRejected, spokeWhileGenerating, spokeWhileComparing;
             public bool singleTimelineVerified, tailFinalized;
             public bool minutesGeneratingShown, minutesSavedShown, minutesPackageVerified;
+            public bool numberedCornersOppositeView, paperCandidatesAgree, paperLatestAgrees, paperHitAgrees;
+            public bool paperCommitReceived, paperLateJoin, paperLostHidden, paperRealigned;
             public int microphoneOpenCount;
             public string[] timelineTexts;
             public float minimumPaperClearanceMm;
@@ -114,7 +116,7 @@ namespace ContextPin.Editor
                     report.runtime = OpenXRRuntime.name;
                     if (report.renderViews < 2 || report.runtime.IndexOf("simulat", StringComparison.OrdinalIgnoreCase) < 0) return;
                 }
-                bool advance = checkCaptureOnly ? RunCaptureOnlyStep() : checkExplicit ? RunExplicitStep() : checkLiveAlignment ? RunLiveAlignmentStep() : checkSavedDesign ? RunSavedDesignStep()
+                bool advance = ColocationTest && step >= 11 ? RunPaperGuestStep() : checkCaptureOnly ? RunCaptureOnlyStep() : checkExplicit ? RunExplicitStep() : checkLiveAlignment ? RunLiveAlignmentStep() : checkSavedDesign ? RunSavedDesignStep()
                     : report.assembly ? (report.simulator ? RunSpatialStep() : RunAssemblyStep()) : RunStep();
                 if (advance) { step++; performedFrame = Time.frameCount; }
             }
@@ -1122,13 +1124,15 @@ namespace ContextPin.Editor
         static void Finish(Exception error)
         {
             EditorApplication.update -= Tick;
+            hostEvents?.Dispose();
+            hostEvents = null;
             report.success = error == null;
             report.error = error?.ToString() ?? "";
             var output = Environment.GetEnvironmentVariable("RELAY_WORKSPACE") ?? Path.GetFullPath(Path.Combine(Application.dataPath, "../.."));
             if (checkExplicit || checkCaptureOnly) ReleaseEditorPcmInput();
             UnityEditor.SessionState.EraseBool("ContextPinLegacyCandidateWorkflow");
             UnityEditor.SessionState.EraseBool("ContextPinCaptureOnlyWorkflow");
-            var check = checkBundleAdoption ? "candidate-commit" : checkCandidateSet ? "candidate-set" : checkCaptureOnly ? "capture-only" : checkExplicit ? "explicit" : checkLiveAlignment ? "live-alignment" : checkSavedDesign ? "saved-design" : report.assembly ? "assembly" : "meeting";
+            var check = ColocationTest ? "colocation" : checkBundleAdoption ? "candidate-commit" : checkCandidateSet ? "candidate-set" : checkCaptureOnly ? "capture-only" : checkExplicit ? "explicit" : checkLiveAlignment ? "live-alignment" : checkSavedDesign ? "saved-design" : report.assembly ? "assembly" : "meeting";
             var file = Path.Combine(output, "artifacts", $"{check}-{(report.simulator ? "simulator" : "smoke")}-report.json");
             Directory.CreateDirectory(Path.GetDirectoryName(file));
             File.WriteAllText(file, JsonUtility.ToJson(report, true));

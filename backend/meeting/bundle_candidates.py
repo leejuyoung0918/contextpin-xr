@@ -4,7 +4,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from . import geometry
+from . import geometry, paper_space
 from .contracts import MeetingError, canonical, now_ms, text_field, uid
 from .edit_bundle import command_utterances
 from .parameter_relations import effective_values
@@ -24,6 +24,8 @@ def queue(edge, state, request_id):
             "preserved_constraints": edge.effective(state, base.get("request_constraints", [])),
             "constraint_revision": state["constraint_revision"], "proposal_provenance": None}
     sets[request_id] = item
+    if base["version_id"] == state["committed_version_id"]:
+        state["last_paper_candidate_request"] = request_id
     return "candidate_set.queued", identity(item), ("bundle_plan", request_id, 0)
 
 
@@ -82,6 +84,7 @@ def commit(edge, state, actor, payload):
     ack = {**identity(item), "candidate_id": candidate["candidate_id"], "version_id": vid, "status": "version_committed"}
     if item["status"] == "committed" and item["selected_candidate_id"] == candidate["candidate_id"]:
         return "version.commit_repeated", ack, None
+    paper_space.check_commit(state, actor, payload)
     if item["status"] != "ready" or base != state["committed_version_id"] or item["constraint_revision"] != state["constraint_revision"]:
         raise MeetingError("채택본 또는 유지 조건이 변경됐습니다. 현재 Latest를 확인하세요.", 409,
                            committed_version_id=state["committed_version_id"])
