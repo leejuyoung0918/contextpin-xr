@@ -32,7 +32,8 @@ export class MeetingLifecycle {
     });
     byId("result-minutes").addEventListener("click", () => {
       const revision = this.result?.manifest?.revision;
-      if (revision) this.download(this.edge().path + "/minutes.txt?revision=" + revision, this.snapshot.session_id + "-r" + revision + "-minutes.txt");
+      const ext = this.result?.manifest?.minutes_status === "generated" ? "md" : "txt";
+      if (revision) this.download(this.edge().path + "/minutes." + ext + "?revision=" + revision, this.snapshot.session_id + "-r" + revision + "-minutes." + ext);
     });
     byId("result-download").addEventListener("click", () => {
       if (!this.result?.zip_url) return;
@@ -101,9 +102,11 @@ export class MeetingLifecycle {
       ready: this.beginning ? "마이크 연결 중" : this.busy === "meeting_start" ? "회의 시작 처리 중" : "회의 준비",
       recording: recording ? "녹음 중" : replay ? "예시 회의 진행 중" : "회의 진행 중",
       paused: "일시정지",
-      finalizing: "결과 저장 중",
+      finalizing: "회의 정리 중…",
       completed: !saved ? "이전 회의 기록" :
-        snapshot.result?.missing?.length ? "일부 항목이 누락된 결과가 저장됨" : "저장됨",
+        snapshot.result?.minutes_status === "generation_failed" ? "원본 저장 완료 · 회의록 생성 실패" :
+        snapshot.result?.missing?.length ? "일부 항목이 누락된 결과가 저장됨" :
+        snapshot.result?.minutes_status === "generated" ? "회의록 저장 완료" : "저장됨",
       save_error: "결과 저장 실패",
     };
     write("meeting-state", stateTitle[status] || "회의 상태 확인 중");
@@ -122,11 +125,11 @@ export class MeetingLifecycle {
         save_error: "고정한 채택본과 확보한 기록으로 저장을 다시 시도할 수 있습니다.",
       })[status];
     write("meeting-state-note", snapshot.meeting?.edit_request_output === "bundle" && status === "recording"
-      ? "Quest에서 수정 요청을 녹음하고, 최종 전사를 확인한 뒤 오른쪽 앞 가상 CAD를 가리켜 A를 누르세요." : note || "");
+      ? "Quest에서 수정 요청 구간을 지정하고, 확정 문장을 확인한 뒤 Latest CAD를 가리켜 A를 누르세요." : note || "");
     const buttonText = {
       ready: waitingForMic ? "PC 마이크 연결" : "회의 시작", recording: "회의 종료",
       paused: waitingForMic ? "PC 마이크 연결" : "회의 재개",
-      finalizing: "결과 저장 중", completed: "결과 열기", save_error: "저장 다시 시도",
+      finalizing: "회의 정리 중…", completed: "결과 열기", save_error: "저장 다시 시도",
     };
     write("meeting-main", buttonText[status] || "회의 상태 확인 중");
     show("meeting-main", status !== "completed" || saved);

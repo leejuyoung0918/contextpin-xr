@@ -1,5 +1,6 @@
 """Export immutable meeting revisions using the exact adopted CAD artifacts."""
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
@@ -184,7 +185,7 @@ def summary_markdown(state, version, unused):
     summary = snapshot_fields(state)["summary"]
     decision = next((item for item in reversed(state["decisions"]) if item["selected_model_version_id"]), None)
     evidence = (decision or {}).get("evidence_utterances", [])
-    lines = ["# 회의 요약", "", f'목적 · {state["assembly"]["display_name"]}의 물체 2 외형 검토',
+    lines = ["# 회의 요약", "", f'검토 대상 · {state["profile"]["display_name"]}',
              f'논의 · {summary["discussion"]}', f'유지 · {summary["preserved"]}', ""]
     if summary["discussion_evidence"]:
         lines += [f'논의 근거 · {summary["discussion_evidence"]}', ""]
@@ -275,6 +276,15 @@ def export_design_requests(root, folder, state, missing):
                          "adopted_version_id": item.get("committed_version_id"), "file": f"edit_requests/{rid}/request.json"})
     if requests:
         write_json(folder / "design_requests.json", requests)
+    from . import speech_ranges
+    partial = []
+    for rid, window in speech_ranges.snapshot(state).items():
+        if rid not in state.get("edit_requests", {}) and window.get("edit_request_draft"):
+            partial.append({"request_id": rid, "status": "awaiting_target_at_close",
+                            **{k: window[k] for k in ("base_version_id", "start_ms", "end_ms",
+                                                       "command_utterance_ids", "command_text")}})
+    if partial:
+        write_json(folder / "partial_edits.json", partial)
 
 
 def build_result(root, models, state, revision):
@@ -369,8 +379,14 @@ def build_result(root, models, state, revision):
             "실물 출력, 간섭, 맞음새는 별도 확인 범위입니다.\n", encoding="utf-8")
         files = {path.relative_to(folder).as_posix(): {"sha256": digest(path.read_bytes()), "size_bytes": path.stat().st_size}
                  for path in sorted(folder.rglob("*")) if path.is_file()}
-        manifest = {"schema_version": 1, "meeting_id": sid, "revision": revision,
+        manifest = {"schema_version": 2, "meeting_id": sid, "revision": revision,
                     "started_at": state["meeting"]["started_at"], "ended_at": state["meeting"]["ended_at"],
+                    "start_at": state["meeting"]["started_at"], "end_at": state["meeting"]["ended_at"],
+                    "object_name": state["profile"]["display_name"],
+                    "initial_version_id": original["version_id"], "final_version_id": final_id,
+                    "transcript_status": state["meeting"].get("transcript_status") or (
+                        "pending" if any(m.get("kind") == "transcription_pending" for m in missing) else "finalized"),
+                    "minutes_status": "pending",
                     "mode": state["meeting"]["mode"], "data_label": "예시 데이터" if state["meeting"]["mode"] == "replay" else "실제 입력",
                     "input_mode": state["meeting"].get("input_mode"), "parent_session_id": (state.get("transfer") or {}).get("source_session_id"),
                     "geometry_provenance": selected.get("geometry_provenance"), "status": "partial" if missing else "complete",
@@ -378,14 +394,76 @@ def build_result(root, models, state, revision):
                     "original_version_id": original["version_id"], "final_scad": entry_path,
                     "final_stl": "cad/final.stl", "stl_sha256": selected["assets"]["print.stl"]["sha256"],
                     "utterance_count": utterance_count, "files": files, "missing": missing}
-        write_json(folder / "manifest.json", manifest)
-        with zipfile.ZipFile(folder / "result.zip", "w", zipfile.ZIP_DEFLATED) as archive:
-            for name in [*files, "manifest.json"]:
-                archive.write(folder / name, name)
-        with zipfile.ZipFile(folder / "result.zip") as archive:
-            if archive.testzip() is not None:
-                raise GeometryError("결과 ZIP의 무결성을 확인하지 못했습니다.")
+        write_package(folder, manifest)
         # A unique storage key allows safe retries after a crash between rename and DB commit.
         key = Path(staging).name.removeprefix(".result-")
         folder.rename(parent / key)
+    return manifest, key
+
+
+def write_package(folder, manifest):
+    write_json(folder / "manifest.json", manifest)
+    with zipfile.ZipFile(folder / "result.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+        for name in [*manifest["files"], "manifest.json"]:
+            archive.write(folder / name, name)
+    with zipfile.ZipFile(folder / "result.zip") as archive:
+        if archive.testzip() is not None:
+            raise GeometryError("결과 ZIP의 무결성을 확인하지 못했습니다.")
+
+
+def add_minutes(source, revision):
+    """Derive a new immutable ZIP only from the already published evidence folder."""
+    from . import minutes_context, minutes_generator
+
+    manifest = json.loads((source / "manifest.json").read_bytes())
+    with tempfile.TemporaryDirectory(dir=source.parent, prefix=".minutes-") as staging:
+        folder = Path(staging) / "data"
+        folder.mkdir()
+        files = {}
+        for name, record in manifest["files"].items():
+            path = PurePosixPath(name)
+            if path.is_absolute() or ".." in path.parts or path.as_posix() != name or name in ("manifest.json", "result.zip"):
+                raise GeometryError("원본 회의 패키지의 파일 경로가 올바르지 않습니다.")
+            if path.parts[0] == "minutes":
+                continue
+            origin = source / name
+            if origin.stat().st_size != record["size_bytes"] or digest(origin.read_bytes()) != record["sha256"]:
+                raise GeometryError(f"회의 원본 파일을 확인하세요. {name}")
+            target = folder / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # Both directories are on the same volume. Linked raw evidence is read-only.
+            try:
+                os.link(origin, target)
+            except OSError:
+                shutil.copyfile(origin, target)
+            files[name] = record
+        manifest.update(schema_version=2, revision=revision, files=files,
+                        initial_version_id=manifest["original_version_id"], final_version_id=manifest["adopted_version_id"])
+        manifest.setdefault("start_at", manifest["started_at"])
+        manifest.setdefault("end_at", manifest["ended_at"])
+        manifest.setdefault("transcript_status", "snapshot")
+        for field in ("minutes_json", "minutes_md", "minutes_error"):
+            manifest.pop(field, None)
+        try:
+            context = minutes_context.build_context(folder, manifest)
+            minutes = minutes_generator.generate(context)
+            structured = json_bytes(minutes)
+            markdown = minutes_generator.render_markdown(minutes)
+        except Exception as error:
+            # Context/AI/validation errors affect only the derived minutes.
+            from .contracts import MeetingError
+            manifest["minutes_status"] = "generation_failed"
+            manifest["minutes_error"] = (str(error)[:250] if isinstance(error, MeetingError)
+                                         else f"회의록 생성 또는 근거 검증 실패 ({type(error).__name__})")
+        else:
+            directory = folder / "minutes"
+            directory.mkdir()
+            (directory / "minutes.json").write_bytes(structured)
+            (directory / "minutes.md").write_text(markdown, encoding="utf-8")
+            for path in directory.iterdir():
+                files[path.relative_to(folder).as_posix()] = {"size_bytes": path.stat().st_size, "sha256": digest(path.read_bytes())}
+            manifest.update(minutes_status="generated", minutes_json="minutes/minutes.json", minutes_md="minutes/minutes.md")
+        write_package(folder, manifest)
+        key = Path(staging).name.removeprefix(".minutes-")
+        folder.rename(source.parent / key)
     return manifest, key

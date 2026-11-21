@@ -55,7 +55,11 @@ export function paintMeetingResult(data) {
   const alert = byId("result-missing");
   alert.hidden = !missing.length;
   alert.textContent = "이 저장본의 누락 항목" + (missingLabel ? " · " + missingLabel : "");
-  appendSummary(byId("result-summary"), data.summary_markdown || "상세 요약을 불러올 수 없습니다.");
+  if (manifest.minutes_status === "generation_failed") {
+    alert.hidden = false;
+    alert.textContent = ["회의록 생성에 실패했습니다. 전사와 CAD는 저장됐습니다.", missingLabel].filter(Boolean).join(" · ");
+  }
+  appendSummary(byId("result-summary"), data.minutes_markdown || data.summary_markdown || "상세 요약을 불러올 수 없습니다.");
   byId("result-transcript").textContent = data.transcript_text || "저장된 확정 전사가 없습니다.";
   const decisions = byId("result-decisions");
   decisions.replaceChildren();
@@ -70,5 +74,6 @@ export function paintMeetingResult(data) {
   }
   byId("result-scad").textContent = data.final_scad || "이 저장본에서 최종 SCAD를 찾을 수 없습니다.";
   byId("result-minutes").disabled = !manifest.revision;
+  byId("result-minutes").textContent = manifest.minutes_status === "generated" ? "회의록 받기" : "전사·결정 기록 받기";
   byId("result-download").disabled = !data.zip_url;
 }

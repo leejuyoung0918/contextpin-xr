@@ -177,9 +177,23 @@ namespace ContextPin.Editor
             if (step == 23) return (!TimelineTest || ReadyToEndWithSpeech(state)) && Click("SpatialConfirmEnd");
             if ((string)state["session_status"] == "save_error")
                 throw new InvalidOperationException("Server could not finalize the meeting: " + state["result"]);
+            if (TimelineTest && (string)state["session_status"] == "finalizing" && ExplicitUi("SpatialSessionStatus") == "회의 정리 중…")
+                report.minutesGeneratingShown = true;
             if ((string)state["session_status"] != "completed") return false;
             Require(report.captureFiles.All(File.Exists) && state["decisions"].Count() == 2, "Both requests and decisions must be archived.");
-            if (TimelineTest) CheckArchivedTimeline(state);
+            if (TimelineTest)
+            {
+                if (step == 24)
+                {
+                    Require((string)state["result"]["minutes_status"] == "generated", "Check the server minutes export: " + state["result"]);
+                    if (ExplicitUi("SpatialSessionStatus") != "회의록 저장 완료") return false;
+                    report.minutesSavedShown = true;
+                    CheckArchivedTimeline(state);
+                    return Click("SpatialMenu");
+                }
+                if (step == 25) return Click("SpatialResult");
+                if (!CheckTimelineMinutes(state)) return false;
+            }
             report.savedMeeting = true;
             Finish(null);
             return true;

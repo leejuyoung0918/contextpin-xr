@@ -245,6 +245,21 @@ def create_app(root=None, planner=None, *, local_inference=False):
                             latest_id=state["committed_version_id"],
                             latest_label=edge().version(state, state["committed_version_id"]).get("design_version")), sid)
 
+    @app.post("/v1/sessions/{sid}/minutes/regenerate", status_code=202)
+    def regenerate_minutes(sid: str, authorization: str = Header(default="")):
+        return edge().regenerate_minutes(sid, bearer(authorization))
+
+    @app.get("/v1/sessions/{sid}/minutes.md")
+    @app.get("/v1/sessions/{sid}/minutes.json")
+    def generated_minutes(sid: str, request: Request, revision: int | None = None, authorization: str = Header(default="")):
+        folder, result = edge().result_folder(sid, bearer(authorization), revision)
+        name = "minutes.md" if request.url.path.endswith(".md") else "minutes.json"
+        path = folder / "minutes" / name
+        if not path.is_file():
+            raise MeetingError("이 저장본에는 생성한 회의록이 없습니다. 원본 패키지를 받을 수 있습니다.", 404)
+        return FileResponse(path, media_type="text/markdown" if name.endswith(".md") else "application/json",
+                            filename=f"contextpin-{sid}-r{result['revision']}-{name}")
+
     @app.get("/v1/sessions/{sid}/minutes-code")
     def minutes_code(sid: str, revision: int | None = None, authorization: str = Header(default="")):
         folder, result = edge().result_folder(sid, bearer(authorization), revision)
@@ -272,6 +287,10 @@ def create_app(root=None, planner=None, *, local_inference=False):
             record = app.state.minutes_codes.get(code.strip().upper()) if isinstance(code, str) else None
             if not record or record["expires_at"] <= now_ms():
                 raise MeetingError("회의록 받기 코드를 확인하거나 헤드셋에서 새로 발급하세요.", 403)
+        markdown = record["folder"] / "minutes" / "minutes.md"
+        if body.get("format") == "markdown" and markdown.is_file():
+            return FileResponse(markdown, media_type="text/markdown",
+                                filename=f'contextpin-{record["sid"]}-r{record["revision"]}-minutes.md')
         return minutes_file(meeting_result.saved_minutes(record["folder"]), record["sid"], record["revision"])
 
     @app.get("/v1/sessions/{sid}/result")
@@ -279,10 +298,12 @@ def create_app(root=None, planner=None, *, local_inference=False):
         folder, result = edge().result_folder(sid, bearer(authorization), revision)
         try:
             manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+            markdown = folder / "minutes" / "minutes.md"
             return {"manifest": manifest, "transcript": [json.loads(line) for line in
                     (folder / "transcript.jsonl").read_text(encoding="utf-8").splitlines() if line],
                     "transcript_text": (folder / "transcript.txt").read_text(encoding="utf-8"),
                     "summary_markdown": (folder / "summary.md").read_text(encoding="utf-8"),
+                    "minutes_markdown": markdown.read_text(encoding="utf-8") if markdown.is_file() else None,
                     "decisions": json.loads((folder / "decisions.json").read_text(encoding="utf-8")),
                     "final_scad": (folder / manifest["final_scad"]).read_bytes().decode("utf-8"),
                     "zip_url": result["zip_url"]}

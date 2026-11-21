@@ -211,7 +211,13 @@ def apply(coordinator, state, actor, kind, payload, stamp):
         reset_preview(state, timestamp)
         for item in state["rounds"]:
             if item["status"] in {"collecting", "generating", "building"}:
+                item["interrupted_at_meeting_end"] = True
                 coordinator.finish_round(item, "superseded", "회의를 종료했습니다.")
+        from . import bundle_candidates
+        for item in state.get("candidate_sets", {}).values():
+            if item["status"] in ("generating", "building"):
+                item["interrupted_at_meeting_end"] = True
+                bundle_candidates.finish(coordinator, state, item, "superseded", "회의 종료 시 생성 중이어서 채택되지 않았습니다.")
         return "meeting.finalizing", {"session_status": "finalizing", "adopted_version_id": meeting["adopted_version_id"]}, (
             "result", "", 0)
     if kind == "meeting_retry":

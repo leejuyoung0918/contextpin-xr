@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
+using System.Security.Cryptography;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
 
@@ -136,6 +138,60 @@ namespace ContextPin.Editor
                     archived.Select(u => (string)u["text"]).SequenceEqual(report.timelineTexts) &&
                     report.timelineTexts.All(t => txt.Contains(t)), "The durable timeline must agree with every final line.");
             report.singleTimelineVerified = report.tailFinalized = true;
+        }
+
+        static bool CheckTimelineMinutes(JObject state)
+        {
+            string sid = (string)state["session_id"];
+            var path = Path.Combine(Application.persistentDataPath, "MeetingExports", $"{sid}-r{state["result"]["revision"]}.zip");
+            if (!File.Exists(path)) return false;
+            using var archive = ZipFile.OpenRead(path);
+            string Read(string name)
+            {
+                using var reader = new StreamReader(archive.GetEntry(name).Open());
+                return reader.ReadToEnd();
+            }
+            var manifest = JObject.Parse(Read("manifest.json"));
+            var minutes = JObject.Parse(Read("minutes/minutes.json"));
+            var markdown = Read("minutes/minutes.md");
+            Require((string)manifest["minutes_status"] == "generated" && (string)minutes["meeting_id"] == sid &&
+                (string)minutes["final_version_id"] == report.finalVersion && minutes["discussion_points"].Any() &&
+                minutes["design_decisions"].Count() == 2 && (string)minutes["generation"]["endpoint_mode"] == "local" &&
+                (int)minutes["generation"]["calls"] > 0, "Local AI minutes must contain both adopted changes and ordinary discussion.");
+            Require(markdown.Contains("미기록") && markdown.Contains("V2") && markdown.Contains("V3"),
+                "The readable minutes must show the version history and unrecorded reasons.");
+            var versions = new[] { report.initialVersion, report.middleVersion, report.finalVersion };
+            var history = JArray.Parse(Read("design_history.json"));
+            Require(history.Select(row => (string)row["version_id"]).SequenceEqual(versions), "The package must archive V1, V2 and V3.");
+            for (int i = 0; i < 2; i++)
+            {
+                var actual = state["decisions"][i];
+                var logged = minutes["design_decisions"][i];
+                Require((string)logged["decision_id"] == (string)actual["decision_id"] &&
+                    (string)logged["edit_request_id"] == (string)actual["edit_request_id"] &&
+                    (string)logged["base_version_id"] == versions[i] && (string)logged["result_version_id"] == versions[i + 1] &&
+                    (string)logged["selected_candidate_id"] == report.selectedCandidates[i] &&
+                    JToken.DeepEquals(logged["parameter_diff"], actual["parameter_diff"]) &&
+                    JToken.DeepEquals(logged["evidence_utterance_ids"], actual["command_utterance_ids"]) &&
+                    logged["reason"]?.Type == JTokenType.Null, "Minutes must trace each choice to its actual edit and command IDs.");
+            }
+            var files = (JObject)manifest["files"];
+            foreach (var entry in files.Properties())
+            {
+                var file = archive.GetEntry(entry.Name);
+                Require(file != null && file.Length == (long)entry.Value["size_bytes"], "Missing or incomplete file: " + entry.Name);
+                using var stream = file.Open();
+                using var sha = SHA256.Create();
+                var hash = BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+                Require(hash == (string)entry.Value["sha256"], "The download has a different hash: " + entry.Name);
+            }
+            var assets = state["versions"].Single(v => (string)v["version_id"] == report.finalVersion)["assets"];
+            Require((string)files[(string)manifest["final_scad"]]["sha256"] == (string)assets["candidate.scad"]["sha256"] &&
+                (string)files[(string)manifest["final_stl"]]["sha256"] == (string)assets["print.stl"]["sha256"],
+                "Final SCAD and STL must be the adopted V3 files.");
+            report.exportPath = path;
+            report.minutesPackageVerified = report.latestZipAgrees = true;
+            return true;
         }
     }
 }

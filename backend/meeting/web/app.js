@@ -608,9 +608,10 @@ byId("minutes-code-form").addEventListener("submit", async event => {
   const button = event.currentTarget.querySelector("button");
   button.disabled = true;
   try {
-    const blob = await request("/v1/minutes-download", {body: {code: byId("minutes-code").value}, responseType: "blob"});
-    saveBlob(blob, "contextpin-minutes.txt");
-    notice("전체 회의록을 내려받았습니다.");
+    const blob = await request("/v1/minutes-download", {body: {code: byId("minutes-code").value, format: "markdown"}, responseType: "blob"});
+    const generated = blob.type.startsWith("text/markdown");
+    saveBlob(blob, generated ? "contextpin-minutes.md" : "contextpin-minutes.txt");
+    notice(generated ? "회의록을 내려받았습니다." : "전사·결정 기록을 내려받았습니다.");
   } catch (error) { notice(message(error), true); }
   finally { button.disabled = false; }
 });
@@ -664,7 +665,9 @@ byId("download-scad").addEventListener("click", () => {
 });
 byId("download-zip").addEventListener("click", () => exportVersion(state.loadedVersion));
 byId("download-minutes").addEventListener("click", () => {
-  if (state.edge) download(state.edge.path + "/minutes.txt", "contextpin-meeting-minutes.txt");
+  if (!state.edge) return;
+  const ext = state.snapshot?.result?.minutes_status === "generated" ? "md" : "txt";
+  download(state.edge.path + "/minutes." + ext, "contextpin-meeting-minutes." + ext);
 });
 
 function paintParameters(version = state.loadedVersion) {

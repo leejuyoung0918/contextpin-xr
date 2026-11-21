@@ -41,7 +41,7 @@ python3 scripts/relay.py deploy
 1. Quest에서 **회의 준비**를 누르고 A4의 네 점을 지정합니다. 중앙의 거치대 V1과 방향을 확인한 뒤 **배치 확인 → 회의 시작**을 누릅니다. 이때부터 같은 마이크 스트림으로 일반 대화와 후보 검토 중의 대화를 전사합니다.
 2. **수정 요청**을 누르고 바꿀 부분을 말한 뒤 **발언 완료**를 누릅니다. 앞뒤 무음을 제외한 발화 길이의 절반 이상이 두 버튼 사이에 들어오면 그 확정 발화 전체가 명령이 됩니다. 한 요청에 여러 문장을 말할 수 있습니다. 무음 안내가 뜨면 **수정 요청**을 다시 누릅니다.
 3. 확정 문구를 확인하고 중앙 모델의 부위를 가리켜 **A**를 누릅니다. 서버는 요청을 시작한 버전과 발화 ID, 표면 좌표, 이미지로 후보를 생성합니다. 원하는 후보를 가리켜 **A**로 채택하면 중앙에 다음 버전이 나타납니다.
-4. **회의 종료**를 누르면 마지막 음성과 대기 중인 전사를 처리합니다. PC에 저장되는 전체 전사와 채택 이력은 발화 ID로 대조할 수 있습니다. [버튼별 시연 대본](DEMO.md)
+4. **회의 종료**를 누르면 마지막 음성과 대기 중인 전사를 처리하고 **회의 정리 중…**이 뜹니다. **회의록 저장 완료**가 뜨면 PC에서 회의록을 받습니다. [버튼별 시연 대본](DEMO.md)
 
 ## CAD 치수와 기준점
 
@@ -63,7 +63,18 @@ python3 scripts/relay.py deploy
 
 ## 결과 파일
 
-**회의 종료 → PC에서 회의록 받기**로 결과 ZIP을 엽니다. `cad/final.scad`와 `cad/final.stl`은 채택한 모델 파일입니다. `decisions.json`의 `command_utterance_ids`와 각 요청의 `transcript.utterance_refs`로 전체 전사의 원문과 당시 개정을 찾을 수 있습니다. 선택 이유를 입력하지 않으면 `not_stated`로 남깁니다. [결과물 저장 코드](backend/meeting/meeting_result.py)
+**회의록 저장 완료 → PC에서 회의록 받기**를 누른 뒤 Quest에 표시된 코드를 PC 회의 화면에 입력하면 Markdown 회의록을 내려받습니다. 전체 파일은 해당 회의에 참가한 PC의 결과 화면에서 **CAD 포함 ZIP**, 또는 Quest의 **메뉴 → 결과 ZIP 저장**으로 받습니다. [결과물 저장 코드](backend/meeting/meeting_result.py)
+
+| 파일 | 확인할 내용 |
+|---|---|
+| `minutes/minutes.md` | 회의 목적과 주요 논의, 채택한 후보, 실제 치수 변경, 미해결 사항과 다음 작업 |
+| `minutes/minutes.json` | 토론 근거 발화 ID, 수정 요청 ID, 결정별 이전·결과 버전, 선택 후보와 기록된 이유 |
+| `transcript.txt`, `transcript.jsonl` | 시간순 전체 대화와 각 발화의 ID·개정·출처 |
+| `edit_requests/`, `decisions.json` | 수정 명령의 원문, Ray 좌표, 선택 시점 이미지, 사람이 채택한 후보 |
+| `design_history.json`, `adopted_versions/`, `cad/` | 버전별 SCAD·치수·STL과 최종 `cad/final.scad`, `cad/final.stl` |
+| `manifest.json` | 회의 ID와 처음·마지막 버전, 전사와 회의록 상태, 파일별 크기와 SHA-256 |
+
+현장 PC의 로컬 모델이 전체 전사와 설계 기록에서 논의 근거를 고릅니다. 채택 이력과 치수 변화는 서버가 보관한 실제 버전에서 가져옵니다. 입력된 선택 이유가 없으면 회의록에 **미기록**으로 표시합니다. AI 생성에 실패하면 회의록 코드는 전사·결정 기록을 제공하고, 전체 ZIP에는 CAD와 근거 자료가 보존됩니다. 회의 진행자는 인증된 `POST /v1/sessions/<회의 ID>/minutes/regenerate`로 저장한 근거에서 회의록을 다시 생성할 수 있습니다.
 
 실시간 회의의 전체 전사는 CAD 내보내기 전에 `artifacts/phone-stand-live/results/<회의 ID>/transcript/`에 확정합니다. `transcript.txt`는 각 발화의 최종 문장을 시간순으로 보여주고, `transcript.jsonl`은 발화 ID, 시작·종료 시각, 입력 출처와 개정을 보존합니다. 결과 ZIP에도 같은 두 파일이 들어갑니다.
 
@@ -81,14 +92,14 @@ artifacts/meeting-venv/bin/python -m unittest -v \
 Meta XR Simulator의 두 번 채택 검사는 운영 회의와 분리한 테스트 서버를 사용합니다. 로컬 모델을 실행하고 별도 터미널에서 같은 거치대 프로필로 QA 서버를 시작합니다.
 
 ```sh
-EDGE_PORT=18896 EDGE_DATA_DIR="$PWD/artifacts/phase2-timeline-qa" python3 scripts/relay.py server
+EDGE_BIND_HOST=127.0.0.1 EDGE_PORT=18897 EDGE_DATA_DIR="$PWD/artifacts/phase3-minutes-qa" python3 scripts/relay.py server
 ```
 
-Mac의 한국어 음성과 FFmpeg로 일반 대화와 수정 명령을 준비합니다. 시뮬레이터가 같은 마이크 입력 경로로 이를 보내고 두 번의 채택, 후보 생성 중 대화, 종료 직전 문장까지 검사합니다.
+Mac의 한국어 음성과 FFmpeg로 일반 대화와 수정 명령을 준비합니다. 시뮬레이터는 두 번의 채택과 종료 직전 발화를 완료하고, 앱으로 내려받은 ZIP에서 회의록의 결정·발화 ID 및 최종 CAD 파일 해시를 대조합니다.
 
 ```sh
 python3 tests/meeting/prepare_timeline_audio.py artifacts/phase2-timeline-audio
-MEETING_EDGE_URL=http://127.0.0.1:18896 MEETING_CAPTURE_DATA_DIR="$PWD/artifacts/phase2-timeline-qa" \
+MEETING_EDGE_URL=http://127.0.0.1:18897 MEETING_CAPTURE_DATA_DIR="$PWD/artifacts/phase3-minutes-qa" \
   MEETING_CANDIDATE_COMMIT_SMOKE=1 MEETING_PHONE_STAND_SMOKE=1 \
   MEETING_TIMELINE_PCM_DIR="$PWD/artifacts/phase2-timeline-audio" \
   MEETING_EXPLICIT_PCM="$PWD/artifacts/phase2-timeline-audio/angle.pcm" \

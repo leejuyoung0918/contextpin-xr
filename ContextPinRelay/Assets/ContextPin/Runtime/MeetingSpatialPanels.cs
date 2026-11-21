@@ -157,6 +157,7 @@ namespace ContextPin
                 return;
             }
             confirmingMeetingEnd = false;
+            if (state == "finalizing" || assemblyStopping && state != "completed") return;
             if (state == "completed")
             {
                 if (assemblyMenu) DrawSpatialMenu(); else DrawSavedResult();
@@ -402,6 +403,15 @@ namespace ContextPin
         void DrawSavedResult()
         {
             var source = meetingSnapshot["saved_design_utterance"] as JObject;
+            if (MinutesStatus is "generated" or "generation_failed")
+            {
+                RoundBox("SpatialSavedPanel", content, 0, 58, SpatialWidth, 112, SpatialBackground, 12);
+                string hint = MinutesStatus == "generation_failed" ? "전사와 CAD는 서버에 저장했습니다." :
+                    Values(meetingSnapshot["result"], "missing").Any() ? "누락된 자료는 결과 ZIP에서 확인하세요." :
+                    "PC 회의 화면에서 코드를 입력하세요.";
+                DrawResultDownload(68, hint);
+                return;
+            }
             RoundBox("SpatialSavedPanel", content, 0, 58, SpatialWidth, 266, SpatialBackground, 12);
             BoldLabel("SpatialSavedHeading", content, 12, 64, 396, 31, source != null ? "저장된 수정 발언" : "저장된 회의", SpatialFont(20), SpatialMuted);
             Label("SpatialSavedUtterance", content, 12, 98, 396, 51,
@@ -416,15 +426,21 @@ namespace ContextPin
             else if (live)
                 Label("SpatialSavedDesignStatus", content, 12, 153, 396, 45, "수정 요청으로 사용할 발언이 없습니다.", SpatialFont(18), SpatialMuted);
 
-            float y = source != null || live ? 207 : 160;
+            DrawResultDownload(source != null || live ? 207 : 160, source != null ?
+                "이 발언과 현재 CAD로 후속 검토를 엽니다." : "PC 회의 화면에서 회의록 코드를 입력하세요.");
+        }
+
+        string MinutesStatus => TextValue(meetingSnapshot?["result"], "minutes_status");
+
+        void DrawResultDownload(float y, string hint)
+        {
             if (!string.IsNullOrEmpty(minutesCode))
                 BoldLabel("SpatialMinutesCode", content, 12, y, 300, 39, "회의록 코드  " + minutesCode, SpatialFont(21), HeaderText);
             else if (!string.IsNullOrEmpty(AssemblyResultUrl))
-                Button("SpatialMinutesDownload", 12, y, 296, 39, fetchingMinutesCode ? "코드 확인 중…" : "PC에서 회의록 받기", FetchMinutesCode);
+                Button("SpatialMinutesDownload", 12, y, 296, 39, fetchingMinutesCode ? "코드 확인 중…" :
+                    MinutesStatus == "generation_failed" ? "PC에서 회의 자료 받기" : "PC에서 회의록 받기", FetchMinutesCode);
             Button("SpatialMenu", 325, y, 83, 39, "메뉴", () => { assemblyMenu = true; Draw(); });
-            var hint = !string.IsNullOrEmpty(assemblyFeedback) ? assemblyFeedback : source != null ?
-                "이 발언과 현재 CAD로 후속 검토를 엽니다." : "PC 회의 화면에서 회의록 코드를 입력하세요.";
-            Label("SpatialFeedback", content, 12, y + 42, 396, 62, TruncateSpatial(hint, "", 80), SpatialFont(17), SpatialMuted);
+            Label("SpatialFeedback", content, 12, y + 42, 396, 62, TruncateSpatial(assemblyFeedback, hint, 80), SpatialFont(17), SpatialMuted);
         }
 
         void AskToEndSpatialMeeting()
@@ -459,8 +475,13 @@ namespace ContextPin
         {
             if (assemblyStopping && CaptureBundleMeeting && explicitRequest?.Selection != null && !explicitRequest.BundleSaved &&
                 !explicitRequest.RetryTransfer && !explicitRequest.Conflict && state != "completed") return ("마지막 수정 요청 저장 중", null);
-            if (assemblyStopping || state == "finalizing") return ("결과 저장 중", null);
-            if (state == "completed") return (Values(meetingSnapshot?["result"], "missing").Any() ? "누락 포함 저장됨" : "저장됨", null);
+            if (assemblyStopping || state == "finalizing") return ("회의 정리 중…", null);
+            if (state == "completed")
+            {
+                if (MinutesStatus == "generated") return ("회의록 저장 완료", null);
+                if (MinutesStatus == "generation_failed") return ("회의록 생성 실패", null);
+                return (Values(meetingSnapshot?["result"], "missing").Any() ? "누락 포함 저장됨" : "저장됨", null);
+            }
             if (state == "save_error") return ("저장 다시 시도", RetrySpatialSave);
             if (RequestedOutputUnavailable && !assemblyStarting && !string.IsNullOrEmpty(assemblyFeedback))
                 return ("저장 모드 연결 다시 시도", StartSpatialMeeting);
@@ -932,11 +953,15 @@ namespace ContextPin
 
         void DrawSpatialMenu()
         {
-            RoundBox("SpatialOptions", content, 0, 58, SpatialWidth, 165, SpatialBackground, 12);
+            bool savedRequest = AssemblySessionStatus == "completed" && MinutesStatus is ("generated" or "generation_failed") &&
+                                meetingSnapshot["saved_design_utterance"] is JObject;
+            RoundBox("SpatialOptions", content, 0, 58, SpatialWidth, savedRequest ? 209 : 165, SpatialBackground, 12);
             if (AssemblySessionStatus == "completed")
             {
                 Button("SpatialResult", 12, 72, 188, 40, "결과 ZIP 저장", SaveSpatialResult);
                 Button("SpatialContinue", 212, 72, 194, 40, "후속 작업", ContinueSavedMeeting);
+                if (savedRequest)
+                    Button("SpatialSavedDesign", 12, 173, 394, 38, savedFollowUpPending ? "준비 중…" : "저장된 발언으로 수정안 보기", ContinueSavedDesign);
             }
             else
             {
@@ -957,7 +982,7 @@ namespace ContextPin
             Button("SpatialLeave", 12, 126, 188, 39, "회의 목록", LeaveMeeting);
             Button("SpatialMenuClose", 212, 126, 194, 39, "돌아가기", () => { assemblyMenu = false; Draw(); });
             var code = TextValue(meetingSnapshot, "join_code");
-            Label("SpatialJoinCode", content, 12, 177, 396, 35, code.Length > 0 ? "참가 코드  " + code : "왼쪽 컨트롤러 X · 패널 다시 부르기", SpatialFont(18), SpatialMuted);
+            Label("SpatialJoinCode", content, 12, savedRequest ? 220 : 177, 396, 35, code.Length > 0 ? "참가 코드  " + code : "왼쪽 컨트롤러 X · 패널 다시 부르기", SpatialFont(18), SpatialMuted);
         }
 
         void ResetSpatialAssembly()

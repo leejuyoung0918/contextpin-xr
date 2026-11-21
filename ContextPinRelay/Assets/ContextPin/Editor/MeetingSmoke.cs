@@ -45,6 +45,7 @@ namespace ContextPin.Editor
             public bool phoneStandCentered;
             public bool microphoneWaitedForStart, silentCommandRejected, spokeWhileGenerating, spokeWhileComparing;
             public bool singleTimelineVerified, tailFinalized;
+            public bool minutesGeneratingShown, minutesSavedShown, minutesPackageVerified;
             public int microphoneOpenCount;
             public string[] timelineTexts;
             public float minimumPaperClearanceMm;
@@ -162,6 +163,7 @@ namespace ContextPin.Editor
                 case 5:
                     if ((string)state["session_status"] != "completed" || rounds == null) return false;
                     Require(rounds.Count == 0, "Saved parent should contain the transcript and no proposals.");
+                    if (GameObject.Find("SpatialSavedDesign") == null) { Click("SpatialMenu"); return false; }
                     return Click("SpatialSavedDesign");
                 case 6:
                     if ((string)state["session_id"] == savedSessionId || rounds?.Count != 1) return false;

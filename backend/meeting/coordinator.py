@@ -198,7 +198,8 @@ class SessionCoordinator:
 
     @staticmethod
     def public(state, actor):
-        private = {"explicit_design_targets", "design_target_history", "view_history", "audio_segments", "shared_view_history", "meeting_audio", "result_exports"}
+        private = {"explicit_design_targets", "design_target_history", "view_history", "audio_segments", "shared_view_history",
+                   "meeting_audio", "result_exports", "pending_minutes_export"}
         public = {k: v for k, v in state.items() if k not in private}
         if state.get("assembly"):
             public.update(meeting_state.snapshot_fields(state))
@@ -1485,16 +1486,25 @@ class SessionCoordinator:
                     if not pending or not strict and remaining <= 0:
                         break
                     self.changed.wait(timeout=None if strict else remaining)
-                revision = max((int(key) for key in state["result_exports"]), default=0) + 1
+                checkpoint = state.get("pending_minutes_export")
+                revision = checkpoint["revision"] if checkpoint else max((int(key) for key in state["result_exports"]), default=0) + 1
             try:
-                if strict:
+                if strict and not checkpoint:
                     meeting_result.freeze_transcript(self.root, state)
                     with self.transaction():
                         state = self.load(sid)
                         if state["meeting"]["transcript_status"] != "finalized":
                             state["meeting"].update(transcript_status="finalized", transcript_finalized_at=now_ms())
                             self.emit(state, "transcript.sealed", {"utterance_count": len(state["utterances"])})
-                manifest, key = meeting_result.build_result(self.root, self.models, state, revision)
+                if checkpoint:
+                    source_key = checkpoint["source_key"]
+                else:
+                    _, source_key = meeting_result.build_result(self.root, self.models, state, revision)
+                    with self.transaction():
+                        latest = self.load(sid)
+                        latest["pending_minutes_export"] = {"source_key": source_key, "revision": revision}
+                        self.emit(latest, "minutes.generating", {"revision": revision})
+                manifest, key = meeting_result.add_minutes(self.root / "results" / sid / source_key, revision)
             except (OSError, ValueError, KeyError) as error:
                 with self.transaction():
                     latest = self.load(sid)
@@ -1507,9 +1517,11 @@ class SessionCoordinator:
                 latest = self.load(sid)
                 prefix = f"/v1/sessions/{sid}/result"
                 result = {"status": manifest["status"], "revision": revision, "missing": manifest["missing"],
-                          "adopted_version_id": manifest["adopted_version_id"], "zip_url": f"{prefix}.zip?revision={revision}",
+                          "adopted_version_id": manifest["adopted_version_id"], "minutes_status": manifest["minutes_status"],
+                          "zip_url": f"{prefix}.zip?revision={revision}",
                           "api_url": f"{prefix}?revision={revision}", "review_url": f"/meeting/?result={sid}"}
-                latest["result_exports"][str(revision)] = {"key": key, "result": result}
+                latest["result_exports"][str(revision)] = {"key": key, "result": result, "evidence_key": source_key}
+                latest.pop("pending_minutes_export", None)
                 latest.update(session_status="completed", result=result)
                 self.emit(latest, "meeting.saved", result)
                 rerun = (len(latest["utterances"]) != len(state["utterances"])
@@ -1522,6 +1534,24 @@ class SessionCoordinator:
                 self.export_updates.discard(sid)
             if rerun:
                 self.submit(sid, "result", "", 0)
+
+    def regenerate_minutes(self, sid, token):
+        with self.transaction():
+            actor = self.actor(sid, token)
+            state = self.load(sid)
+            self.host(state, actor)
+            pending = state.get("pending_minutes_export")
+            if state.get("session_status") == "finalizing" and pending:
+                return {"status": "generating", "revision": pending["revision"]}
+            if state.get("session_status") != "completed" or not state.get("result_exports"):
+                raise MeetingError("저장된 회의에서 회의록을 다시 생성할 수 있습니다.", 409)
+            revision = max(map(int, state["result_exports"])) + 1
+            previous = state["result_exports"][str(revision - 1)]
+            state["pending_minutes_export"] = {"source_key": previous.get("evidence_key", previous["key"]), "revision": revision}
+            state["session_status"] = "finalizing"
+            self.emit(state, "minutes.regenerating", {"revision": revision}, actor)
+        self.submit(sid, "result", "", 0)
+        return {"status": "generating", "revision": revision}
 
     def result_folder(self, sid, token, revision):
         _, state = self.authenticated(sid, token)
