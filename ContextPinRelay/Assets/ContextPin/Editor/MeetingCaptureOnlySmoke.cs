@@ -57,7 +57,7 @@ namespace ContextPin.Editor
                     if (checkPhoneStand)
                         Require((string)state["profile"]["adapter_id"] == "openscad_phone_stand" &&
                             (string)state["profile"]["review_layout"] == "center_latest_side_candidates",
-                            "The phone stand smoke requires the registered phone stand profile and its centred Latest layout.");
+                            "The phone stand smoke requires the registered phone stand profile and its paper-relative review slots.");
                     previewsRequested = previewsReceived = 0;
                     previewError = null;
                     captureCorner = 0;

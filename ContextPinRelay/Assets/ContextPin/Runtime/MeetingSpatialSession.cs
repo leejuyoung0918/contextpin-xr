@@ -30,7 +30,7 @@ namespace ContextPin
             ? id : TextValue(meetingSnapshot, "committed_version_id");
         bool AssemblyActive => AssemblySessionStatus is "recording" or "paused";
         bool AssemblyCaptureRequested => (meetingSnapshot?["meeting"] as JObject)?.Value<bool?>("capture_requested") == true;
-        bool LivePaperMeeting => SpatialAssembly && CenteredPaperLatest && TextValue(meetingSnapshot, "provider_mode") == "live";
+        bool LivePaperMeeting => SpatialAssembly && OffsetPaperGallery && TextValue(meetingSnapshot, "provider_mode") == "live";
         bool PreparingLivePaperMeeting => LivePaperMeeting && AssemblySessionStatus == "ready";
         bool PaperReadyToRecord => BundleLatestReady && AssemblyHeadTracked();
 
@@ -189,7 +189,7 @@ namespace ContextPin
                 ["stream_start_source_monotonic_ms"] = Time.realtimeSinceStartupAsDouble * 1000 - position * 1000.0 / clip.frequency,
                 ["stream_start_sample_index"] = 0, ["bind_view"] = false
             };
-            if (CenteredPaperLatest && CaptureBundleMeeting) hello["edit_marker_alignment"] = "speech_overlap";
+            if (OffsetPaperGallery && CaptureBundleMeeting) hello["edit_marker_alignment"] = "speech_overlap";
             if (meetingClockValid)
             {
                 hello["clock_offset_ms"] = meetingClockOffsetMs;

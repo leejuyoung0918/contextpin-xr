@@ -142,10 +142,11 @@ namespace ContextPin.Editor
         static void CheckPaperLatest(GameObject model)
         {
             var bounds = ModelBoundsInPose(model, measuredPaper);
-            var midpoint = new Vector3(bounds.center.x, bounds.min.y, bounds.center.z);
-            var expected = checkPhoneStand ? Vector3.zero : new Vector3(explicitAreaSize.x * .25f, 0, -explicitAreaSize.y * .25f);
-            Require(Vector3.Distance(midpoint, expected) < .001f && Quaternion.Angle(model.transform.rotation, measuredPaper.rotation) < .1f,
-                $"Latest must sit on the sheet at {expected}, measured {midpoint}.");
+            var basePoint = checkPhoneStand ? RelativePose(model.transform, measuredPaper).position :
+                new Vector3(bounds.center.x, bounds.min.y, bounds.center.z);
+            var expected = checkPhoneStand ? new Vector3(.24f, 0, 0) : new Vector3(explicitAreaSize.x * .25f, 0, -explicitAreaSize.y * .25f);
+            Require(Vector3.Distance(basePoint, expected) < .001f && Mathf.Abs(bounds.min.y) < .001f && Quaternion.Angle(model.transform.rotation, measuredPaper.rotation) < .1f,
+                $"Latest must sit on the tabletop at paper-relative offset {expected}, measured {basePoint}.");
             RequireAssemblyMesh(model);
         }
 

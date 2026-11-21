@@ -34,6 +34,8 @@ class OpenScadGeometryTests(unittest.TestCase):
             profile = load_profile()
             defaults = default_parameters(profile)
             self.assertEqual(profile["review_layout"], "center_latest_side_candidates")
+            # Published phone-stand versions must continue resolving the same SCAD source.
+            self.assertEqual(profile["source_hash"], "497191d5005450ff767276b80443cc01ab5cb3528411b2f7edb39100cf40004a")
             self.assertEqual(set(defaults), {"viewing_angle", "backrest_length", "backrest_width",
                                              "base_width", "base_depth", "lip_height", "charging_notch_width"})
             hashes = set()

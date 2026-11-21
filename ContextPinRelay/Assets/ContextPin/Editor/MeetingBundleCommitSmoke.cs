@@ -23,9 +23,7 @@ namespace ContextPin.Editor
             Require(string.IsNullOrEmpty(error), error);
             var container = GameObject.Find("CandidateContainer");
             if (container == null) return false;
-            // For the phone stand the paper centre is the virtual Latest itself.
-            var occupied = new List<Bounds>();
-            if (!checkPhoneStand) occupied.Add(PhysicalProductBounds(state));
+            var occupied = new List<Bounds> { PhysicalProductBounds(state) };
             void CheckClearance(Bounds bounds)
             {
                 if (occupied.Count > 0)
@@ -50,15 +48,19 @@ namespace ContextPin.Editor
                 var b = ModelBoundsInPose(root.gameObject, measuredPaper);
                 Require(Quaternion.Angle(root.rotation, latest.transform.rotation) < .1f && Vector3.Distance(root.lossyScale, Vector3.one) < .0001f &&
                         b.min.y >= -.0002f && b.min.y < .005f, "Each candidate must be full size, upright and on the tabletop.");
+                var slotPosition = new Vector2(b.center.x, b.center.z);
                 var expectedCenter = new Vector2(key == "A" ? -.25f : .25f, .25f) * explicitAreaSize;
                 if (checkPhoneStand)
                 {
-                    var side = explicitAreaSize.x * .5f + .010f + b.extents.x;
-                    expectedCenter = new Vector2(key == "A" ? -side : side, 0);
+                    expectedCenter = new Vector2(key == "A" ? -.14f : .14f, .24f);
+                    var pivot = RelativePose(root, measuredPaper).position;
+                    slotPosition = new Vector2(pivot.x, pivot.z);
+                    Require(Mathf.Abs(pivot.y) < .0005f, "The phone stand CAD pivot must rest on the tabletop.");
+                    Require(b.min.z > explicitAreaSize.y * .5f, "The full-size phone previews can sit beyond the far edge of A4.");
                 }
                 else Require(Mathf.Max(-b.min.x, b.max.x) <= explicitAreaSize.x * .5f &&
                     Mathf.Max(-b.min.z, b.max.z) <= explicitAreaSize.y * .5f, "Cable previews must fit within the paper.");
-                Require(Vector2.Distance(new Vector2(b.center.x, b.center.z), expectedCenter) < .001f,
+                Require(Vector2.Distance(slotPosition, expectedCenter) < .001f,
                     $"Candidate {key} must stay at its dedicated slot {expectedCenter} across edits.");
                 CheckClearance(b);
                 var diff = (JArray)row["parameter_diff"];
@@ -71,7 +73,7 @@ namespace ContextPin.Editor
             }
             Require(rows.Select(c => (string)c["stl"]["sha256"]).Distinct().Count() == 2 &&
                     rows.Select(c => (string)c["model_asset"]["sha256"]).Distinct().Count() == 2, "The two geometries must differ.");
-            if (!checkPhoneStand && !report.singleCandidateKeptSlot) CheckLimitedGallery(app, occupied[0], occupied[1], rows);
+            if (!report.singleCandidateKeptSlot) CheckLimitedGallery(app, occupied[0], occupied[1], rows);
             CheckSideLatest(state, latest, Version(latest), true);
             report.fixedPaperSlots = report.bundleModelsPlaced = report.a4FullSizeGallery = true;
             return true;
@@ -96,10 +98,16 @@ namespace ContextPin.Editor
                 slots.SetValue(second, 0);
                 Require((bool)placement.Invoke(app, args), "B alone must fit.");
                 var offset = (Vector3)args[2];
-                // This fixture shares the paper's rotation and the cable CAD's centred XZ origin.
-                Require(Mathf.Abs(offset.x + bounds.center.x - explicitAreaSize.x * .25f) < .001f &&
-                        Mathf.Abs(offset.z + bounds.center.z - explicitAreaSize.y * .25f) < .001f,
+                var expected = checkPhoneStand ? new Vector2(.14f, .24f) : explicitAreaSize * .25f;
+                var point = checkPhoneStand ? offset : offset + bounds.center;
+                Require(Vector2.Distance(new Vector2(point.x, point.z), expected) < .001f,
                         "B alone must stay in its back-right slot.");
+                if (checkPhoneStand)
+                {
+                    boundsField.SetValue(second, new Bounds(bounds.center + new Vector3(.013f, 0, -.021f), bounds.size));
+                    Require((bool)placement.Invoke(app, args) && Vector3.Distance((Vector3)args[2], offset) < .0005f,
+                        "An asymmetric edit must leave the CAD base pivot fixed at its registered slot.");
+                }
                 report.singleCandidateKeptSlot = true;
                 boundsField.SetValue(second, new Bounds(bounds.center, new Vector3(1, bounds.size.y, 1)));
                 Require(!(bool)placement.Invoke(app, args), "An oversized mesh must be rejected before placement.");
@@ -165,7 +173,6 @@ namespace ContextPin.Editor
                     Require(JToken.DeepEquals(model["parameters"][kept], previous["parameters"][kept]) &&
                             !JToken.DeepEquals(model["parameters"][kept], original["parameters"][kept]),
                             $"V3 must retain the V2 edit to {kept}.");
-                    report.phoneStandCentered = checkPhoneStand;
                     report.finalVersion = id;
                     report.secondEditRound = report.v3Replaced = true;
                 }

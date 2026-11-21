@@ -11,8 +11,7 @@ namespace ContextPin
         const float BundleGap = .010f;
         const float BundleLift = .002f;
         const float PaperEdge = .002f;
-        const float SideReviewMargin = .15f; // Desk space on each side confirmed with the paper preview.
-        string PaperTooSmall => CenteredPaperLatest ? "종이와 좌우 15cm의 비교 영역에 후보를 실제 크기로 놓을 수 없습니다." :
+        string PaperTooSmall => OffsetPaperGallery ? "고정된 비교 자리에서 모델이 겹칩니다. 실물과 후보 치수를 확인하세요." :
             "실물과 Latest의 자리를 비우면 이 A4 뒤쪽에 후보를 실제 크기로 놓을 공간이 부족합니다.";
 
         readonly MeetingModelSlot[] bundleSlots = { new MeetingModelSlot(), new MeetingModelSlot() };
@@ -128,7 +127,7 @@ namespace ContextPin
                 ReleaseBundleReview();
                 return;
             }
-            if (!A4ReviewSurfaceActive || !AssemblyActive || meetingModel == null || !meetingModel.activeInHierarchy ||
+            if (PaperLayoutNeedsReset || !A4ReviewSurfaceActive || !AssemblyActive || meetingModel == null || !meetingModel.activeInHierarchy ||
                 (!SharedPaperMeeting || MeetingHost) && !sessionOriginalBounds.HasValue || meetingLoadedVersion != bundleBaseId ||
                 !SharedPaperMeeting && explicitRequest != null && explicitRequest.Id != bundleRequestId ||
                 SharedPaperMeeting && bundleSetId != paperPoseSetId ||
@@ -210,10 +209,9 @@ namespace ContextPin
         bool TryBundlePositions(Rect physical, Rect latest, out Vector3 first, out Vector3 second)
         {
             first = second = default;
-            bool sideGallery = CenteredPaperLatest;
-            if (!FitsPaper(latest, reviewTableSize) ||
-                !sideGallery && (!FitsPaper(physical, reviewTableSize) || !SpaceBetween(physical, latest))) return false;
-            var gallerySize = sideGallery ? reviewTableSize + new Vector2(SideReviewMargin * 2, 0) : reviewTableSize;
+            bool fixedGallery = OffsetPaperGallery;
+            if (!SpaceBetween(physical, latest) ||
+                !fixedGallery && (!FitsPaper(physical, reviewTableSize) || !FitsPaper(latest, reviewTableSize))) return false;
             Rect previous = default;
             for (int i = 0; i < bundleCandidates.Length; i++)
             {
@@ -221,13 +219,15 @@ namespace ContextPin
                 var footprint = FootprintOnTable(b, reviewTable.position, latestAnchor.rotation, 0);
                 // The key identifies the physical place even when only B passed validation.
                 float sign = bundleSlots[i].BundleKey == "A" ? -1 : 1;
-                var center = sideGallery ? new Vector2(sign * ((reviewTableSize.x + footprint.width) * .5f + BundleGap), 0) :
+                var center = fixedGallery ? new Vector2(sign * PaperCandidateSide, PaperCandidateForward) :
                     new Vector2(sign * .25f, .25f) * reviewTableSize;
-                var offset = center - footprint.center;
-                footprint.center = center;
-                if (!FitsPaper(footprint, gallerySize) || !sideGallery && !SpaceBetween(footprint, physical) ||
+                // The stand is authored with its base centre at the origin. An overhanging
+                // backrest changes its bounds, but must not slide the base on the desk.
+                var offset = fixedGallery ? center : center - footprint.center;
+                footprint.center += offset;
+                if (!fixedGallery && !FitsPaper(footprint, reviewTableSize) || !SpaceBetween(footprint, physical) ||
                     !SpaceBetween(footprint, latest) || i > 0 && !SpaceBetween(footprint, previous)) return false;
-                var position = new Vector3(offset.x, BundleLift - b.min.y, offset.y);
+                var position = new Vector3(offset.x, fixedGallery ? 0 : BundleLift - b.min.y, offset.y);
                 if (i == 0) first = position; else second = position;
                 previous = footprint;
             }

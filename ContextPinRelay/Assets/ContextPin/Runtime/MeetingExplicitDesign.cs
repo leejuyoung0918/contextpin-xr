@@ -91,7 +91,8 @@ namespace ContextPin
         }
         bool BundleLatestReady => A4ReviewSurfaceActive && (!SharedPaperMeeting || PaperRenderable) &&
             meetingModel != null && meetingModel.activeInHierarchy && meetingLoadedVersion == AssemblyAdoptedId;
-        string PaperLatestPosition => CenteredPaperLatest ? "종이 중앙" : "종이 오른쪽 앞";
+        string PaperLatestPosition => PublishedCenterLayout ? "진행자가 정한 종이 중앙" :
+            OffsetPaperGallery ? "종이 오른쪽 ②·③ 쪽" : "종이 오른쪽 앞";
         bool OtherDeviceRecordsDesign => !string.IsNullOrEmpty(TextValue(meetingSnapshot?["meeting"], "audio_device_id")) &&
             TextValue(meetingSnapshot["meeting"], "audio_device_id") != meetingDeviceId;
         bool ExplicitDesignReady => ExplicitDesignMeeting && AssemblySessionStatus == "recording" && !assemblyStopping &&

@@ -117,6 +117,7 @@ class PaperSpaceTests(CandidateSetCase):
 
     def test_candidates_commits_and_late_join_keep_exact_poses_and_assets(self):
         self.next_silence = time.monotonic()
+        self.latest_pose = {"position": [0, 0, 0], "rotation_xyzw": [0, 0, 0, 1]}
         self.setup_layout()
         self.align(self.peer)
         def proposed(ctx, images):
@@ -189,3 +190,25 @@ class PaperSpaceTests(CandidateSetCase):
         self.align(late)
         self.assertEqual(self.snapshot(late)["spatial"]["latest_version_id"], self.original)
         self.assertEqual(self.snapshot(late)["spatial"]["candidate_poses_paper"], poses)
+
+        # A previously locked, centered layout can move only in a new paper frame.
+        before = self.snapshot(late)
+        evidence = self.edge.root / "edit_requests" / self.sid
+        frozen = {path: path.read_bytes() for path in evidence.glob("*/*.json")}
+        offset = {**self.latest_pose, "position": [.24, 0, 0]}
+        self.paper("paper_layout", {"latest_version_id": self.original, "latest_pose_paper": offset}, status=(409,))
+        self.paper("paper_reset")
+        self.align(revision=2)
+        gallery = {c["candidate_id"]: {**self.latest_pose, "position": [-.14 if c["candidate_key"] == "A" else .14, 0, .24]}
+                   for c in item["candidates"]}
+        self.paper("paper_layout", {"latest_version_id": self.original, "latest_pose_paper": offset,
+                                    "active_candidate_set_id": item["candidate_set_id"], "candidate_poses_paper": gallery},
+                   revision=2)
+        self.align(late, revision=2)
+        after = self.snapshot(late)
+        self.assertEqual(after["spatial"]["latest_pose_paper"], offset)
+        self.assertEqual(after["spatial"]["candidate_poses_paper"], gallery)
+        self.assertEqual(after["spatial"]["latest_model_asset"], mesh)
+        for key in ("versions", "candidate_sets", "decisions", "edit_requests"):
+            self.assertEqual(after[key], before[key], key)
+        self.assertEqual({path: path.read_bytes() for path in frozen}, frozen)

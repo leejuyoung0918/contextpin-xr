@@ -60,10 +60,16 @@ namespace ContextPin
 
         JObject PaperState => meetingSnapshot?["spatial"] as JObject;
         bool SharedPaperMeeting => SpatialAssembly && TextValue(meetingSnapshot, "provider_mode") == "live" &&
-            PaperState != null && (CenteredPaperLatest || CaptureBundleMeeting && (A4PointSampling || A4PoseApplied) ||
+            PaperState != null && (OffsetPaperGallery || CaptureBundleMeeting && (A4PointSampling || A4PoseApplied) ||
             TextValue(PaperState, "status") == "ready");
         int PaperFrameRevision => PaperState?.Value<int?>("paper_frame_revision") ?? 0;
-        bool PaperSessionReady => paperLatestPose.HasValue;
+        // The original phone stand's CAD pivot is its base centre. The old layout published
+        // it at the paper origin. Only the host can replace that frozen, shared layout.
+        bool PublishedCenterLayout => OffsetPaperGallery && paperLatestPose is Pose pose &&
+            new Vector2(pose.position.x, pose.position.z).sqrMagnitude < .03f * .03f;
+        bool PaperLayoutNeedsReset => SharedPaperMeeting && MeetingHost && PublishedCenterLayout &&
+            AssemblySessionStatus is not ("completed" or "finalizing" or "save_error");
+        bool PaperSessionReady => paperLatestPose.HasValue && !PaperLayoutNeedsReset;
         bool PaperRenderable => SharedPaperMeeting && A4ReviewSurfaceActive && PaperSessionReady &&
             paperRevisionSeen == PaperFrameRevision && paperSelfStatus == "aligned";
         string PaperLocalStatus => A4ReviewSurfaceActive ? "aligned" : A4PointSampling || A4PreviewActive ? "calibrating" :
@@ -152,6 +158,11 @@ namespace ContextPin
                 BeginA4Alignment();
             }
             if (paperSyncPending || Time.unscaledTimeAsDouble < paperRetryAt) return;
+            if (PaperLayoutNeedsReset)
+            {
+                RedefinePaperFrame();
+                return;
+            }
             if (paperSelfStatus != PaperLocalStatus)
             {
                 SendPaperCommand("paper_alignment", new JObject { ["status"] = PaperLocalStatus }, true);

@@ -235,12 +235,15 @@ namespace ContextPin
             Draw();
         }
 
-        // The calibration's CAD-local origin already includes the measured V1 bottom-center
-        // offset. Every committed mesh shares this pose, regardless of its own bounds.
+        // Every committed mesh shares its original mounting pose, regardless of its own bounds.
         Transform latestAnchor, a4DisplayRoot;
         string latestPaperError;
         static readonly Color PaperLatestColor = new Color32(64, 216, 210, 215);
-        bool CenteredPaperLatest => TextValue(meetingSnapshot?["profile"], "review_layout") == "center_latest_side_candidates";
+        // The deployed phone profile's wire ID predates the offset layout. Keeping it also
+        // lets resumed rooms and mixed client versions follow the host's published poses.
+        bool OffsetPaperGallery => TextValue(meetingSnapshot?["profile"], "review_layout") == "center_latest_side_candidates";
+        const float PaperLatestRight = .24f;
+        const float PaperCandidateSide = .14f, PaperCandidateForward = .24f;
 
         void PositionA4Latest()
         {
@@ -257,9 +260,10 @@ namespace ContextPin
                 latestAnchor.SetParent(a4DisplayRoot, false);
             }
             var paper = A4CornerCount == 4 ? a4Size : reviewTableSize;
-            var besideProduct = CenteredPaperLatest ? Vector3.zero : new Vector3(paper.x * .25f, 0, -paper.y * .25f);
+            var origin = OffsetPaperGallery ? surface.position : WorkspaceOrigin;
+            var besideProduct = OffsetPaperGallery ? Vector3.right * PaperLatestRight : new Vector3(paper.x * .25f, 0, -paper.y * .25f);
             var mount = SharedPaperMeeting && paperLatestPose.HasValue ? PaperToWorldPose(surface, paperLatestPose.Value) :
-                new Pose(WorkspaceOrigin + assemblyReference.rotation * besideProduct, WorkspaceRotation);
+                new Pose(origin + surface.rotation * besideProduct, WorkspaceRotation);
             latestAnchor.SetPositionAndRotation(mount.position, mount.rotation);
             var model = meetingModel.transform;
             var previousError = latestPaperError;
@@ -270,11 +274,11 @@ namespace ContextPin
                     latestPaperError = "중앙 실물의 원본 치수를 확인하고 있습니다.";
                 else
                 {
-                    var physical = SurfaceFootprint(surface, original, WorkspaceOrigin, WorkspaceRotation, 0);
+                    var physical = SurfaceFootprint(surface, original, origin, WorkspaceRotation, 0);
                     var latest = SurfaceFootprint(surface, meetingAssetBounds, latestAnchor.position, latestAnchor.rotation, 0);
-                    if (CenteredPaperLatest && !FitsPaper(latest, paper))
-                        latestPaperError = "현재 모델의 바닥이 A4 경계를 벗어납니다.";
-                    else if (!CenteredPaperLatest && (!FitsPaper(physical, paper) || !FitsPaper(latest, paper) || !SpaceBetween(physical, latest)))
+                    if (OffsetPaperGallery && !SpaceBetween(physical, latest))
+                        latestPaperError = "중앙 실물과 오른쪽 Latest가 겹칩니다. 모델 치수를 확인하세요.";
+                    else if (!OffsetPaperGallery && (!FitsPaper(physical, paper) || !FitsPaper(latest, paper) || !SpaceBetween(physical, latest)))
                         latestPaperError = "앞오른쪽 고정 자리에서 중앙 실물과 Latest 사이의 여백을 확보할 수 없습니다.";
                 }
                 if (latestPaperError != null)
@@ -306,7 +310,7 @@ namespace ContextPin
 
         void PositionAssemblyPreview()
         {
-            if (SharedPaperMeeting && !MeetingHost && !PaperRenderable)
+            if (PaperLayoutNeedsReset || SharedPaperMeeting && !MeetingHost && !PaperRenderable)
             {
                 if (meetingModel.activeSelf) meetingModel.SetActive(false);
                 return;
@@ -380,7 +384,7 @@ namespace ContextPin
                 AssemblyAlignment.CaptureRight => "2/3 · 기준 +X 방향 점",
                 AssemblyAlignment.CaptureUp => "3/3 · 기준 +Y 방향 점",
                 AssemblyAlignment.Preview => "실물에 원본이 맞는지 확인하세요",
-                AssemblyAlignment.Confirmed when a4PoseApplied => "A4 중앙 정렬 확인",
+                AssemblyAlignment.Confirmed when a4PoseApplied => "A4 기준 정렬 확인",
                 AssemblyAlignment.Confirmed when tabletopPoseApplied => "책상 한 점 정렬 확인",
                 AssemblyAlignment.Confirmed => assemblyQrPoseApplied ? "QR 정렬 확인" : "수동 정렬 확인",
                 AssemblyAlignment.Lost => "추적 끊김 · 실물 겹쳐 보기 숨김",

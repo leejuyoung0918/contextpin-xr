@@ -170,6 +170,14 @@ namespace ContextPin
                 if (assemblyMenu) DrawSpatialMenu(); else DrawSavedResult();
                 return;
             }
+            if (PaperLayoutNeedsReset)
+            {
+                RoundBox("PaperLayoutUpdate", content, 0, 58, SpatialWidth, 95, SpatialBackground, 12);
+                Label("PaperLayoutUpdateHint", content, 12, 65, 396, 78,
+                    "실물 자리를 비우도록 배치를 갱신하고 있습니다. 갱신 후 같은 A4의 네 점을 다시 짚어 주세요.",
+                    SpatialFont(18), HeaderText);
+                return;
+            }
             if (SharedPaperMeeting && assemblyMenu) { DrawSpatialMenu(); return; }
             if (SharedPaperMeeting && assemblyHistory && PaperRenderable) { DrawSpatialHistory(); return; }
             if (sharedGuest)
@@ -400,8 +408,8 @@ namespace ContextPin
                     string values = string.Join(", ", Values(candidate, "parameter_diff").Select(change =>
                         $"{TextValue(change, "label")} {change["before"]} → {change["after"]} {TextValue(change, "unit")}".TrimEnd()));
                     string key = TextValue(candidate, "candidate_key");
-                    string side = CenteredPaperLatest && SharedPaperMeeting ? (key == "A" ? "①·④ 쪽" : "②·③ 쪽") :
-                        CenteredPaperLatest ? (key == "A" ? "종이 왼쪽" : "종이 오른쪽") :
+                    string side = PublishedCenterLayout ? (key == "A" ? "①·④ 쪽" : "②·③ 쪽") :
+                        OffsetPaperGallery ? (key == "A" ? "④ 너머" : "③ 너머") :
                         (key == "A" ? "뒤왼쪽" : "뒤오른쪽");
                     string suggestion = proposed.Length > 0 && proposed == TextValue(candidate, "candidate_id")
                         ? (participant == meetingParticipant ? " · 내가 제안함" : " · 참가자가 제안함") : "";
@@ -652,10 +660,9 @@ namespace ContextPin
             if (!AlignmentPassthroughAvailable()) return;
             if (A4PreviewActive)
             {
-                BoldLabel("SpatialAlignmentStatus", content, 12, 67, 396, 38,
-                    CenteredPaperLatest ? "A4 중앙의 거치대를 확인하세요" : "실물을 A4 중앙에 놓으세요", SpatialFont(23), HeaderText);
+                BoldLabel("SpatialAlignmentStatus", content, 12, 67, 396, 38, "실물을 A4 중앙에 놓으세요", SpatialFont(23), HeaderText);
                 Label("SpatialAlignmentHint", content, 12, 108, 396, 75,
-                    CenteredPaperLatest ? latestPaperError ?? "중앙에 Latest가 놓입니다. 종이 양옆 15cm가 같은 높이의 빈 책상인지 확인하세요." :
+                    OffsetPaperGallery ? latestPaperError ?? "Latest는 중심에서 ②·③ 쪽으로 24cm에 놓입니다. ④·③ 너머의 후보 자리도 같은 높이의 책상 위인지 확인하세요." :
                     CandidateGenerationMeeting ? latestPaperError ?? "중앙은 실물 자리입니다. 앞오른쪽 청록색 Latest의 바닥과 방향을 확인하세요." :
                         "오른쪽 앞의 가상 CAD와 중앙 실물의 바닥과 방향을 확인한 뒤 트리거로 배치를 확인하세요.",
                     SpatialFont(19), HeaderText);

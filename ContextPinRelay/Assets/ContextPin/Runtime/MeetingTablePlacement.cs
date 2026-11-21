@@ -394,7 +394,8 @@ namespace ContextPin
         {
             var bounds = meetingLoadedVersion == AssemblyOriginalId ? meetingAssetBounds : physicalOriginal.Bounds;
             if (A4ReviewSurfaceActive) bounds = sessionOriginalBounds ?? bounds;
-            return FootprintOnTable(bounds, WorkspaceOrigin, WorkspaceRotation, clearance);
+            var origin = A4ReviewSurfaceActive && OffsetPaperGallery ? reviewTable.position : WorkspaceOrigin;
+            return FootprintOnTable(bounds, origin, WorkspaceRotation, clearance);
         }
 
         Rect FootprintOnTable(Bounds bounds, Vector3 origin, Quaternion rotation, float clearance)

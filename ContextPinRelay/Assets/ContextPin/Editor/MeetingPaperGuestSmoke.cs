@@ -85,6 +85,33 @@ namespace ContextPin.Editor
                 hostCommandError = type + " " + r.responseCode + " " + r.downloadHandler.text;
         }
 
+        static void CheckLegacyPaperLayout(RelayApp app, JObject snapshot)
+        {
+            var profile = (JObject)snapshot["profile"];
+            var layout = profile.Value<string>("review_layout");
+            var field = AppType.GetField("paperLatestPose", AppMembers);
+            var canonical = (Pose)field.GetValue(app);
+            Require(PaperState(app, "PaperRenderable") && !PaperState(app, "PaperLayoutNeedsReset"),
+                "A host aligned to current paper slots must be able to render.");
+            try
+            {
+                // Stored meetings keep their original profile and canonical pose from the host.
+                profile["review_layout"] = "center_latest_side_candidates";
+                field.SetValue(app, new Pose(canonical.position - Vector3.right * .24f, canonical.rotation));
+                Require(PaperState(app, "PaperLayoutNeedsReset") && !PaperState(app, "PaperRenderable"),
+                    "The legacy centre pose must block old models until the host republishes the offset layout.");
+                field.SetValue(app, canonical);
+                Require(!PaperState(app, "PaperLayoutNeedsReset") && PaperState(app, "PaperRenderable"),
+                    "A migrated room must accept its offset pose even though the saved profile retains the legacy name.");
+                report.legacyCenteredLayoutRejected = true;
+            }
+            finally
+            {
+                profile["review_layout"] = layout;
+                field.SetValue(app, canonical);
+            }
+        }
+
         static void CheckUnadoptedFollowup(RelayApp app, JObject spatial)
         {
             var request = AppType.GetField("explicitRequest", AppMembers);
@@ -181,6 +208,7 @@ namespace ContextPin.Editor
                         transportType.GetMethod("StartEvents").Invoke(hostEvents, new object[] { (long)s["last_seq"] });
                     }
                     if (!(bool)transportType.GetProperty("EventsConnected").GetValue(hostEvents)) return false;
+                    CheckLegacyPaperLayout(app, s);
                     CheckUnadoptedFollowup(app, sp);
                     JoinAsNewViewer(app, 1);
                     return true;
@@ -199,6 +227,8 @@ namespace ContextPin.Editor
                 case 14:
                     if (latest == null || !PaperState(app, "PaperRenderable") || Version(latest) != report.initialVersion) return false;
                     RequireSamePhysicalPose(latest.transform, hostLatestPaper, "Guest V1");
+                    CheckPaperLatest(latest);
+                    CheckPhysicalScale(s, latest);
                     report.numberedCornersOppositeView = report.paperLatestAgrees = true;
                     foreach (var c in s["candidate_sets"][captureId]["candidates"])
                     {
@@ -235,6 +265,8 @@ namespace ContextPin.Editor
                     if (latest == null || Version(latest) != report.middleVersion || (string)s["adopted_version_id"] != report.middleVersion ||
                         GameObject.Find("CandidateContainer") != null) return false;
                     RequireSamePhysicalPose(latest.transform, hostLatestPaper, "Guest V2 after remote commit");
+                    CheckPaperLatest(latest);
+                    CheckPhysicalScale(s, latest);
                     report.paperCommitReceived = true;
                     // Shoot the actual V2 base from above. Feed the same physical ray to the
                     // runtime's host-world conversion and compare the guest marker against the hit.
@@ -283,12 +315,16 @@ namespace ContextPin.Editor
                 case 18:
                     if (latest == null || Version(latest) != report.finalVersion) return false;
                     RequireSamePhysicalPose(latest.transform, hostLatestPaper, "Guest V3 after remote commit");
+                    CheckPaperLatest(latest);
+                    CheckPhysicalScale(s, latest);
                     return true;
                 case 19: JoinAsNewViewer(app, 2); return true;
                 case 20: return participant != guestId;
                 case 23:
                     if (latest == null || Version(latest) != report.finalVersion || !PaperState(app, "PaperRenderable")) return false;
                     RequireSamePhysicalPose(latest.transform, hostLatestPaper, "Late-joining V3");
+                    CheckPaperLatest(latest);
+                    CheckPhysicalScale(s, latest);
                     report.paperLateJoin = true;
                     AppType.GetMethod("InvalidateRegisteredPoses", AppMembers).Invoke(app, null);
                     return true;
@@ -303,6 +339,8 @@ namespace ContextPin.Editor
                 case 26:
                     if (latest == null || Version(latest) != report.finalVersion || !PaperState(app, "PaperRenderable")) return false;
                     RequireSamePhysicalPose(latest.transform, hostLatestPaper, "Recovered V3");
+                    CheckPaperLatest(latest);
+                    CheckPhysicalScale(s, latest);
                     report.paperRealigned = true;
                     hostToken = null;
                     Finish(null);

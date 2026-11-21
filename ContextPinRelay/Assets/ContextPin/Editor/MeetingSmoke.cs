@@ -42,7 +42,7 @@ namespace ContextPin.Editor
             public bool captureHadNoNewRound, frozenTargetVerified, savedBundleMediaVerified;
             public bool bundleModelsPlaced, bundleRaySelection, bundleCommit, secondEditRound;
             public bool fixedPaperSlots, singleCandidateKeptSlot, oversizedCandidateRejected;
-            public bool phoneStandCentered;
+            public bool legacyCenteredLayoutRejected;
             public bool microphoneWaitedForStart, silentCommandRejected, spokeWhileGenerating, spokeWhileComparing;
             public bool singleTimelineVerified, tailFinalized;
             public bool minutesGeneratingShown, minutesSavedShown, minutesPackageVerified;
@@ -316,6 +316,8 @@ namespace ContextPin.Editor
                 filter.sharedMesh.vertices.Select(vertex => inverse * (filter.transform.TransformPoint(vertex) - reviewTablePose.position))).ToArray();
             float lowest = vertices.Min(vertex => vertex.y);
             Require(Mathf.Abs(lowest) < .002f, $"{model.name} bottom is {lowest:F4} m above the table.");
+            // The phone stand uses the paper to measure the tabletop pose, not its extents.
+            if (checkPhoneStand) return;
             var area = checkExplicit || checkCaptureOnly ? explicitAreaSize : SmokeTableSize;
             Require(vertices.All(vertex => Mathf.Abs(vertex.x) <= area.x * .5f + .001f &&
                 Mathf.Abs(vertex.z) <= area.y * .5f + .001f), $"{model.name} must fit inside the table edges.");
