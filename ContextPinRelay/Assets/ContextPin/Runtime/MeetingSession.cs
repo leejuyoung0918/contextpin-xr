@@ -28,7 +28,8 @@ namespace ContextPin
         static string TextValue(JToken value, string key) => (value as JObject)?.Value<string>(key) ?? "";
         JObject MeetingVersion(string id) => Values(meetingSnapshot, "versions").OfType<JObject>().FirstOrDefault(v => TextValue(v, "version_id") == id);
         JObject MeetingLatestRound => Values(meetingSnapshot, "rounds").OfType<JObject>().LastOrDefault();
-        JObject RequestedMeetingVersion() => MeetingVersion(meetingViewedVersion ?? TextValue(meetingSnapshot, "committed_version_id"));
+        JObject RequestedMeetingVersion() => MeetingVersion(IsAssemblyMeeting && (AssemblySampling || assemblyAlignment == AssemblyAlignment.Preview)
+            ? AssemblyOriginalId : meetingViewedVersion ?? TextValue(meetingSnapshot, "committed_version_id"));
         JToken MeetingCandidate(string version) => Values(MeetingLatestRound, "candidates").LastOrDefault(c => TextValue(c, "version_id") == version);
         string MeetingVersionLabel(string value) => string.IsNullOrEmpty(value) ? "" : "v·" + value.Substring(Math.Max(0, value.Length - 7));
         string MeetingPartLabel(string id) => Values(meetingSnapshot?["profile"], "semantic_parts")
@@ -120,6 +121,7 @@ namespace ContextPin
             if (changed) Draw();
             if (!connected && !meetingRefresh && !meetingBusy && Time.unscaledTime >= meetingRefreshAt) RefreshMeetingSnapshot();
             if (meetingCapture != null && meetingCapture.Recording && Time.unscaledTime >= meetingAutoSendAt) SendMeetingAudio();
+            UpdateAssemblyTracking();
             PositionMeetingModel();
         }
 
@@ -174,6 +176,7 @@ namespace ContextPin
             if (meetingSnapshot != null && seq <= (meetingSnapshot.Value<long?>("last_seq") ?? 0)) return false;
             var oldCommitted = TextValue(meetingSnapshot, "committed_version_id");
             meetingSnapshot = snapshot;
+            if (IsAssemblyMeeting) ReadAssemblyMount();
             if (oldCommitted != TextValue(meetingSnapshot, "committed_version_id")) SetMeetingViewedVersion(null);
             if (meetingFailureDisplayed != null)
             {
@@ -347,6 +350,7 @@ namespace ContextPin
             meetingTransport = null;
             transport?.Dispose();
             ReleaseMeetingPreview();
+            ResetAssemblyPreview();
             meetingSnapshot = null;
             meetingViewedVersion = meetingSelectedParameter = meetingFailureDisplayed = null;
             meetingBusy = meetingRefresh = meetingEventsConnected = meetingHttpAvailable = false;

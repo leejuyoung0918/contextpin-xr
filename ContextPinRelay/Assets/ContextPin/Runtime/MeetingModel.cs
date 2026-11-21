@@ -121,10 +121,11 @@ namespace ContextPin
                 meetingAssetBounds = bounds;
                 var pivot = new GameObject("MeetingPreviewPivot");
                 meetingModel.transform.SetParent(pivot.transform, false);
-                meetingModel.transform.localPosition = -bounds.center;
+                if (!IsAssemblyMeeting) meetingModel.transform.localPosition = -bounds.center;
                 meetingModel = pivot;
                 meetingPartRenderers.Clear();
                 foreach (var filter in filters) AddMeetingPart(filter, partIds, id);
+                if (IsAssemblyMeeting) SetAssemblyMeshMaterial(filters, id);
                 meetingModel.SetActive(true);
                 meetingModel.transform.GetChild(0).gameObject.SetActive(true);
                 PrepareMeetingLighting();
@@ -196,7 +197,8 @@ namespace ContextPin
             {
                 if (renderer == null) continue;
                 overlay.Clear();
-                if (id == meetingPartId) overlay.SetColor(MeetingColor, new Color(.97f, .69f, .25f));
+                if (id == meetingPartId) overlay.SetColor(MeetingColor, new Color(.97f, .69f, .25f, IsAssemblyMeeting ? .62f : 1));
+                else if (IsAssemblyMeeting && id == AssemblyFixedPartId) overlay.SetColor(MeetingColor, AssemblyReferenceColor);
                 renderer.SetPropertyBlock(overlay);
             }
         }
@@ -233,6 +235,7 @@ namespace ContextPin
         void PositionMeetingModel()
         {
             if (meetingModel == null || panel == null) return;
+            if (IsAssemblyMeeting) { PositionAssemblyPreview(); return; }
             var distance = meetingLocalPlacement ? 0f : .34f;
             var position = meetingLocalPlacement ? meetingLocalPoint : panel.TransformPoint(new Vector3(-285, 5, 0)) - panel.forward * distance;
             var basis = meetingLocalPlacement ? meetingLocalRotation : panel.rotation;
@@ -268,6 +271,8 @@ namespace ContextPin
             meetingModel = null;
             meetingImport?.Dispose();
             meetingImport = null;
+            if (assemblyMaterial != null) Destroy(assemblyMaterial);
+            assemblyMaterial = null;
         }
 
         void ReleaseMeetingPreview()

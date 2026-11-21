@@ -175,7 +175,7 @@ def doctor():
         result['relay']={'status':'unreachable','port':port}
     print(json.dumps(result,ensure_ascii=False,indent=2))
 
-def smoke_meeting(simulator):
+def smoke_meeting(simulator, assembly=False):
     artifacts = ROOT / 'artifacts'
     artifacts.mkdir(exist_ok=True)
     env = {**os.environ, 'RELAY_WORKSPACE': str(ROOT)}
@@ -186,8 +186,11 @@ def smoke_meeting(simulator):
                 raise ValueError(f'HTTP {health.status}')
     except (OSError, ValueError) as error:
         raise SystemExit(f'회의 EDGE를 먼저 시작하세요. {edge} · {error}') from error
-    report = artifacts / ('meeting-simulator-report.json' if simulator else 'meeting-smoke-report.json')
-    log = artifacts / ('unity-meeting-simulator.log' if simulator else 'unity-meeting.log')
+    check = 'assembly' if assembly else 'meeting'
+    report = artifacts / f'{check}-{"simulator" if simulator else "smoke"}-report.json'
+    log = artifacts / f'unity-{check}{"-simulator" if simulator else ""}.log'
+    if assembly:
+        env['MEETING_SMOKE_ASSEMBLY'] = '1'
     report.unlink(missing_ok=True)
     options = ['-force-metal'] if simulator else ['-batchmode']
     method = 'RunMeetingSimulator' if simulator else 'RunMeeting'
@@ -235,7 +238,7 @@ def smoke_meeting(simulator):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=['doctor','open','prepare','desktop','simulator','build','deploy','export','server','test','smoke','smoke-simulator','smoke-meeting','smoke-meeting-simulator','report'])
+    parser.add_argument('command',choices=['doctor','open','prepare','desktop','simulator','build','deploy','export','server','test','smoke','smoke-simulator','smoke-meeting','smoke-meeting-simulator','smoke-assembly','smoke-assembly-simulator','report'])
     parser.add_argument('--serial',help='deploy/export 대상 Quest ADB 기기번호')
     parser.add_argument('--archive',type=Path,help='report용 기기 export 폴더, Trace 폴더 또는 session.json')
     parser.add_argument('--relay-data',type=Path,help='report용 PC relay 저장 폴더 또는 transfer.sqlite3')
@@ -255,8 +258,8 @@ def main():
         env={**os.environ,'RELAY_WORKSPACE':str(ROOT)}
         run([unity(),'-projectPath',unity_project(),'-batchmode',
              '-executeMethod','ContextPin.Editor.RelaySmoke.Run','-logFile',artifacts/'unity-smoke.log'],env=env,timeout=600)
-    elif args.command in {'smoke-meeting', 'smoke-meeting-simulator'}:
-        smoke_meeting(args.command.endswith('-simulator'))
+    elif args.command in {'smoke-meeting', 'smoke-meeting-simulator', 'smoke-assembly', 'smoke-assembly-simulator'}:
+        smoke_meeting(args.command.endswith('-simulator'), args.command.startswith('smoke-assembly'))
     elif args.command=='smoke-simulator':
         artifacts=ROOT/'artifacts';artifacts.mkdir(exist_ok=True)
         log=artifacts/'unity-simulator-smoke.log'

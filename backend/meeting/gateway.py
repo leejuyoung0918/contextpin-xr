@@ -24,7 +24,27 @@ def provider_ready(kind):
 def plan_live(context):
     if not provider_ready("planner"):
         raise MeetingError("AI_PLANNER_MODEL과 AI_API_KEY를 설정해 주세요.", 503)
-    prompt = SYSTEM + "\nResponse JSON Schema:\n" + json.dumps(Plan.model_json_schema(), ensure_ascii=False)
+    prompt = SYSTEM
+    profile = context.get("profile", {})
+    assembly = profile.get("assembly")
+    if assembly:
+        prompt += ("\nThis is a fixed two-object assembly. Edit only the editable exterior of object_2. "
+                   "The reference object, coupling region, clearances and mounting datum are fixed. "
+                   "Do not propose changes to them. Do not invent interference or fit results. "
+                   "A request to go a little further in this candidate must refine its parameters.")
+        # Only information needed for the suggested edits goes to the provider.
+        utterance = context["utterance"]
+        related = context["related_utterances"][-5:]
+        changed_base = context.get("changed_base_parameters", [])
+        context = {k: context[k] for k in ("request_id", "context_hash", "edit_base_version_id",
+                   "expected_committed_version_id", "generation_epoch", "object_id", "parameters",
+                   "constraints", "part_ids", "clarification_of", "evidence_ids")}
+        context.update({"utterance": {"text": utterance["text"], "evidence_id": utterance["evidence_id"]},
+                        "related_utterances": [{"text": item["text"], "evidence_id": item["evidence_id"]} for item in related],
+                        "changed_base_parameters": changed_base,
+                        "preserved_conditions": assembly["preserved_conditions"],
+                        "profile": {k: profile[k] for k in ("semantic_parts", "parameters", "edit_capabilities")}})
+    prompt += "\nResponse JSON Schema:\n" + json.dumps(Plan.model_json_schema(), ensure_ascii=False)
     messages = [{"role": "system", "content": prompt},
                 {"role": "user", "content": json.dumps(context, ensure_ascii=False)}]
     for attempt in range(2):

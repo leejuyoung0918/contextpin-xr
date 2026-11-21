@@ -23,7 +23,7 @@ namespace ContextPin
         {
             if (meetingSnapshot == null) { DrawMeetingSetup(); return; }
             var profile = meetingSnapshot["profile"];
-            var name = TextValue(profile, "display_name");
+            var name = IsAssemblyMeeting ? TextValue(meetingSnapshot["assembly"], "display_name") : TextValue(profile, "display_name");
             var members = Values(meetingSnapshot, "participants").Count();
             var status = meetingEventsConnected ? "연결됨" : meetingHttpAvailable ? "동기화 중" : "오프라인";
             var mode = TextValue(MeetingLatestRound, "provider_mode") switch
@@ -42,12 +42,16 @@ namespace ContextPin
             var requestedVersion = RequestedMeetingVersion();
             var requestedId = TextValue(requestedVersion, "version_id");
             var versionLabel = MeetingVersionLabel(meetingLoadedVersion);
+            var assemblyLabel = meetingLoadedVersion == AssemblyOriginalId ? "원본" : "수정안";
             Label("MeetingDrawingMode", content, 55, 209, 570, 33,
                 meetingLoadedVersion == null ? "3D 모델을 기다리는 중" :
+                IsAssemblyMeeting ? $"{assemblyLabel}  ·  {AssemblyAlignmentText()}" :
                 (meetingRealSize ? "실제 크기" : "확대 보기") + "  ·  " + versionLabel + (meetingViewedVersion == null ? "  확정본" : "  검토 중"),
                 22, Mint);
             var part = meetingPartId == null ? "모델에서 부위를 선택할 수 있어요" : "선택한 부위  " + MeetingPartLabel(meetingPartId);
             if (meetingLocalPlacement) part += "  ·  기기별 수동 배치";
+            if (IsAssemblyMeeting)
+                part = AssemblyOverlayAligned ? "청록 · 유지한 결합부   금색 · 수정한 외형" : "원본과 수정안은 같은 장착 변환을 사용합니다.";
             Label("MeetingSelectedPart", content, 56, 453, 568, 34, part, 21, Light);
             var dimensions = ReadMeetingVector(requestedVersion?["bounds_mm"]?["size"]);
             if (dimensions.HasValue && meetingLoadedVersion == requestedId)
@@ -59,18 +63,22 @@ namespace ContextPin
             if (meetingFailedVersion == requestedId && !string.IsNullOrEmpty(requestedId))
                 Button("MeetingRetryModel", 185, 319, 267, 55, "모델 다시 불러오기", () => { meetingFailedVersion = null; QueueMeetingModel(requestedVersion); Draw(); });
 
-            Button("MeetingScale", 36, 548, 158, 50, meetingRealSize ? "확대 보기" : "실제 크기", () => { meetingRealSize = !meetingRealSize; PositionMeetingModel(); Draw(); });
-            Button("MeetingRotate", 205, 548, 138, 50, "돌려 보기", () => { meetingYaw += 35; PositionMeetingModel(); });
-            if (xr) Button("MeetingPlace", 354, 548, 160, 50, meetingLocalPlacement ? "배치 갱신" : "실물 앞에 배치", PlaceMeetingModel);
-            if (meetingLocalPlacement)
+            if (IsAssemblyMeeting) DrawAssemblyControls();
+            else
             {
-                Button("MeetingRaise", 525, 548, 53, 50, "↑", () => { meetingHeight += .05f; PositionMeetingModel(); });
-                Button("MeetingLower", 587, 548, 53, 50, "↓", () => { meetingHeight -= .05f; PositionMeetingModel(); });
+                Button("MeetingScale", 36, 548, 158, 50, meetingRealSize ? "확대 보기" : "실제 크기", () => { meetingRealSize = !meetingRealSize; PositionMeetingModel(); Draw(); });
+                Button("MeetingRotate", 205, 548, 138, 50, "돌려 보기", () => { meetingYaw += 35; PositionMeetingModel(); });
+                if (xr) Button("MeetingPlace", 354, 548, 160, 50, meetingLocalPlacement ? "배치 갱신" : "실물 앞에 배치", PlaceMeetingModel);
+                if (meetingLocalPlacement)
+                {
+                    Button("MeetingRaise", 525, 548, 53, 50, "↑", () => { meetingHeight += .05f; PositionMeetingModel(); });
+                    Button("MeetingLower", 587, 548, 53, 50, "↓", () => { meetingHeight -= .05f; PositionMeetingModel(); });
+                }
             }
             Button("MeetingHome", 36, 614, 119, 49, "나가기", LeaveMeeting);
             Button("MeetingObserver", 167, 614, 147, 49, "웹 검토 열기", () => Application.OpenURL(meetingTransport.Endpoint("/meeting/").AbsoluteUri));
             Button("MeetingReturnHead", 326, 614, 136, 49, "확정본 보기", () => { SetMeetingViewedVersion(null); Draw(); });
-            DrawMeetingCaptureButton();
+            if (!IsAssemblyMeeting) DrawMeetingCaptureButton();
 
             Button("MeetingModelTab", 673, 208, 155, 50, "치수", () => OpenMeetingPage(MeetingPage.Model), meetingPage == MeetingPage.Model);
             Button("MeetingCandidatesTab", 836, 208, 166, 50, "수정 후보", () => OpenMeetingPage(MeetingPage.Candidates), meetingPage == MeetingPage.Candidates);
@@ -192,14 +200,17 @@ namespace ContextPin
             bool reviewable = TextValue(round, "status") == "reviewable" && selected != null && meetingLoadedVersion == meetingViewedVersion;
             if (selected != null) Label("MeetingInterpretation", content, 681, 487, 503, 48, TextValue(selected, "interpretation"), 21, Muted);
             var roundStatus = TextValue(round, "status");
-            if (roundStatus == "reviewable" && selected == null)
+            if (!IsAssemblyMeeting && roundStatus == "reviewable" && selected == null)
                 Button("MeetingUnsureVote", 678, 541, 507, 44, "잘 모르겠음", () => SaveMeetingResponse("interpretation", "unsure", null));
             if (reviewable)
             {
-                Button("MeetingInterpretationVote", 678, 541, 164, 44, "내 뜻과 같음", () => SaveMeetingResponse("interpretation", "candidate", selected));
-                Button("MeetingPreferenceVote", 850, 541, 161, 44, "이 안 선호", () => SaveMeetingResponse("preference", "candidate", selected));
-                Button("MeetingConfirmCandidate", 1019, 541, 166, 44, "검토 확인", () => ConfirmMeetingCandidate(selected));
-                if (MeetingHost)
+                if (!IsAssemblyMeeting)
+                {
+                    Button("MeetingInterpretationVote", 678, 541, 164, 44, "내 뜻과 같음", () => SaveMeetingResponse("interpretation", "candidate", selected));
+                    Button("MeetingPreferenceVote", 850, 541, 161, 44, "이 안 선호", () => SaveMeetingResponse("preference", "candidate", selected));
+                    Button("MeetingConfirmCandidate", 1019, 541, 166, 44, "검토 확인", () => ConfirmMeetingCandidate(selected));
+                }
+                if (IsAssemblyMeeting ? !xr || assemblyAlignment == AssemblyAlignment.Confirmed : MeetingHost)
                 {
                     Button("MeetingAdopt", 909, 598, 276, 51, "이 모델 결정", () => SaveMeetingDecision("commit", selected), true);
                     Button("MeetingDefer", 678, 598, 111, 51, "보류", () => SaveMeetingDecision("defer", null));

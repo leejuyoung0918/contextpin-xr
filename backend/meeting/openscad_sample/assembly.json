@@ -1,0 +1,40 @@
+{
+  "display_name": "예시 조립체",
+  "is_demo": true,
+  "object_1": {"display_name": "기준 물체 1"},
+  "object_2": {"display_name": "외형 수정 부품 2"},
+  "mounting": {"position_m": [0, 0, 0], "rotation_xyzw": [0, 0, 0, 1]},
+  "preserved_conditions": ["결합부 바닥 형상", "두 결합 구멍과 슬롯", "CAD 원점과 장착 방향"],
+  "source_file": "object_2.scad",
+  "source_files": [],
+  "coupling_guard": {"axis": "z", "side": "below", "limit_mm": 10, "tolerance_mm": 0.001},
+  "profile": {
+    "adapter_id": "openscad_demo_assembly",
+    "adapter_revision": 1,
+    "semantic_parts": [
+      {"part_id": "outer_shell", "label": "변경 가능 외형", "aliases": ["물체 2", "부품 2", "모서리", "외형", "몸체"], "selectable_regions": ["outer_shell"]},
+      {"part_id": "coupling_mount", "label": "고정 결합부", "aliases": ["결합", "연결", "구멍", "슬롯", "바닥"], "selectable_regions": ["coupling_mount"]}
+    ],
+    "parameters": [
+      {"parameter_id": "outer_rounding", "label": "외형 모서리 반경", "type": "number", "unit": "mm", "default_value": 3, "min_value": 2, "max_value": 10, "affected_part_ids": ["outer_shell"], "aliases": ["모서리 반경", "라운딩", "모서리", "rounding"], "change_aliases": ["둥글게"]},
+      {"parameter_id": "side_bend", "label": "옆면 굴곡 깊이", "type": "number", "unit": "mm", "default_value": 1, "min_value": 0, "max_value": 8, "affected_part_ids": ["outer_shell"], "aliases": ["옆면 굴곡", "측면 곡선", "굴곡", "side bend"], "change_aliases": ["오목하게", "잘록하게"]},
+      {"parameter_id": "top_taper", "label": "윗면 단면 축소", "type": "number", "unit": "mm", "default_value": 3, "min_value": 0, "max_value": 9, "affected_part_ids": ["outer_shell"], "aliases": ["윗부분 경사", "윗면 경사", "윗면 단면", "taper"], "change_aliases": ["경사지게"]}
+    ],
+    "edit_capabilities": [
+      {"operation_id": "set_parameter", "meaning": "외형의 등록된 매개변수 값 변경", "applicable_part_ids": ["outer_shell"], "input_parameter_schema": {"parameter_id": "parameter_id", "value": "parameter_value"}, "allowed_ranges": "parameters", "affected_properties": [], "preserved_properties": ["width_mm", "height_mm", "depth_mm"]}
+    ],
+    "measured_properties": [
+      {"property_id": "width_mm", "axis": 0, "label": "전체 폭", "unit": "mm", "aliases": ["폭", "너비", "가로"]},
+      {"property_id": "height_mm", "axis": 1, "label": "전체 높이", "unit": "mm", "aliases": ["높이"]},
+      {"property_id": "depth_mm", "axis": 2, "label": "전체 깊이", "unit": "mm", "aliases": ["깊이", "세로"]}
+    ],
+    "default_constraints": [],
+    "demo_utterance": "물체 2를 좀 더 곡선적으로 해보자. 연결 부분은 그대로.",
+    "demo_ambiguity_aliases": ["곡선적", "곡선으로", "부드럽게", "둥글게", "more curved"],
+    "demo_interpretations": [
+      {"parameter_id": "outer_rounding", "part_id": "outer_shell", "title": "외형 모서리 라운딩", "interpretation": "평면 외형의 모서리를 더 큰 반경으로 둥글립니다.", "delta": 3},
+      {"parameter_id": "side_bend", "part_id": "outer_shell", "title": "몸체 옆면 굴곡", "interpretation": "몸체 측면 중간을 안쪽으로 넣어 윤곽을 구부립니다.", "delta": 5},
+      {"parameter_id": "top_taper", "part_id": "outer_shell", "title": "윗면 단면 축소", "interpretation": "윗면 폭과 깊이를 줄이고 상단으로 이어지는 경사를 넓힙니다.", "delta": 4}
+    ]
+  }
+}

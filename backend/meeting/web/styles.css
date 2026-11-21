@@ -178,3 +178,19 @@ dialog::backdrop { background: #141b2e9e; }
 #print-form > label { margin-top: .4rem; }
 #print-form button { margin-top: .35rem; }
 #print-results { margin-bottom: .45rem; }
+.assembly-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .45rem 1rem;
+  padding: .7rem .9rem;
+  margin-bottom: 1rem;
+  border: 1px solid #cbcfee;
+  border-radius: .65rem;
+  background: #e7eafb;
+}
+.assembly-summary strong { font-size: .86rem; }
+#assembly-view-hint { max-width: 24rem; }
+#round-content > details > summary { cursor: pointer; color: var(--blue-dark); font-size: .84rem; }
+#round-content > details > .response-form { margin-top: .45rem; }

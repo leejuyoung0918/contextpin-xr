@@ -535,7 +535,7 @@ namespace ContextPin
             if (guideDisplay == null && OVRManager.display != null)
             {
                 guideDisplay = OVRManager.display;
-                guideDisplay.RecenteredPose += InvalidateGuideAlignment;
+                guideDisplay.RecenteredPose += InvalidateRegisteredPoses;
             }
 
             if (!guideHasPhysicalMarkers && !(guideRecording && aligned) && guideAlignment == GuideAlignment.None) return;
@@ -560,7 +560,13 @@ namespace ContextPin
 
         void ReleaseGuideTracking()
         {
-            if (guideDisplay != null) guideDisplay.RecenteredPose -= InvalidateGuideAlignment;
+            if (guideDisplay != null) guideDisplay.RecenteredPose -= InvalidateRegisteredPoses;
+        }
+
+        void InvalidateRegisteredPoses()
+        {
+            InvalidateGuideAlignment();
+            InvalidateAssemblyAlignment();
         }
 
         void DrawGuideStudentMarkers()

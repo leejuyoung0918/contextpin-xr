@@ -181,6 +181,8 @@ namespace ContextPin
                     }
                 }
             }
+            else if(xr && screen==ScreenState.Meeting && IsAssemblyMeeting && AssemblySampling)
+                marking=UpdateAssemblyProbe(hit!=null);
             else if(probe.gameObject.activeSelf)probe.gameObject.SetActive(false);
             if(clicked && hit!=null)hit.clicked?.Invoke();
             wasMarking=marking;
@@ -455,6 +457,7 @@ namespace ContextPin
         void Go(ScreenState next){screen=next;Draw();}
         void OnApplicationPause(bool pause)
         {
+            if(pause)InvalidateAssemblyAlignment();
             if(pause && screen==ScreenState.Recording && !demo && capture!=null && capture.Recording && !capture.Initializing)EndRecording();
             if(pause && guideRun?.physical==true)
             {

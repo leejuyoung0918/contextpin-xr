@@ -78,7 +78,8 @@ function operationChanges(candidate, round, snapshot) {
     const oldValue = base?.parameters?.[id];
     const before = oldValue === undefined ? "" : unitValue(oldValue, definition.unit) + " → ";
     const after = unitValue(operation.value, definition.unit);
-    return (definition.label || id) + " " + before + after;
+    const provenance = snapshot.assembly && operation.source === "AI_PROPOSAL" ? " (비교용 제안값)" : "";
+    return (definition.label || id) + " " + before + after + provenance;
   }).filter(Boolean);
 }
 
@@ -211,8 +212,14 @@ function renderDecision(round, snapshot, activeCandidate, oldReason, callbacks) 
     reason: reason.value.trim() || undefined,
     outcome,
   }, form);
-  actions.append(makeButton("이 모델로 결정", "primary", () => save("commit"), !candidate),
-    makeButton("보류", "", () => save("defer")), makeButton("기각", "", () => save("reject")));
+  if (snapshot.assembly) {
+    actions.append(makeButton("이 모델로 결정", "primary", () => save("commit"), !candidate),
+      makeButton("새 수정 요청", "", () => callbacks.refine(false)));
+    if (candidate) actions.append(makeButton("이 후보에서 후속 수정", "", () => callbacks.refine(true)));
+  } else {
+    actions.append(makeButton("이 모델로 결정", "primary", () => save("commit"), !candidate),
+      makeButton("보류", "", () => save("defer")), makeButton("기각", "", () => save("reject")));
+  }
   form.append(label, reason, actions);
   if (!candidate) form.append(element("p", "채택하려는 후보의 모델을 먼저 여세요.", "subtle"));
   form.addEventListener("submit", event => event.preventDefault());
@@ -247,6 +254,16 @@ export function renderRound(round, snapshot, { actor, presenter, candidateId }, 
   }
   if (round.candidates?.length) destination.append(renderCandidates(round, snapshot, candidateId, callbacks));
   if (round.status === "reviewable") {
+    if (snapshot.assembly) {
+      if (round.candidates.filter(candidate => candidate.status === "valid").length > 1) {
+        const interpretation = element("details");
+        interpretation.append(element("summary", "원래 뜻에 가까운 후보를 기록할 수 있습니다."));
+        interpretation.append(renderResponse(round, "interpretation", actor, callbacks));
+        destination.append(interpretation);
+      }
+      if (presenter) destination.append(renderDecision(round, snapshot, candidateId, oldReason, callbacks));
+      return;
+    }
     if (round.candidates.some(candidate => candidate.status === "valid")) {
       destination.append(renderResponse(round, "interpretation", actor, callbacks),
         renderResponse(round, "preference", actor, callbacks));
@@ -265,6 +282,9 @@ export function renderRound(round, snapshot, { actor, presenter, candidateId }, 
         () => callbacks.command("ack", { round_id: round.round_id, candidate_id: active.candidate_id }), acknowledged));
     }
     if (presenter) destination.append(renderDecision(round, snapshot, candidateId, oldReason, callbacks));
+  }
+  if (snapshot.assembly && round.status === "failed") {
+    destination.append(makeButton("새 수정 요청", "", () => callbacks.refine(false)));
   }
   if (presenter && ["generating", "planning", "building", "needs_input"].includes(round.status)) {
     destination.append(makeButton("검토 취소", "", () => callbacks.command("cancel", { round_id: round.round_id })));
@@ -300,6 +320,7 @@ export function renderTranscripts(snapshot, partial, listen) {
       item.source_mode === "live_capture" ? item.speaker_id : item.participant_id) +
       (part ? " · " + part.label : "") + (item.revision > 1 ? " · 정정 " + (item.revision - 1) : "");
     li.append(element("p", meta, "subtle"), element("p", transcriptText(item)));
+    if (item.processing_notice) li.append(element("p", item.processing_notice, "subtle"));
     if (item.audio_url && listen) li.append(makeButton("원음 듣기", "", () => listen(item, li)));
     root.append(li);
   }
@@ -323,9 +344,10 @@ export function renderMinutes(snapshot, callbacks) {
       item.version_id === (decision.selected_model_version_id ?? decision.version_id));
     const outcome = decisionLabels[decision.outcome ?? decision.type] || "결정";
     const versionName = version ? " · " + versionLabel(version.version_id, snapshot.versions) : "";
-    const heading = element("h3", outcome + versionName);
+    const heading = element("h3", outcome + versionName +
+      (snapshot.assembly && decision.candidate_title ? " · " + decision.candidate_title : ""));
     card.append(heading, element("p", decision.reason || decision.rationale_text || "이유 미기록"));
-    if (decision.consensus_status) {
+    if (decision.consensus_status && !snapshot.assembly) {
       const confirmed = (decision.confirmed_by || []).map(id =>
         snapshot.participants.find(participant => participant.participant_id === id)?.display_name || id);
       const consensus = consensusLabels[decision.consensus_status] || "";
@@ -354,6 +376,9 @@ export function renderMinutes(snapshot, callbacks) {
       }
       card.append(disclosure);
     }
+    const preserved = decision.assembly_record?.preserved_conditions || [];
+    if (preserved.length) card.append(element("p", "유지 조건 · " + preserved.map(condition => typeof condition === "string"
+      ? condition : condition.label).filter(Boolean).join(" · "), "subtle"));
     const votes = decision.responses || [];
     if (votes.length && round) {
       const replies = element("details");

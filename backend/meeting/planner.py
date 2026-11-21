@@ -147,6 +147,7 @@ def fixture_plan(context):
     line = context["utterance"]["text"]
     combined = (context["clarification_of"] + " " + line).strip()
     profile = context["profile"]
+    assembly = profile.get("assembly")
     fields = profile["parameters"]
     params = context["parameters"]
     parts = context["part_ids"]
@@ -168,6 +169,8 @@ def fixture_plan(context):
 
     if context["readiness"] == "UNSUPPORTED":
         return {**result, "action": "unsupported"}
+    if assembly and re.search(r"(?:연결\s*부(?:분)?|결합\s*부(?:분)?|끼움\s*구조|고정\s*구멍)(?:을|를)?\s*(?:바꿔|바꾸|넓혀|좁혀|옮겨|키워|변경)", line):
+        return ask("결합부는 고정되어 있습니다. 대신 바꿀 외형 요소를 알려 주세요.")
     if re.search(r"규칙.*무시|셸\s*코드|shell|실행\s*명령|삭제하지|높이지\s*말|바꾸지\s*말|변경하지\s*말", line, re.I):
         return result
     if re.search(r"결정하|채택하", line):
@@ -215,10 +218,16 @@ def fixture_plan(context):
             field, value, "EXPLICIT_USER", field["label"] + " 수정",
             f'{params[key]:g} → {value:g} {field["unit"]}')]}
     options = []
-    if contains(combined, profile.get("demo_ambiguity_aliases", [])):
+    refinement = bool(assembly and re.search(r"이\s*(?:후보|안)(?:에서)?", line) and re.search(r"더|조금", line))
+    base_changes = context.get("changed_base_parameters", [])
+    if refinement and not base_changes:
+        return ask("조금 더 수정할 후보를 먼저 열어 주세요.")
+    if refinement or contains(combined, profile.get("demo_ambiguity_aliases", [])):
         by_id = {f["parameter_id"]: f for f in fields}
         for entry in profile.get("demo_interpretations", []):
             key = entry["parameter_id"]
+            if refinement and key not in base_changes:
+                continue
             if key in locks or (parts_filter and entry["part_id"] not in parts):
                 continue
             field = by_id[key]

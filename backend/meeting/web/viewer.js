@@ -59,6 +59,18 @@ function transformNode(node) {
   ];
 }
 
+function applyTransform(matrix, [x, y, z]) {
+  return [0, 1, 2].map(axis => matrix[axis] * x + matrix[axis + 4] * y +
+    matrix[axis + 8] * z + matrix[axis + 12]);
+}
+
+function mountMatrix(mounting) {
+  const [x, y, z] = mounting.position_m;
+  const [qx, qy, qz, qw] = mounting.rotation_xyzw;
+  // Conjugate Unity's local transform by glTFast's X reflection to use it in glTF space.
+  return transformNode({ translation: [-x, y, z], rotation: [qx, -qy, -qz, qw] });
+}
+
 function cross(a, b) {
   return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 }
@@ -156,7 +168,7 @@ function accessor(spec, index, binaryLength) {
   return { ...item, offset, stride };
 }
 
-function meshList(spec, binaryLength) {
+function meshList(spec, binaryLength, rootTransform) {
   const meshes = [];
   const min = [Infinity, Infinity, Infinity];
   const max = [-Infinity, -Infinity, -Infinity];
@@ -190,7 +202,7 @@ function meshList(spec, binaryLength) {
     }
     for (const child of node.children || []) visit(child, transform, partId, depth + 1);
   };
-  for (const node of spec.scenes[spec.scene || 0].nodes || []) visit(node, identity, null);
+  for (const node of spec.scenes[spec.scene || 0].nodes || []) visit(node, rootTransform, null);
   if (!meshes.length || !min.every(Number.isFinite) || !max.every(Number.isFinite)) {
     throw new Error("모델에 렌더링할 기하가 없습니다.");
   }
@@ -274,9 +286,15 @@ export class ModelViewer {
     this.schedule();
   }
 
-  load(buffer, referenceRadius = 0) {
+  load(buffer, referenceRadius = 0, assembly = null) {
     const { spec, binary } = readGlb(buffer);
-    const { meshes, min, max } = meshList(spec, binary.byteLength);
+    const placement = assembly ? mountMatrix(assembly.mounting) : identity;
+    const { meshes, min, max } = meshList(spec, binary.byteLength, placement);
+    const sourceBounds = assembly?.originalBounds;
+    const frameMin = sourceBounds?.min ?? min;
+    const frameMax = sourceBounds?.max ?? max;
+    const frameCenter = frameMin.map((value, index) => (value + frameMax[index]) / 2);
+    const frameRadius = Math.hypot(...frameMax.map((value, index) => value - frameMin[index])) / 2;
     this.clear();
     const gl = this.gl;
     this.vertexBuffer = gl.createBuffer();
@@ -300,8 +318,8 @@ export class ModelViewer {
       this.meshes.push({ ...mesh, vao, pickId: parts.get(mesh.partId) || 0 });
     }
     gl.bindVertexArray(null);
-    this.center = min.map((value, index) => (value + max[index]) / 2);
-    this.radius = Math.max(.0001, referenceRadius || Math.hypot(...max.map((value, index) => value - min[index])) / 2);
+    this.center = sourceBounds ? applyTransform(placement, frameCenter) : frameCenter;
+    this.radius = Math.max(.0001, referenceRadius || frameRadius);
     this.schedule();
   }
 

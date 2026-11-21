@@ -15,7 +15,7 @@ export async function request(path, { token, body, method, responseType = "json"
   if (url.origin !== location.origin) throw new Error("현재 EDGE 주소의 파일만 열 수 있습니다.");
   const headers = new Headers();
   if (token) headers.set("Authorization", "Bearer " + token);
-  if (body && !(body instanceof FormData)) {
+  if (body && !(body instanceof FormData) && !(body instanceof Blob)) {
     headers.set("Content-Type", "application/json");
     body = JSON.stringify(body);
   }
@@ -58,8 +58,8 @@ export class MeetingConnection {
     return request(path, { token: this.identity.token, responseType, signal });
   }
 
-  upload(path, body) {
-    return request(path, { token: this.identity.token, body });
+  upload(path, body, signal) {
+    return request(path, { token: this.identity.token, body, signal });
   }
 
   accept(snapshot) {
@@ -79,6 +79,11 @@ export class MeetingConnection {
     });
     socket.addEventListener("message", message => {
       const data = JSON.parse(message.data);
+      if (data.type === "snapshot") this.lastEventSeq = data.snapshot.last_seq;
+      if (data.event && data.event.server_seq > (this.lastEventSeq ?? -1)) {
+        this.lastEventSeq = data.event.server_seq;
+        this.handlers.event?.(data.event, data.snapshot);
+      }
       if (data.snapshot) {
         clearTimeout(handshake);
         this.handlers.connection(true, "EDGE 연결됨");

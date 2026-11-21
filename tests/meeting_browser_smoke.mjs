@@ -1,5 +1,6 @@
 // Run against the local fixture EDGE and an isolated Chrome DevTools port.
 // Node 20: node --experimental-websocket tests/meeting_browser_smoke.mjs
+// Set OBSERVER_ASSEMBLY=1 against a fixture EDGE started with the assembly command.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
@@ -7,7 +8,9 @@ import { resolve } from "node:path";
 
 const edge = process.env.OBSERVER_EDGE_URL || "http://127.0.0.1:8788";
 const devtools = process.env.OBSERVER_DEVTOOLS_URL || "http://127.0.0.1:9288";
-const output = resolve(process.env.OBSERVER_REPORT_DIR || "artifacts/meeting/browser-smoke");
+const assemblyMode = process.env.OBSERVER_ASSEMBLY === "1";
+const output = resolve(process.env.OBSERVER_REPORT_DIR ||
+  (assemblyMode ? "artifacts/assembly/browser-smoke" : "artifacts/meeting/browser-smoke"));
 await mkdir(output, { recursive: true });
 const downloads = new Set(await readdir(output));
 
@@ -74,7 +77,7 @@ class DevTools {
 }
 
 async function waitFor(check, note) {
-  const end = Date.now() + 15000;
+  const end = Date.now() + (assemblyMode ? 60000 : 15000);
   while (Date.now() < end) {
     const result = await check();
     if (result) return result;
@@ -106,12 +109,124 @@ const checks = [];
 
 const version = async page => page.wait(currentVersion, "drawn version");
 const textContains = (selector, value) => `document.querySelector(${JSON.stringify(selector)})?.textContent.includes(${JSON.stringify(value)})`;
+async function assemblySmoke(host) {
+  await host.evaluate(`(async () => {
+    const {ModelViewer} = await import('/meeting/viewer.js');
+    const load = ModelViewer.prototype.load;
+    ModelViewer.prototype.load = function (...args) {
+      load.apply(this, args);
+      window.lastModelFrame = { center: this.center, radius: this.radius, mount: args[2].mounting };
+    };
+  })()`);
+  await host.set("#create-name", "조립체 검토");
+  await host.click("#create-submit");
+  const original = await version(host);
+  await host.wait(textContains("#model-heading", "원본 모델"), "original SCAD displayed");
+  assert.match(await host.evaluate("document.querySelector('#model-meta').textContent"), /100 × 34 × 48 mm.*OpenSCAD/);
+  assert.match(await host.evaluate("document.querySelector('#assembly-summary').textContent"), /예제 조립체.*유지하는 결합 조건/s);
+  const frame = await host.evaluate("window.lastModelFrame");
+  assert(frame.radius > .05 && frame.radius < .07);
+  checks.push("actual 100 mm OpenSCAD original shown in one fixed meter-scale viewer frame");
+
+  await host.click("#param-section summary");
+  await host.set("#param-outer_rounding", 5);
+  await host.click("#edit-submit");
+  const manual = await host.wait(`(${currentVersion}) !== ${JSON.stringify(original)} && (${currentVersion})`, "OpenSCAD manual edit");
+  assert.deepEqual(await host.evaluate("window.lastModelFrame"), frame);
+  let snapshot = await host.evaluate(snapshotExpression);
+  assert.equal(snapshot.versions.find(item => item.version_id === manual).parameters.outer_rounding, 5);
+  await host.click("#original-view");
+  await host.wait(`${currentVersion} === ${JSON.stringify(original)}`, "compare against original in same frame");
+  assert.deepEqual(await host.evaluate("window.lastModelFrame"), frame);
+  checks.push("manual outer edit changes the GLB and original toggle preserves mount, framing and scale");
+
+  await host.click("#sample-button");
+  await host.wait("document.querySelectorAll('.candidate-list article').length === 3 && " +
+    "document.querySelector('#round-status').textContent.includes('후보를 열어')", "three generated assembly alternatives");
+  snapshot = await host.evaluate(snapshotExpression);
+  const round = snapshot.rounds.at(-1);
+  assert.equal(round.context.utterance.source_mode, "replay");
+  const candidate = round.candidates[0];
+  assert(round.candidates.every(item => item.status === "valid"));
+  assert.equal(new Set(round.candidates.map(item =>
+    snapshot.versions.find(model => model.version_id === item.version_id).geometry_hash)).size, 3);
+  await host.click(".candidate-list article:first-child button");
+  await host.wait(`${currentVersion} === ${JSON.stringify(candidate.version_id)}`, "first assembly alternative appears");
+  assert.deepEqual(await host.evaluate("window.lastModelFrame"), frame);
+  checks.push("three actual different OpenSCAD alternatives from clearly labelled REPLAY input");
+
+  await host.set("#speech-text", "이 후보에서 모서리 반경을 8mm로 바꿔줘");
+  await host.click("#text-submit");
+  await waitFor(async () => {
+    const current = await host.evaluate(snapshotExpression);
+    return current.rounds.at(-1).round_id !== round.round_id && current.rounds.at(-1).status === "reviewable";
+  }, "follow-up edit on current candidate");
+  snapshot = await host.evaluate(snapshotExpression);
+  const refine = snapshot.rounds.at(-1);
+  assert.equal(refine.edit_base_version_id, candidate.version_id);
+  assert.equal(refine.candidates.length, 1);
+  const refined = refine.candidates[0].version_id;
+  const versionInfo = snapshot.versions.find(item => item.version_id === refined);
+  assert.equal(versionInfo.parameters.outer_rounding, 8);
+  await host.click(".candidate-list article:first-child button");
+  await host.wait(`${currentVersion} === ${JSON.stringify(refined)}`, "refined candidate appears");
+  assert.deepEqual(await host.evaluate("window.lastModelFrame"), frame);
+  checks.push("follow-up edit uses the visible candidate as its OpenSCAD base and never recenters it");
+
+  await host.set("#decision-reason", "외형 모서리가 더 둥근 후보를 선택");
+  await host.click(".decision-form .primary");
+  await host.wait(textContains("#minutes-list", "외형 모서리가 더 둥근 후보를 선택"), "assembly decision recorded");
+  const final = await host.evaluate(snapshotExpression);
+  assert.equal(final.committed_version_id, refined);
+  assert.equal(final.decisions.at(-1).assembly_record.selected_candidate_id, refine.candidates[0].candidate_id);
+  await host.click("#download-zip");
+  const zipFile = "contextpin-" + refined + ".zip";
+  await waitFor(async () => (await readdir(output)).includes(zipFile) && !downloads.has(zipFile), "assembly ZIP downloaded");
+  execFileSync("python3", ["-c", `import hashlib, json, sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    record = json.loads(archive.read("assembly_meeting.json"))
+    assert record["selected_candidate_id"] == sys.argv[2]
+    assert record["selected_model_sha256"] == hashlib.sha256(archive.read("model.stl")).hexdigest()
+    assert json.loads(archive.read("parameters.json"))["outer_rounding"] == 8
+    assert hashlib.sha256(archive.read("object_2.scad")).hexdigest() == sys.argv[3]
+`, resolve(output, zipFile), refine.candidates[0].candidate_id, versionInfo.assets["object_2.scad"].sha256]);
+  checks.push("selected candidate, reason, original SCAD, parameters, and exact STL persisted in ZIP");
+
+  const image = await host.send("Page.captureScreenshot", { format: "png" });
+  await writeFile(resolve(output, "assembly-observer.png"), Buffer.from(image.data, "base64"));
+  assert.deepEqual(host.exceptions, []);
+  return { status: "pass", checks, zipFile };
+}
+
 let host, reviewer, browser;
 try {
   const metadata = await (await fetch(devtools + "/json/version")).json();
   browser = new DevTools(metadata.webSocketDebuggerUrl);
   await browser.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: output });
   host = await tab();
+  if (assemblyMode) {
+    const report = await assemblySmoke(host);
+    await writeFile(resolve(output, "report.json"), JSON.stringify(report, null, 2));
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    await regularSmoke();
+  }
+} catch (error) {
+  for (const [name, page] of [["host", host], ["reviewer", reviewer]]) {
+    if (!page) continue;
+    console.error(name, page.exceptions, await page.evaluate(`({ notice: document.querySelector('#notice')?.textContent,
+      view: document.querySelector('#view-message')?.textContent, status: document.querySelector('#round-status')?.textContent })`));
+    const image = await page.send("Page.captureScreenshot", { format: "png" });
+    await writeFile(resolve(output, name + "-failure.png"), Buffer.from(image.data, "base64"));
+  }
+  throw error;
+} finally {
+  host?.close();
+  reviewer?.close();
+  browser?.close();
+}
+
+async function regularSmoke() {
   await host.set("#create-name", "진행자 검증");
   await host.click("#create-submit");
   const original = await version(host);
@@ -261,17 +376,4 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
   const report = { status: "pass", checks, stlFile, zipFile };
   await writeFile(resolve(output, "report.json"), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
-} catch (error) {
-  for (const [name, page] of [["host", host], ["reviewer", reviewer]]) {
-    if (!page) continue;
-    console.error(name, page.exceptions, await page.evaluate(`({ notice: document.querySelector('#notice')?.textContent,
-      view: document.querySelector('#view-message')?.textContent, status: document.querySelector('#round-status')?.textContent })`));
-    const image = await page.send("Page.captureScreenshot", { format: "png" });
-    await writeFile(resolve(output, name + "-failure.png"), Buffer.from(image.data, "base64"));
-  }
-  throw error;
-} finally {
-  host?.close();
-  reviewer?.close();
-  browser?.close();
 }

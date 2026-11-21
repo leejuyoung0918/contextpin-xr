@@ -28,7 +28,7 @@
     <section class="setup" id="setup">
       <div class="intro">
         <h1>3D 모델 검토 회의</h1>
-        <p>모델을 보며 수정안을 만들고, 팀이 선택한 모델과 결정 이유를 함께 남기세요.</p>
+        <p id="setup-description">모델을 보며 수정안을 만들고, 팀이 선택한 모델과 결정 이유를 함께 남기세요.</p>
       </div>
       <div class="setup-grid">
         <form id="create-form" class="panel setup-card">
@@ -61,6 +61,10 @@
           <span id="capture-status" class="chip"></span>
         </div>
       </div>
+      <section id="assembly-summary" class="assembly-summary" aria-label="조립체 설정" hidden>
+        <div><strong id="assembly-target"></strong><p id="assembly-protection" class="subtle"></p></div>
+        <p class="subtle">PC 미리보기 · 실제 장착 위치와 물체 간섭은 Quest와 실물에서 확인하세요.</p>
+      </section>
       <div class="workspace">
         <div class="left-column">
           <section class="panel viewport-panel" aria-labelledby="model-heading">
@@ -69,7 +73,10 @@
                 <h2 id="model-heading">3D 모델</h2>
                 <p id="model-meta" class="subtle"></p>
               </div>
-              <button id="head-view" class="button small" hidden>확정 모델로</button>
+              <div class="file-actions">
+                <button id="original-view" class="button small" hidden>원본 비교</button>
+                <button id="head-view" class="button small" hidden>확정 모델로</button>
+              </div>
             </div>
             <div class="viewport">
               <canvas id="model-canvas" tabindex="0" aria-label="3D 모델 뷰어. 방향 키로 돌리고 클릭해 부위를 선택합니다."></canvas>
@@ -82,12 +89,14 @@
               </div>
             </div>
             <div class="model-controls">
-              <div>
+              <div id="part-controls">
                 <h3>부위 선택</h3>
                 <div id="parts" class="chips" role="group" aria-label="모델 부위"></div>
               </div>
+              <p id="assembly-view-hint" class="subtle" hidden>모든 모델에 같은 장착 위치·방향·배율을 사용합니다.</p>
               <div id="model-files" class="file-actions" role="group" aria-label="현재 모델 파일" hidden>
                 <button id="download-stl" class="button small">STL</button>
+                <button id="download-scad" class="button small" hidden>SCAD 원본</button>
                 <button id="download-zip" class="button small">버전 내보내기</button>
               </div>
             </div>
@@ -98,7 +107,7 @@
             <img id="reference-image" alt="" hidden>
           </details>
           <details id="param-section" class="panel detail-panel">
-            <summary>치수 직접 수정과 유지 조건</summary>
+            <summary id="parameter-summary">치수 직접 수정과 유지 조건</summary>
             <form id="parameter-form">
               <p id="parameter-status" class="subtle"></p>
               <div id="parameters" class="parameter-grid"></div>
@@ -173,7 +182,7 @@
       <h2 id="invite-heading">참가 코드</h2>
       <form method="dialog"><button class="button small">닫기</button></form>
     </div>
-    <p>검토자가 이 화면의 주소를 열고 아래 코드를 입력하면 같은 모델을 볼 수 있습니다.</p>
+    <p id="invite-hint">검토자가 이 화면의 주소를 열고 아래 코드를 입력하면 같은 모델을 볼 수 있습니다.</p>
     <p id="invite-code" class="join-code"></p>
     <button class="button primary" id="copy-code">코드 복사</button>
   </dialog>
@@ -184,7 +193,7 @@
       <form method="dialog"><button class="button small">취소</button></form>
     </div>
     <p id="mic-consent-note">회의 참가자가 녹음과 발화 전사에 동의했는지 확인해 주세요.</p>
-    <label class="view-link"><input type="checkbox" id="bind-voice-view"> 이 마이크에서 내 발언만 수집하고 내 부위 선택을 연결합니다.</label>
+    <label class="view-link"><input type="checkbox" id="bind-voice-view"> <span id="bind-voice-label">이 마이크에서 내 발언만 수집하고 내 부위 선택을 연결합니다.</span></label>
     <button class="button primary" id="allow-record">동의 확인 후 녹음</button>
   </dialog>
 </body>

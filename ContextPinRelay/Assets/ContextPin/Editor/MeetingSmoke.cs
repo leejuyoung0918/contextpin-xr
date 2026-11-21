@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.UI;
@@ -15,7 +16,7 @@ namespace ContextPin.Editor
         [Serializable]
         sealed class Report
         {
-            public bool success, simulator;
+            public bool success, simulator, assembly, fixedMount, syntheticReference, invalidatedOverlay;
             public string runtime, initialVersion, finalVersion, error;
             public float initialWidthM, finalWidthM, stlWidthMm;
             public int renderViews;
@@ -26,11 +27,14 @@ namespace ContextPin.Editor
         static double deadline;
         static int step, performedFrame;
         static string candidateControl;
+        static Vector3 originalPosition;
+        static Quaternion originalRotation;
+        static Vector3[] originalVertices;
         static readonly List<XRDisplaySubsystem> displays = new List<XRDisplaySubsystem>();
 
         public static void Begin(bool simulator)
         {
-            report = new Report { simulator = simulator };
+            report = new Report { simulator = simulator, assembly = Environment.GetEnvironmentVariable("MEETING_SMOKE_ASSEMBLY") == "1" };
             step = 0;
             performedFrame = -1;
             deadline = EditorApplication.timeSinceStartup + 65;
@@ -54,7 +58,7 @@ namespace ContextPin.Editor
                     report.runtime = OpenXRRuntime.name;
                     if (report.renderViews < 2 || report.runtime.IndexOf("simulat", StringComparison.OrdinalIgnoreCase) < 0) return;
                 }
-                if (RunStep()) { step++; performedFrame = Time.frameCount; }
+                if (report.assembly ? RunAssemblyStep() : RunStep()) { step++; performedFrame = Time.frameCount; }
             }
             catch (Exception error) { Finish(error); }
         }
@@ -116,6 +120,103 @@ namespace ContextPin.Editor
         }
 
         static string Version(GameObject pivot) => pivot.transform.GetChild(0).name.Substring("MeetingModel-".Length);
+
+        static bool RunAssemblyStep()
+        {
+            var pivot = GameObject.Find("MeetingPreviewPivot");
+            switch (step)
+            {
+                case 0: return Click("HomeMeeting");
+                case 1: return Click("MeetingCreate");
+                case 2:
+                    if (pivot == null) return false;
+                    Require(GameObject.Find("MeetingOriginal") != null && GameObject.Find("MeetingScale") == null,
+                        "Assembly mode must preserve meter scale and offer the original model.");
+                    RequireAssemblyMesh(pivot);
+                    report.initialVersion = Version(pivot);
+                    report.initialWidthM = ModelWidth(pivot);
+                    originalPosition = pivot.transform.position;
+                    originalRotation = pivot.transform.rotation;
+                    originalVertices = pivot.GetComponentsInChildren<MeshFilter>().SelectMany(f => f.sharedMesh.vertices).ToArray();
+                    Require(Mathf.Abs(report.initialWidthM - .1f) < .0001f, "OpenSCAD reference width must be 0.1m in Unity.");
+                    return Click("MeetingParameterPlus");
+                case 3: return Click("MeetingApplyEdit");
+                case 4:
+                    var candidate = UnityEngine.Object.FindObjectsByType<RelayHit>(FindObjectsSortMode.None)
+                        .FirstOrDefault(hit => hit.name.StartsWith("MeetingCandidate-", StringComparison.Ordinal));
+                    return candidate != null && Click(candidate.name);
+                case 5:
+                    if (pivot == null || Version(pivot) == report.initialVersion) return false;
+                    RequireAssemblyMesh(pivot);
+                    report.finalVersion = Version(pivot);
+                    report.finalWidthM = ModelWidth(pivot);
+                    report.fixedMount = Vector3.Distance(pivot.transform.position, originalPosition) < .00001f &&
+                        Quaternion.Angle(pivot.transform.rotation, originalRotation) < .001f;
+                    Require(report.fixedMount, "Original and OpenSCAD candidate must use the exact same placement.");
+                    Require(!originalVertices.SequenceEqual(pivot.GetComponentsInChildren<MeshFilter>().SelectMany(f => f.sharedMesh.vertices)),
+                        "The manual parameter edit must change generated exterior geometry.");
+                    if (report.simulator) return Click("AssemblyAlignmentStart");
+                    return Click("MeetingAdopt");
+                case 6:
+                    if (!report.simulator) return Click("MeetingExportStl");
+                    if (!CheckSyntheticAssemblyReference()) return false;
+                    Finish(null);
+                    return true;
+                case 7:
+                    var path = Path.Combine(Application.persistentDataPath, "MeetingExports", report.finalVersion + ".stl");
+                    if (!File.Exists(path)) return false;
+                    report.stlWidthMm = StlWidth(path);
+                    Require(Mathf.Abs(report.stlWidthMm - 100) < .01f && Mathf.Abs(report.stlWidthMm / 1000 - report.finalWidthM) < .0001f,
+                        "Selected STL has the same meter-to-millimeter dimensions as the candidate GLB.");
+                    return Click("MeetingExportZip");
+                case 8:
+                    if (!File.Exists(Path.Combine(Application.persistentDataPath, "MeetingExports", report.finalVersion + ".zip"))) return false;
+                    return Click("MeetingOriginal");
+                case 9:
+                    if (pivot == null || Version(pivot) != report.initialVersion) return false;
+                    RequireAssemblyMesh(pivot);
+                    Finish(null);
+                    return true;
+                default: throw new InvalidOperationException("Unknown assembly smoke step");
+            }
+        }
+
+        static void RequireAssemblyMesh(GameObject pivot)
+        {
+            Require(pivot.transform.localScale == Vector3.one && pivot.transform.GetChild(0).localPosition == Vector3.zero,
+                "Assembly loading must retain the CAD origin at unit scale.");
+            var meshes = pivot.GetComponentsInChildren<MeshRenderer>();
+            Require(meshes.Length > 0 && meshes.All(renderer => renderer.sharedMaterial?.shader?.name == "ContextPin/Assembly Overlay" &&
+                renderer.sharedMaterial.color.a < 1f), "Assembly meshes must render with the translucent overlay material.");
+        }
+
+        static bool CheckSyntheticAssemblyReference()
+        {
+            // No real contact points exist in the simulator. Exercise the registration and
+            // hide-on-invalidation code by providing known test measurements.
+            var pivot = UnityEngine.Object.FindObjectsByType<Transform>(FindObjectsInactive.Include, FindObjectsSortMode.None)
+                .FirstOrDefault(candidate => candidate.name == "MeetingPreviewPivot" && Version(candidate.gameObject) == report.initialVersion);
+            if (pivot == null) return false;
+            var app = UnityEngine.Object.FindAnyObjectByType<RelayApp>();
+            var flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            var recordPoint = typeof(RelayApp).GetMethod("RecordAssemblyPoint", flags);
+            var invalidate = typeof(RelayApp).GetMethod("InvalidateRegisteredPoses", flags);
+            var camera = Camera.main.transform;
+            var origin = camera.position + camera.forward * .8f - Vector3.up * .17f;
+            var rotation = Quaternion.Euler(14, 32, 0);
+            recordPoint.Invoke(app, new object[] { origin });
+            recordPoint.Invoke(app, new object[] { origin + rotation * Vector3.right * .08f });
+            recordPoint.Invoke(app, new object[] { origin + rotation * Vector3.up * .08f });
+            Require(pivot.gameObject.activeInHierarchy && Vector3.Distance(pivot.position, origin) < .00001f &&
+                Quaternion.Angle(pivot.rotation, rotation) < .1f && GameObject.Find("AssemblyAlignmentConfirm") != null,
+                "The synthetic reference must place the original at its recorded origin and axes before confirmation.");
+            report.syntheticReference = true;
+            invalidate.Invoke(app, null);
+            report.invalidatedOverlay = !pivot.gameObject.activeInHierarchy &&
+                GameObject.Find("MeetingDrawingMode")?.GetComponent<Text>()?.text.Contains("추적 끊김") == true;
+            Require(report.invalidatedOverlay, "Invalidated registration must hide the overlay and report the lost state.");
+            return true;
+        }
 
         static float ModelWidth(GameObject pivot)
         {
@@ -195,7 +296,8 @@ namespace ContextPin.Editor
             report.success = error == null;
             report.error = error?.ToString() ?? "";
             var output = Environment.GetEnvironmentVariable("RELAY_WORKSPACE") ?? Path.GetFullPath(Path.Combine(Application.dataPath, "../.."));
-            var file = Path.Combine(output, "artifacts", report.simulator ? "meeting-simulator-report.json" : "meeting-smoke-report.json");
+            var check = report.assembly ? "assembly" : "meeting";
+            var file = Path.Combine(output, "artifacts", $"{check}-{(report.simulator ? "simulator" : "smoke")}-report.json");
             Directory.CreateDirectory(Path.GetDirectoryName(file));
             File.WriteAllText(file, JsonUtility.ToJson(report, true));
             if (error != null) Debug.LogException(error);

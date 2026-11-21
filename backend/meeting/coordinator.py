@@ -226,6 +226,8 @@ class SessionCoordinator:
             profile = geometry.load_profile(identity.profile_id) if identity.profile_id else self.profile
         except geometry.GeometryError as error:
             raise MeetingError(str(error), 404) from error
+        if self.profile.get("assembly") and not profile.get("assembly"):
+            raise MeetingError("조립체 데모에서는 등록된 물체 2를 사용합니다.", 409)
         sid = uid("meeting")
         version_id = uid("model")
         params = geometry.default_parameters(profile)
@@ -249,6 +251,10 @@ class SessionCoordinator:
                      "provider_mode": self.mode, "cloud_state": "online" if self.mode == "live" and self.configured else "offline",
                      "raw_audio_saved": os.environ.get("STORE_RAW_AUDIO", "").lower() == "true",
                      "require_all_ack": self.require_ack, "print_results": []}
+            if profile.get("assembly"):
+                state["assembly"] = profile["assembly"]
+                state["original_version_id"] = version_id
+                state["assembly_latest_request_at"] = 0
             self.db.execute("INSERT INTO sessions VALUES (?,?,?)", (sid, state["join_code"], canonical(state)))
             actor, token = self.participant(state, identity, "host")
             state["host_id"] = actor["participant_id"]
@@ -384,7 +390,7 @@ class SessionCoordinator:
             inherited = version.get("request_constraints", []) if version["version_id"] != state["committed_version_id"] else []
             constraints = self.effective(state, inherited)
             self.check_patch(profile, version["parameters"], ops, constraints)
-            item = self.new_round(state, actor, version, "manual", inherited)
+            item = self.new_round(state, actor, version, "manual", inherited, stamp["captured_session_time_ms"])
             item["status"] = "building"
             item["candidates"] = [self.new_candidate(item, {
                 "title": "수동 치수 수정", "interpretation": "입력한 치수를 적용한 검토 모델입니다.", "operations": ops})]
@@ -459,7 +465,8 @@ class SessionCoordinator:
             item.setdefault("acks", {})[actor] = candidate["candidate_id"]
             return "candidate.acknowledged", {"round_id": item["round_id"], "candidate_id": candidate["candidate_id"]}, None
         if kind == "decide":
-            self.host(state, actor)
+            if not state.get("assembly"):
+                self.host(state, actor)
             return "decision.recorded", self.decide(state, actor, payload), None
         if kind == "cancel":
             item = self.round(state, payload.get("round_id"))
@@ -586,12 +593,32 @@ class SessionCoordinator:
                     "constraints": self.effective(state, item["request_constraints"]),
                     "parameter_changes": geometry.get_diff(state["profile"], self.version(
                         state, item["edit_base_version_id"])["parameters"], selected["parameters"]) if selected else []}
+        if state.get("assembly"):
+            utterance = context.get("utterance")
+            decision["assembly_record"] = {
+                "request_id": context.get("request_id", item["round_id"]),
+                "base_model_id": item["edit_base_version_id"],
+                "source_utterance": utterance["text"] if utterance else None,
+                "source_mode": utterance["source_mode"] if utterance else "manual",
+                "candidates": [self.assembly_candidate_record(state, option) for option in item["candidates"]],
+                "selected_candidate_id": candidate["candidate_id"] if selected else None,
+                "selected_model_file": selected["stl_url"] if selected else None,
+                "selected_model_sha256": selected["assets"]["print.stl"]["sha256"] if selected else None,
+                "preserved_conditions": state["assembly"]["preserved_conditions"],
+                "reason": reason, "timestamp": decision["committed_at"],
+            }
         state["decisions"].append(decision)
         self.finish_round(item, {"commit": "committed", "defer": "deferred", "reject": "dismissed"}[outcome])
         if selected:
             state["committed_version_id"] = selected["version_id"]
             self.supersede(state, exclude=item)
         return decision
+
+    def assembly_candidate_record(self, state, candidate):
+        model = self.version(state, candidate["version_id"]) if candidate["version_id"] else None
+        return {"candidate_id": candidate["candidate_id"], "interpretation": candidate["interpretation"],
+                "parameters": model["parameters"] if model else None, "print_file": model["stl_url"] if model else None,
+                "version_id": candidate["version_id"], "status": candidate["status"]}
 
     @staticmethod
     def effective(state, inherited):
@@ -608,7 +635,15 @@ class SessionCoordinator:
         except geometry.GeometryError as error:
             raise MeetingError(str(error), 422) from error
 
-    def new_round(self, state, actor, version, mode, constraints):
+    def new_round(self, state, actor, version, mode, constraints, requested_at=None):
+        if state.get("assembly"):
+            state["assembly_latest_request_at"] = max(state.get("assembly_latest_request_at", 0),
+                                                     requested_at if requested_at is not None else now_ms())
+            for previous in state["rounds"]:
+                if previous["status"] in RUNNING | {"needs_input"}:
+                    self.finish_round(previous, "superseded", "더 최근의 수정 요청이 들어왔습니다.")
+                    self.emit(state, "round.superseded", {"round_id": previous["round_id"],
+                                                         "revision": previous["revision"]})
         if len(state["rounds"]) >= MAX_ROUNDS:
             raise MeetingError("이 회의의 검토 한도에 도달했습니다. 새 회의를 시작해 주세요.", 429)
         if sum(item["status"] in RUNNING for item in state["rounds"]) >= MAX_BUSY:
@@ -673,12 +708,18 @@ class SessionCoordinator:
                 self.emit(state, "round.superseded", {"round_id": current["round_id"], "revision": current["revision"]})
         if reuse:
             item = reuse
+            if state.get("assembly"):
+                state["assembly_latest_request_at"] = max(state["assembly_latest_request_at"], utterance["end_ms"])
             item.update(status="collecting", revision=item["revision"] + 1, generation_epoch=item["generation_epoch"] + 1,
                         question=None, edit_base_version_id=version["version_id"])
         else:
-            item = self.new_round(state, actor, version, self.mode, [])
+            item = self.new_round(state, actor, version, self.mode, [], utterance["end_ms"])
         context = compile_context(state, utterance, view, version, item["round_id"], item["generation_epoch"], previous)
         context["referenced_candidate_id"] = candidate
+        if state.get("assembly") and version.get("parent_version_id"):
+            parent = self.version(state, version["parent_version_id"])
+            context["changed_base_parameters"] = [key for key, value in version["parameters"].items()
+                                                   if value != parent["parameters"][key]]
         context["reference_missing"] = reference_missing
         context["context_hash"] = digest({"semantic": context["context_hash"], "candidate": candidate,
                                          "missing": context["reference_missing"]})
@@ -784,6 +825,7 @@ class SessionCoordinator:
             options = item["candidates"]
             restore = item.get("restore_parameters")
         used = set()
+        used_geometry = {version.get("surface_sha256", version["geometry_hash"])}
         for option in options:
             with self.transaction():
                 state = self.load(sid)
@@ -805,6 +847,12 @@ class SessionCoordinator:
                 if key in used or params == version["parameters"]:
                     raise MeetingError("이미 제시한 변경과 동일합니다.")
                 result = geometry.build_model(self.models, version_id, profile, params, constraints, cancelled=cancelled)
+                shape = result.get("surface_sha256", result["geometry_hash"])
+                if profile.get("assembly") and shape in used_geometry:
+                    import shutil
+                    shutil.rmtree(self.models / version_id)
+                    raise MeetingError("이 후보의 실제 형상이 이미 표시한 모델과 같습니다.")
+                used_geometry.add(shape)
                 used.add(key)
             except Exception as exc:
                 error = str(exc) if isinstance(exc, (MeetingError, geometry.GeometryError)) else "모델 생성에 실패했습니다."
@@ -923,9 +971,7 @@ class SessionCoordinator:
             self.emit(state, "speech.transcribing", record, actor)
         try:
             result = gateway_request("/v1/transcriptions", {"wav_base64": base64.b64encode(wav).decode()})
-            if result.get("status", "final") != "final":
-                return
-            line = result["transcript"].strip()[:1200]
+            line = result["transcript"].strip()[:1200] if result.get("status", "final") == "final" else ""
         except Exception:
             with self.transaction():
                 state = self.load(sid)
@@ -933,6 +979,9 @@ class SessionCoordinator:
                 self.emit(state, "speech.failed", {**record, "message": "전사에 실패했습니다. 발화를 직접 입력할 수 있습니다."}, actor)
             return
         if not line:
+            with self.transaction():
+                state = self.load(sid)
+                self.emit(state, "speech.failed", {**record, "message": "확정된 발화를 받지 못했습니다. 다시 녹음하거나 입력해 주세요."}, actor)
             return
         job = None
         with self.transaction():
@@ -954,7 +1003,10 @@ class SessionCoordinator:
                 (path / asset).write_bytes(wav)
                 utterance["audio_url"] = f"/v1/sessions/{sid}/media/{asset}"
                 utterance["audio_asset_id"] = asset
-            if state["status"] == "active" and expected_head == state["committed_version_id"]:
+            newer_assembly_request = state.get("assembly") and end < state.get("assembly_latest_request_at", 0)
+            if newer_assembly_request:
+                utterance["processing_notice"] = "더 최근에 제출한 수정 요청을 유지했습니다."
+            elif state["status"] == "active" and expected_head == state["committed_version_id"]:
                 try:
                     pending = next((r for r in reversed(state["rounds"]) if r["status"] == "needs_input"
                                     and r["actor_id"] == view_actor and r.get("context")

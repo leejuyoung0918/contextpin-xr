@@ -59,8 +59,7 @@ try {
       if (!state.loadedVersion || state.switching) return;
       setPart(part);
     },
-    onZoom: zoom => write("viewport-label",
-      zoom === 1 ? "화면 크기에 맞춤" : "화면 배율 " + Math.round(zoom * 100) + "%"),
+    onZoom: paintZoomLabel,
     onLost: () => write("view-message", "3D 그래픽 연결이 끊겼습니다. 화면을 새로고침해 주세요."),
   });
 } catch (error) {
@@ -79,6 +78,15 @@ function deviceCapabilities() {
     audio_sample_rates: [],
     permission_notes: canRecord() ? "녹음 시작 시 마이크 권한 확인" : "마이크에는 localhost 또는 HTTPS가 필요합니다.",
   };
+}
+
+function assembly(snapshot = state.snapshot) {
+  return snapshot?.assembly?.mode === "openscad" ? snapshot.assembly : null;
+}
+
+function paintZoomLabel(zoom) {
+  const base = assembly() ? "원본 기준 배율" : "화면 크기에 맞춤";
+  write("viewport-label", zoom === 1 ? base : "화면 배율 " + Math.round(zoom * 100) + "%");
 }
 
 function currentPerson(snapshot = state.snapshot) {
@@ -125,6 +133,20 @@ function startSession(identity) {
       paint();
     },
     connection: setStatus,
+    event: (event, snapshot) => {
+      if (!assembly(snapshot) || event.actor_id !== state.identity?.participant_id) return;
+      if (event.event_type === "speech.transcribing") state.transcribing = true;
+      if (event.event_type === "speech.failed") {
+        state.transcribing = false;
+        notice(event.payload?.message || "전사에 실패했습니다. 발언을 직접 입력할 수 있습니다.", true);
+      }
+      if (event.event_type === "transcript.finalized" && event.payload?.source_mode === "live_capture") {
+        state.transcribing = false;
+        const round = snapshot.rounds.findLast(item =>
+          item.context?.utterance?.utterance_id === event.payload.utterance_id && item.status !== "superseded");
+        if (round) state.pinnedRound = round.round_id;
+      }
+    },
     pending: delta => {
       state.pending += delta;
       state.pending = Math.max(0, state.pending);
@@ -156,7 +178,7 @@ function exitSession() {
   Object.assign(state, { identity: null, edge: null, snapshot: null, selected: [], target: null, view: null,
     loadedVersion: null, autoPreview: null, pinnedRound: null, viewReports: Promise.resolve(), partial: null,
     mediaUrl: null, switching: false, displayedView: null, lastViewSignature: null,
-    pending: 0, lastUtterance: null, micStarting: false, failedView: false });
+    pending: 0, lastUtterance: null, micStarting: false, transcribing: false, failedView: false });
   storage.clear(storageKey);
   byId("invite-dialog").close();
   byId("mic-dialog").close();
@@ -177,8 +199,13 @@ function exitSession() {
 
 async function checkHealth() {
   try {
-    await request("/healthz");
-    if (!state.edge) setStatus(true, "EDGE 연결됨");
+    const info = await request("/healthz");
+    if (!state.edge) {
+      setStatus(true, "EDGE 연결됨");
+      write("setup-description", info.assembly_demo ?
+        "조립체에서 물체 2의 외형을 바꾸고, 선택한 수정안과 OpenSCAD 원본을 함께 저장하세요." :
+        "모델을 보며 수정안을 만들고, 팀이 선택한 모델과 결정 이유를 함께 남기세요.");
+    }
   } catch {
     if (!state.edge) setStatus(false, "EDGE에 연결할 수 없음");
   }
@@ -321,7 +348,7 @@ function paintParts() {
 }
 
 function setPart(partId) {
-  if (state.switching || !state.snapshot?.profile.capabilities?.can_annotate) return;
+  if (assembly() || state.switching || !state.snapshot?.profile.capabilities?.can_annotate) return;
   const knownPart = state.snapshot.profile.semantic_parts.some(part => part.part_id === partId);
   state.selected = knownPart && !state.selected.includes(partId) ? [partId] : [];
   paintParts();
@@ -359,6 +386,7 @@ function changeView(round, candidate, render = true) {
 }
 
 function stageReferenceRadius(view, version) {
+  if (assembly()) return 0;
   const round = candidateRound(view.roundId) || shownRound();
   if (!round || view.kind === "history") return 0;
   const others = round.candidates.map(candidate => versionById(candidate.version_id));
@@ -367,6 +395,18 @@ function stageReferenceRadius(view, version) {
     const size = item.bounds_m?.size || item.assets?.["preview.glb"]?.bounds_m?.size;
     return Array.isArray(size) ? Math.hypot(...size) / 2 : 0;
   }));
+}
+
+function assemblyPlacement() {
+  const scene = assembly();
+  if (!scene) return null;
+  const original = state.snapshot.versions[0];
+  const bounds = original.bounds_m || original.assets?.["preview.glb"]?.bounds_m;
+  const mount = scene.mounting;
+  if (!mount || !bounds || mount.position_m?.length !== 3 || mount.rotation_xyzw?.length !== 4) {
+    throw new Error("원본 모델의 장착 좌표를 읽을 수 없습니다.");
+  }
+  return { mounting: mount, originalBounds: bounds };
 }
 
 async function checkAsset(buffer, version) {
@@ -412,7 +452,7 @@ function updateModel() {
       if (loadId !== state.loadId) return;
       await checkAsset(buffer, version);
       if (loadId !== state.loadId) return;
-      state.viewer.load(buffer, stageReferenceRadius(view, version));
+      state.viewer.load(buffer, stageReferenceRadius(view, version), assemblyPlacement());
       state.loadedVersion = version;
       state.displayedView = view;
       state.selected = [];
@@ -434,18 +474,27 @@ function paintModelHeader() {
   const version = state.loadedVersion;
   const targetVersion = state.view ? versionById(state.view.versionId) : null;
   const display = version || targetVersion;
-  const label = display?.version_id === state.snapshot.committed_version_id ? "확정 모델"
+  const isOriginal = display?.version_id === state.snapshot.versions[0]?.version_id;
+  const isHead = display?.version_id === state.snapshot.committed_version_id;
+  const scene = assembly();
+  const label = scene && isOriginal ? "원본 모델" : isHead ? "확정 모델"
     : state.displayedView?.kind === "history" ? "회의록 보기" : "검토 모델";
   write("model-heading", label);
   const size = display?.bounds_mm?.size;
   const dimensions = size ? size.map(value => unitValue(value, "")).join(" × ") + " mm (폭 × 높이 × 깊이)" : "";
-  const build = display?.build_mode === "generated" ? "생성된 형상" : display?.build_mode === "fixture" ? "예시 형상" : "";
+  const build = display?.build_mode === "generated" ? (scene ? "OpenSCAD 생성" : "생성된 형상")
+    : display?.build_mode === "fixture" ? "예시 형상" : "";
   write("model-meta", [display ? versionLabel(display.version_id, state.snapshot.versions) : "", dimensions, build]
     .filter(Boolean).join(" · "));
   show("head-view", state.view?.kind !== "head");
+  show("original-view", Boolean(scene && !isOriginal));
+  show("part-controls", !scene);
+  show("assembly-view-hint", Boolean(scene));
   show("model-files", Boolean(version?.stl_url && state.snapshot.profile.capabilities?.can_export_stl));
+  show("download-scad", Boolean(version?.assets?.["object_2.scad"]?.url));
   show("download-zip", Boolean(version?.export_url));
-  show("media-label", Boolean(version) && state.snapshot.status === "active");
+  write("download-zip", scene ? "SCAD · 매개변수 · STL" : "버전 내보내기");
+  show("media-label", !scene && Boolean(version) && state.snapshot.status === "active");
 }
 
 async function download(path, filename) {
@@ -468,6 +517,13 @@ function exportVersion(version) {
   if (version?.export_url) download(version.export_url, "contextpin-" + version.version_id + ".zip");
 }
 
+byId("original-view").addEventListener("click", () => {
+  const original = state.snapshot?.versions[0];
+  if (!original) return;
+  state.target = { kind: "history", versionId: original.version_id };
+  updateModel();
+  paint();
+});
 byId("head-view").addEventListener("click", () => {
   state.target = null;
   if (state.failedView) state.view = null;
@@ -480,6 +536,10 @@ byId("reset-view").addEventListener("click", () => state.viewer?.reset());
 byId("download-stl").addEventListener("click", () => {
   const version = state.loadedVersion;
   if (version?.stl_url) download(version.stl_url, "contextpin-" + version.version_id + ".stl");
+});
+byId("download-scad").addEventListener("click", () => {
+  const asset = state.loadedVersion?.assets?.["object_2.scad"];
+  if (asset?.url) download(asset.url, "object_2.scad");
 });
 byId("download-zip").addEventListener("click", () => exportVersion(state.loadedVersion));
 byId("download-minutes").addEventListener("click", () => {
@@ -500,7 +560,7 @@ function paintParameters(version = state.loadedVersion) {
   destination.replaceChildren();
   byId("edit-submit").disabled = !canEdit;
   const versionName = version ? versionLabel(version.version_id, state.snapshot.versions) : "";
-  write("parameter-status", canEdit ? versionName + "에서 바꿀 치수를 입력하세요." :
+  write("parameter-status", canEdit ? versionName + (assembly() ? "의 변경 가능한 외형 값만 수정할 수 있습니다." : "에서 바꿀 치수를 입력하세요.") :
     versionName ? "현재 모델의 등록 치수" : "모델을 불러오는 중입니다.");
   if (!version) return;
   const head = headModel();
@@ -529,10 +589,10 @@ function paintParameters(version = state.loadedVersion) {
     input.value = version.parameters[parameterId];
     row.append(label, input);
     const measured = profile.measured_properties?.find(property => property.property_id === parameterId);
-    if (measured) row.append(lockInput(measured, head, locks, host));
+    if (measured && !assembly()) row.append(lockInput(measured, head, locks, host));
     destination.append(row);
   }
-  for (const measured of profile.measured_properties || []) {
+  for (const measured of assembly() ? [] : profile.measured_properties || []) {
     if (profile.parameters.some(field => field.parameter_id === measured.property_id)) continue;
     const row = element("div", null, "parameter-row");
     row.append(element("h3", measured.label), lockInput(measured, head, locks, host));
@@ -595,9 +655,27 @@ function paint() {
   const snapshot = state.snapshot;
   if (!snapshot) return;
   const presenter = currentPerson()?.role === "host";
-  write("object-title", snapshot.profile.display_name);
-  write("participants", snapshot.participants.map(person => person.display_name + (person.role === "host" ? " (진행자)" : "")).join(" · "));
+  const scene = assembly();
+  write("object-title", scene?.display_name || snapshot.profile.display_name);
+  write("participants", scene ? "" : snapshot.participants
+    .map(person => person.display_name + (person.role === "host" ? " (진행자)" : "")).join(" · "));
   show("invite-button", presenter && snapshot.status === "active");
+  write("invite-button", scene ? "Quest 연결" : "참가 코드");
+  write("invite-hint", scene ? "Quest의 조립체 검토 메뉴에서 PC EDGE에 연결한 뒤 이 참가 코드를 입력하세요." :
+    "검토자가 이 화면의 주소를 열고 아래 코드를 입력하면 같은 모델을 볼 수 있습니다.");
+  show("assembly-summary", Boolean(scene));
+  if (scene) {
+    const target = scene.object_2?.display_name || snapshot.profile.semantic_parts[0]?.label || "물체 2";
+    write("assembly-target", (scene.is_demo ? "예제 조립체 · " : "") + target + " 외형 수정");
+    const items = (scene.preserved_conditions || []).map(condition => typeof condition === "string"
+      ? condition : condition.label).filter(Boolean);
+    write("assembly-protection", items.length ? "유지하는 결합 조건 · " + items.join(" · ") : "");
+  }
+  write("parameter-summary", scene ? "외형 직접 수정" : "치수 직접 수정과 유지 조건");
+  byId("speech-text").placeholder = scene ?
+    "더 곡선적으로 해보고 싶다면 유지할 결합 조건과 함께 적어 주세요." :
+    "변경하고 싶은 부위와 유지할 조건을 함께 적어보세요.";
+  paintZoomLabel(state.viewer?.zoom ?? 1);
   paintModelHeader();
   paintParts();
   paintParameters();
@@ -606,8 +684,14 @@ function paint() {
   renderRoundsMenu(rounds, round?.round_id, roundShort);
   const candidateId = !state.switching && state.displayedView?.roundId === round?.round_id ?
     state.displayedView?.candidateId : null;
-  renderRound(round, snapshot, { actor: state.identity.participant_id, presenter, candidateId }, {
+  renderRound(round, snapshot, { actor: state.identity.participant_id, presenter: presenter || Boolean(scene), candidateId }, {
     view: changeView, command: runCommand, error: text => notice(text, true),
+    refine: current => {
+      const input = byId("speech-text");
+      if (current && !input.value.trim()) input.value = "이 후보에서 ";
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    },
   });
   renderTranscripts(snapshot, state.partial, loadAudio);
   renderMinutes(snapshot, {
@@ -621,7 +705,8 @@ function paint() {
   renderMedia(snapshot);
   paintStatus(round);
   paintDebug(round);
-  paintPrintResults(snapshot);
+  if (scene) show("print-panel", false);
+  else paintPrintResults(snapshot);
   byId("text-submit").disabled = snapshot.status !== "active" || state.switching;
   reportView();
 }
@@ -636,10 +721,14 @@ function paintStatus(round) {
   source.textContent = fixture ? "REPLAY · 예시 플래너" : live ?
     "LIVE · " + (state.serviceCaps.planner === true && snapshot.cloud_state === "online" ?
       "AI 연결" : "AI 연결 확인 필요") : "직접 수정";
-  const recording = snapshot.capture_state === "recording";
+  const scene = assembly();
+  const local = state.mic && !state.mic.closed;
+  const recording = snapshot.capture_state === "recording" || (scene && local && !state.mic.stopping);
+  const uploading = scene && local && state.mic.stopping;
   const capture = byId("capture-status");
   capture.dataset.tone = recording ? "live" : "";
-  capture.textContent = (recording ? "녹음 중" : "마이크 꺼짐") +
+  capture.textContent = (uploading ? "녹음 전송 중" : recording ? "녹음 중" :
+    state.transcribing ? "발화 전사 중" : "마이크 꺼짐") +
     (snapshot.raw_audio_saved ? " · 원음 저장" : " · 원음 미보관");
   const active = snapshot.status === "active";
   const host = snapshot.audio_host_device_id === deviceId;
@@ -647,12 +736,15 @@ function paintStatus(round) {
   const canSpeech = available && state.serviceCaps.microphone === true;
   show("audio-host", active && !recording && !host && canSpeech);
   show("record-button", active && host && canSpeech);
-  write("record-button", state.mic && !state.mic.closed && !state.mic.stopping ? "녹음 종료" : "녹음 시작");
-  byId("record-button").disabled = Boolean(state.micStarting || (recording && (!state.mic || state.mic.stopping)));
+  write("record-button", uploading ? "음성 보내는 중" : local && !state.mic.stopping ? "녹음 종료" :
+    scene ? "짧게 녹음" : "녹음 시작");
+  byId("record-button").disabled = Boolean(state.micStarting || uploading ||
+    (recording && (!state.mic || state.mic.stopping)));
   write("mic-note", available ?
     (snapshot.provider_mode === "fixture" ? "예시 발화와 직접 입력을 사용할 수 있습니다." :
       (!canSpeech ? "전사 서비스가 연결되면 브라우저 마이크를 사용할 수 있습니다." :
-        (host ? "" : "회의 마이크가 다른 장치에 지정되어 있습니다."))) :
+        (host ? (scene ? "최대 12초 동안 발언을 녹음해 연결된 모델의 수정 요청으로 사용합니다." : "") :
+        "회의 마이크가 다른 장치에 지정되어 있습니다."))) :
     "마이크를 쓰려면 localhost 또는 인증서를 신뢰한 HTTPS에서 화면을 열어 주세요.");
   show("sample-button", active && snapshot.provider_mode === "fixture" && Boolean(snapshot.profile.demo_utterance));
 }
@@ -698,7 +790,8 @@ async function beforeUtterance() {
   try {
     await state.viewReports;
   } catch {
-    throw new Error("선택 부위가 아직 공유되지 않았습니다. 부위를 다시 선택한 뒤 입력하세요.");
+    throw new Error(assembly() ? "현재 모델의 연결을 확인한 뒤 다시 시도하세요." :
+      "선택 부위가 아직 공유되지 않았습니다. 부위를 다시 선택한 뒤 입력하세요.");
   }
   if (!state.edge || !state.loadedVersion || state.switching) throw new Error("모델이 열린 뒤 부위를 확인해 주세요.");
 }
@@ -720,7 +813,7 @@ byId("text-form").addEventListener("submit", async event => {
     if (result?.round_id) {
       if (input.value.trim() === text) input.value = "";
       // Preserve a candidate comparison already opened; other rounds remain selectable.
-      if (state.view?.kind !== "candidate") {
+      if (assembly() || state.view?.kind !== "candidate") {
         state.pinnedRound = result.round_id;
         paint();
       }
@@ -785,6 +878,9 @@ byId("record-button").addEventListener("click", () => {
   } else {
     write("mic-consent-note", "회의 참가자의 녹음·전사 동의를 확인해 주세요. " +
       (state.snapshot.raw_audio_saved ? "현재 EDGE는 원음을 저장합니다." : "전사가 끝나면 원음은 보관하지 않습니다."));
+    byId("bind-voice-view").checked = Boolean(assembly());
+    write("bind-voice-label", assembly() ? "현재 미리보기의 원본 또는 후보를 발언에 연결합니다." :
+      "이 마이크에서 내 발언만 수집하고 내 부위 선택을 연결합니다.");
     byId("mic-dialog").showModal();
   }
 });
@@ -798,10 +894,16 @@ byId("allow-record").addEventListener("click", async () => {
   try {
     await beforeUtterance();
     if (state.edge !== edge) return;
-    state.mic = new MeetingMicrophone(edge, error => {
-      if (state.edge !== edge) return;
-      notice(error, true);
-      paintStatus(shownRound());
+    state.mic = new MeetingMicrophone(edge, {
+      shortClip: Boolean(assembly()),
+      onFailure: error => {
+        if (state.edge !== edge) return;
+        notice(error, true);
+        paintStatus(shownRound());
+      },
+      onClosed: () => {
+        if (state.edge === edge) paintStatus(shownRound());
+      },
     });
     await state.mic.start(deviceId, byId("bind-voice-view").checked);
   } catch (error) {

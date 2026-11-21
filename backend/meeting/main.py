@@ -84,7 +84,8 @@ def create_app(root=None, planner=None):
     @app.get("/healthz")
     def health():
         return {"service": "contextpin-meeting-edge", "status": "ready", "provider_mode": edge().mode,
-                "advertised_url": os.environ.get("EDGE_ADVERTISED_URL"), "observer_url": "/meeting/"}
+                "advertised_url": os.environ.get("EDGE_ADVERTISED_URL"), "observer_url": "/meeting/",
+                "assembly_demo": bool(edge().profile.get("assembly"))}
 
     @app.get("/v1/capabilities")
     def capabilities():
@@ -96,7 +97,7 @@ def create_app(root=None, planner=None):
     @app.get("/v1/profiles")
     @app.get("/v1/object-profiles")
     def profiles():
-        registered = geometry.list_profiles()
+        registered = [edge().profile] if edge().profile.get("assembly") else geometry.list_profiles()
         active = edge().profile["object_id"]
         return {"profiles": sorted(registered, key=lambda p: p["object_id"] != active), "active_profile_id": active}
 
@@ -221,6 +222,9 @@ def create_app(root=None, planner=None):
                 if name == "print.stl":
                     bundle.writestr("model.stl", content)
             bundle.writestr("decision.json", json.dumps(decision, ensure_ascii=False, indent=2))
+            if state.get("assembly"):
+                bundle.writestr("assembly_meeting.json", json.dumps(decision["assembly_record"] if decision else None,
+                                                                   ensure_ascii=False, indent=2))
             bundle.writestr("print_observations.json", json.dumps(observations, ensure_ascii=False, indent=2))
             bundle.writestr("README_PRINT.txt", "\n".join([
                 f"모델 버전 {vid}", f"설계/STL 단위 mm · GLB 단위 m · STL Z-up",
@@ -229,6 +233,8 @@ def create_app(root=None, planner=None):
                 f"model.stl / print.stl SHA-256 {version['assets']['print.stl']['sha256']}",
                 f"원본 SHA-256 {version['source_hash']} · 어댑터 {version['adapter_id']}/{version['adapter_revision']}",
                 "엔진 버전은 engine.json에서 확인할 수 있습니다.",
+                *(["원본 SCAD와 parameters.json의 -D 값을 함께 사용하면 같은 버전을 열 수 있습니다."]
+                  if state.get("assembly") else []),
                 "슬라이서에서 100% 배율과 지지대·재질을 따로 확인하세요.",
                 "형상 검사 결과는 geometry_report.json에 있습니다. 강도·맞음새·실제 출력은 별도 검증입니다.",
                 "이 파일은 슬라이싱 또는 실제 출력이 완료되었음을 기록하지 않습니다."]))

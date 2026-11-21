@@ -26,6 +26,7 @@ ASSET_TYPES = {
     "preview.glb": ("model/gltf-binary", "m", "gltf_y_up"),
     "print.stl": ("model/stl", "mm", "print_z_up"),
     "model.step": ("model/step", "mm", "design_y_up"),
+    "object_2.scad": ("application/octet-stream", "mm", "openscad_z_up"),
     "adapter_source_snapshot.zip": ("application/zip", None, None),
 }
 _slots = threading.BoundedSemaphore(max(1, int(os.getenv("CAD_WORKER_CONCURRENCY", "1"))))
@@ -123,6 +124,9 @@ class ModelAdapter(ABC):
 
 
 def _adapter(object_id):
+    if object_id == "object_2":
+        from .openscad_geometry import adapter
+        return adapter()
     registration = PROFILES.get(object_id)
     if not registration:
         raise GeometryError("등록되지 않은 ObjectProfile입니다.")
@@ -133,6 +137,9 @@ def _adapter(object_id):
 
 def load_profile(object_id=None):
     object_id = object_id or os.getenv("ACTIVE_OBJECT_PROFILE") or next(iter(PROFILES))
+    if object_id == "object_2":
+        from .openscad_geometry import load_profile as open_scad_profile
+        return open_scad_profile()
     return _adapter(object_id).describe()
 
 
@@ -194,6 +201,9 @@ def violated_constraints(profile, measured, constraints=(), *, hard_only=True):
 
 def build_model(root, version_id, profile, params, constraints=(), *, cancelled=None):
     """Generate a version in an isolated process and publish its verified files together."""
+    if profile.get("assembly"):
+        from .openscad_geometry import build_model as build_assembly_model
+        return build_assembly_model(root, version_id, profile, params, constraints, cancelled=cancelled)
     if not isinstance(version_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", version_id):
         raise GeometryError("모델 버전 ID가 유효하지 않습니다.")
     root = Path(root).resolve()
