@@ -1,0 +1,267 @@
+{
+  "display_name": "휴대폰 거치대 설계 검토",
+  "is_demo": true,
+  "object_1": {
+    "display_name": "책상"
+  },
+  "object_2": {
+    "display_name": "휴대폰 거치대"
+  },
+  "mounting": {
+    "position_m": [
+      0,
+      0,
+      0
+    ],
+    "rotation_xyzw": [
+      0,
+      0,
+      0,
+      1
+    ]
+  },
+  "source_file": "phone_stand_parametric.scad",
+  "source_files": [],
+  "preserved_conditions": [
+    "바닥의 중심 및 장착 방향",
+    "지지판의 하단 회전축",
+    "바닥 두께 7mm 및 모서리 반경 8mm"
+  ],
+  "fixed_parameters": {
+    "backrest_thickness": 6,
+    "window_width": 40,
+    "window_length": 72,
+    "window_corner_radius": 7,
+    "base_thickness": 7,
+    "base_corner_radius": 8,
+    "backrest_bottom_y": -37,
+    "lip_width": 88,
+    "lip_front_y": -67,
+    "lip_thickness": 12,
+    "rib_thickness": 9,
+    "rib_center_offset": 32,
+    "rib_rear_y": 57,
+    "rib_attach_fraction": 0.73,
+    "rib_beam_radius": 6.5
+  },
+  "coupling_guard": {
+    "axis": "z",
+    "side": "below",
+    "limit_mm": 2,
+    "tolerance_mm": 0.001,
+    "method": "clipped_convex_prism",
+    "vary_parameters": [
+      "base_width",
+      "base_depth"
+    ]
+  },
+  "profile": {
+    "adapter_id": "openscad_phone_stand",
+    "adapter_revision": 1,
+    "review_layout": "center_latest_side_candidates",
+    "semantic_parts": [
+      {
+        "part_id": "outer_shell",
+        "label": "거치대 상부와 받침 윗면",
+        "aliases": [
+          "등받이",
+          "지지판",
+          "받침턱",
+          "충전 홈",
+          "받침 윗면"
+        ],
+        "selectable_regions": [
+          "outer_shell"
+        ]
+      },
+      {
+        "part_id": "coupling_mount",
+        "label": "책상 접촉면과 바닥 외벽",
+        "aliases": [
+          "접촉면",
+          "바닥 밑면"
+        ],
+        "selectable_regions": [
+          "coupling_mount"
+        ]
+      }
+    ],
+    "parameters": [
+      {
+        "parameter_id": "viewing_angle",
+        "label": "등받이와 책상 사이의 각도",
+        "type": "number",
+        "unit": "deg",
+        "default_value": 65,
+        "min_value": 50,
+        "max_value": 80,
+        "step": 1,
+        "affected_part_ids": [
+          "outer_shell"
+        ],
+        "aliases": [
+          "거치 각도",
+          "등받이 각도",
+          "시야각",
+          "기울기"
+        ]
+      },
+      {
+        "parameter_id": "backrest_length",
+        "label": "기울어진 등받이를 따라 잰 길이",
+        "type": "number",
+        "unit": "mm",
+        "default_value": 132,
+        "min_value": 118,
+        "max_value": 145,
+        "step": 1,
+        "affected_part_ids": [
+          "outer_shell"
+        ],
+        "aliases": [
+          "등받이 길이",
+          "지지판 길이"
+        ]
+      },
+      {
+        "parameter_id": "backrest_width",
+        "label": "등받이의 좌우 너비",
+        "type": "number",
+        "unit": "mm",
+        "default_value": 88,
+        "min_value": 80,
+        "max_value": 96,
+        "step": 1,
+        "affected_part_ids": [
+          "outer_shell"
+        ],
+        "aliases": [
+          "등받이 폭",
+          "등받이 너비"
+        ]
+      },
+      {
+        "parameter_id": "base_width",
+        "label": "받침 바닥의 좌우 너비",
+        "type": "number",
+        "unit": "mm",
+        "default_value": 120,
+        "min_value": 110,
+        "max_value": 130,
+        "step": 1,
+        "affected_part_ids": [
+          "outer_shell"
+        ],
+        "aliases": [
+          "바닥 폭",
+          "받침 너비"
+        ]
+      },
+      {
+        "parameter_id": "base_depth",
+        "label": "받침 바닥의 앞뒤 깊이",
+        "type": "number",
+        "unit": "mm",
+        "default_value": 145,
+        "min_value": 140,
+        "max_value": 155,
+        "step": 1,
+        "affected_part_ids": [
+          "outer_shell"
+        ],
+        "aliases": [
+          "바닥 깊이",
+          "받침 깊이"
+        ]
+      },
+      {
+        "parameter_id": "lip_height",
+        "label": "앞쪽 받침턱의 높이",
+        "type": "number",
+        "unit": "mm",
+        "default_value": 15,
+        "min_value": 10,
+        "max_value": 22,
+        "step": 1,
+        "affected_part_ids": [
+          "outer_shell"
+        ],
+        "aliases": [
+          "턱 높이",
+          "앞턱",
+          "받침턱 높이"
+        ]
+      },
+      {
+        "parameter_id": "charging_notch_width",
+        "label": "받침턱 중앙의 충전 케이블 통로 너비",
+        "type": "number",
+        "unit": "mm",
+        "default_value": 15,
+        "min_value": 8,
+        "max_value": 24,
+        "step": 1,
+        "affected_part_ids": [
+          "outer_shell"
+        ],
+        "aliases": [
+          "충전 홈 너비",
+          "충전 통로 폭",
+          "충전 케이블 홈"
+        ]
+      }
+    ],
+    "edit_capabilities": [
+      {
+        "operation_id": "set_parameter",
+        "meaning": "휴대폰 거치대에 등록된 전체 치수 또는 지지판 각도 변경",
+        "applicable_part_ids": [
+          "outer_shell"
+        ],
+        "input_parameter_schema": {
+          "parameter_id": "parameter_id",
+          "value": "parameter_value"
+        },
+        "allowed_ranges": "parameters",
+        "affected_properties": [
+          "width_mm",
+          "height_mm",
+          "depth_mm"
+        ],
+        "preserved_properties": []
+      }
+    ],
+    "measured_properties": [
+      {
+        "property_id": "width_mm",
+        "axis": 0,
+        "label": "전체 너비",
+        "unit": "mm",
+        "aliases": [
+          "너비",
+          "가로"
+        ]
+      },
+      {
+        "property_id": "height_mm",
+        "axis": 1,
+        "label": "전체 높이",
+        "unit": "mm",
+        "aliases": [
+          "높이"
+        ]
+      },
+      {
+        "property_id": "depth_mm",
+        "axis": 2,
+        "label": "전체 깊이",
+        "unit": "mm",
+        "aliases": [
+          "깊이",
+          "세로"
+        ]
+      }
+    ],
+    "default_constraints": []
+  }
+}

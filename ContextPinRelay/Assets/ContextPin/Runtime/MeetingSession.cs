@@ -68,7 +68,7 @@ namespace ContextPin
             var address = Environment.GetEnvironmentVariable("MEETING_EDGE_URL");
             if (!string.IsNullOrWhiteSpace(address)) return address;
 #endif
-            return meetingServerOverride ?? RelayEvidence.LoadConfig().meetingServerUrl ?? "http://127.0.0.1:8789";
+            return meetingServerOverride ?? RelayEvidence.LoadConfig().meetingServerUrl ?? RelayConfig.DefaultMeetingServerUrl;
         }
 
         void BeginExampleMeeting()

@@ -240,6 +240,7 @@ namespace ContextPin
         Transform latestAnchor, a4DisplayRoot;
         string latestPaperError;
         static readonly Color PaperLatestColor = new Color32(64, 216, 210, 215);
+        bool CenteredPaperLatest => TextValue(meetingSnapshot?["profile"], "review_layout") == "center_latest_side_candidates";
 
         void PositionA4Latest()
         {
@@ -256,7 +257,7 @@ namespace ContextPin
                 latestAnchor.SetParent(a4DisplayRoot, false);
             }
             var paper = A4CornerCount == 4 ? a4Size : reviewTableSize;
-            var besideProduct = new Vector3(paper.x * .25f, 0, -paper.y * .25f);
+            var besideProduct = CenteredPaperLatest ? Vector3.zero : new Vector3(paper.x * .25f, 0, -paper.y * .25f);
             latestAnchor.SetPositionAndRotation(WorkspaceOrigin + assemblyReference.rotation * besideProduct, WorkspaceRotation);
             var model = meetingModel.transform;
             var previousError = latestPaperError;
@@ -269,7 +270,9 @@ namespace ContextPin
                 {
                     var physical = SurfaceFootprint(surface, original, WorkspaceOrigin, WorkspaceRotation, 0);
                     var latest = SurfaceFootprint(surface, meetingAssetBounds, latestAnchor.position, latestAnchor.rotation, 0);
-                    if (!FitsPaper(physical, paper) || !FitsPaper(latest, paper) || !SpaceBetween(physical, latest))
+                    if (CenteredPaperLatest && !FitsPaper(latest, paper))
+                        latestPaperError = "현재 모델의 바닥이 A4 경계를 벗어납니다.";
+                    else if (!CenteredPaperLatest && (!FitsPaper(physical, paper) || !FitsPaper(latest, paper) || !SpaceBetween(physical, latest)))
                         latestPaperError = "앞오른쪽 고정 자리에서 중앙 실물과 Latest 사이의 여백을 확보할 수 없습니다.";
                 }
                 if (latestPaperError != null)

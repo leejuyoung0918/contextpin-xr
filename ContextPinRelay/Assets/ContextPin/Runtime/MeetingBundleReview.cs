@@ -11,7 +11,9 @@ namespace ContextPin
         const float BundleGap = .010f;
         const float BundleLift = .002f;
         const float PaperEdge = .002f;
-        const string PaperTooSmall = "실물과 Latest의 자리를 비우면 이 A4 뒤쪽에 후보를 실제 크기로 놓을 공간이 부족합니다.";
+        const float SideReviewMargin = .15f; // Desk space on each side confirmed with the paper preview.
+        string PaperTooSmall => CenteredPaperLatest ? "종이와 좌우 15cm의 비교 영역에 후보를 실제 크기로 놓을 수 없습니다." :
+            "실물과 Latest의 자리를 비우면 이 A4 뒤쪽에 후보를 실제 크기로 놓을 공간이 부족합니다.";
 
         readonly MeetingModelSlot[] bundleSlots = { new MeetingModelSlot(), new MeetingModelSlot() };
         GameObject bundleContainer;
@@ -180,17 +182,22 @@ namespace ContextPin
         bool TryBundlePositions(Rect physical, Rect latest, out Vector3 first, out Vector3 second)
         {
             first = second = default;
-            if (!FitsPaper(physical, reviewTableSize) || !FitsPaper(latest, reviewTableSize) || !SpaceBetween(physical, latest)) return false;
+            bool sideGallery = CenteredPaperLatest;
+            if (!FitsPaper(latest, reviewTableSize) ||
+                !sideGallery && (!FitsPaper(physical, reviewTableSize) || !SpaceBetween(physical, latest))) return false;
+            var gallerySize = sideGallery ? reviewTableSize + new Vector2(SideReviewMargin * 2, 0) : reviewTableSize;
             Rect previous = default;
             for (int i = 0; i < bundleCandidates.Length; i++)
             {
                 var b = bundleSlots[i].Bounds;
                 var footprint = FootprintOnTable(b, reviewTable.position, latestAnchor.rotation, 0);
                 // The key identifies the physical place even when only B passed validation.
-                var center = new Vector2(bundleSlots[i].BundleKey == "A" ? -.25f : .25f, .25f) * reviewTableSize;
+                float sign = bundleSlots[i].BundleKey == "A" ? -1 : 1;
+                var center = sideGallery ? new Vector2(sign * ((reviewTableSize.x + footprint.width) * .5f + BundleGap), 0) :
+                    new Vector2(sign * .25f, .25f) * reviewTableSize;
                 var offset = center - footprint.center;
                 footprint.center = center;
-                if (!FitsPaper(footprint, reviewTableSize) || !SpaceBetween(footprint, physical) ||
+                if (!FitsPaper(footprint, gallerySize) || !sideGallery && !SpaceBetween(footprint, physical) ||
                     !SpaceBetween(footprint, latest) || i > 0 && !SpaceBetween(footprint, previous)) return false;
                 var position = new Vector3(offset.x, BundleLift - b.min.y, offset.y);
                 if (i == 0) first = position; else second = position;

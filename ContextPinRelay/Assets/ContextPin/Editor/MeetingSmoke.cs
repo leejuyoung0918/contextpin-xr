@@ -42,6 +42,7 @@ namespace ContextPin.Editor
             public bool captureHadNoNewRound, frozenTargetVerified, savedBundleMediaVerified;
             public bool bundleModelsPlaced, bundleRaySelection, bundleCommit, secondEditRound;
             public bool fixedPaperSlots, singleCandidateKeptSlot, oversizedCandidateRejected;
+            public bool phoneStandCentered;
             public float minimumPaperClearanceMm;
             public string[] selectedCandidates, committedVersions;
             public string[] captureFiles;
@@ -58,7 +59,7 @@ namespace ContextPin.Editor
         }
 
         static Report report;
-        static bool checkSavedDesign, checkLiveAlignment, checkExplicit, checkCaptureOnly, checkCandidateSet, checkBundleAdoption;
+        static bool checkSavedDesign, checkLiveAlignment, checkExplicit, checkCaptureOnly, checkCandidateSet, checkBundleAdoption, checkPhoneStand;
         static Pose reviewTablePose;
         static string savedSessionId;
         static double deadline;
@@ -79,6 +80,7 @@ namespace ContextPin.Editor
             checkLiveAlignment = Environment.GetEnvironmentVariable("MEETING_LIVE_ALIGNMENT_SMOKE") == "1";
             checkExplicit = Environment.GetEnvironmentVariable("MEETING_EXPLICIT_SMOKE") == "1";
             checkBundleAdoption = Environment.GetEnvironmentVariable("MEETING_CANDIDATE_COMMIT_SMOKE") == "1";
+            checkPhoneStand = checkBundleAdoption && Environment.GetEnvironmentVariable("MEETING_PHONE_STAND_SMOKE") == "1";
             checkCandidateSet = checkBundleAdoption || Environment.GetEnvironmentVariable("MEETING_CANDIDATE_SET_SMOKE") == "1";
             checkCaptureOnly = checkCandidateSet || Environment.GetEnvironmentVariable("MEETING_CAPTURE_ONLY_SMOKE") == "1";
             UnityEditor.SessionState.SetBool("ContextPinLegacyCandidateWorkflow", checkExplicit && !checkCaptureOnly);

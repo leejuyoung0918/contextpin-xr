@@ -21,7 +21,9 @@ sys.path.insert(0, str(ROOT))
 from backend.meeting.bundle_provider import configure_pc
 
 PROJECT=ROOT/'ContextPinRelay'
-APK=ROOT/'builds/ContextPinXR.apk'
+APK=ROOT/'builds/ContextPinPhoneStand.apk'
+ANDROID_PACKAGE='org.contextpin.relay.phonestand'
+LIVE_PORT=8791
 XR_SIM=Path('/Applications/MetaXRSimulator.app/Contents/Resources/MetaXRSimulator')
 
 def simulator_env():
@@ -121,15 +123,17 @@ def assembly_environment(replay=False, candidate_ai='local'):
         configure_pc(env, candidate_ai)
     except ValueError as error:
         raise SystemExit(str(error)) from error
-    port = int(env.get('EDGE_PORT', '8788' if replay else '8789'))
-    default_config = 'assembly.json' if replay else 'corner-assembly.json'
-    config = Path(env.get('OPENSCAD_ASSEMBLY_CONFIG', ROOT / 'artifacts/cable-demo' / default_config)).expanduser()
+    port = int(env.get('EDGE_PORT', 8788 if replay else LIVE_PORT))
+    default_config = ROOT / ('artifacts/cable-demo/assembly.json' if replay else 'backend/meeting/phone_stand/assembly.json')
+    config = Path(env.get('OPENSCAD_ASSEMBLY_CONFIG', default_config)).expanduser()
     if not config.is_file():
         if env.get('OPENSCAD_ASSEMBLY_CONFIG'):
             raise SystemExit(f'OPENSCAD_ASSEMBLY_CONFIG에서 지정한 파일을 찾을 수 없습니다. {config}')
-        raise SystemExit('먼저 python3 scripts/prepare_cable_demo.py --upper-corners /path/to/cable_organizer.scad 를 실행하세요.')
+        if replay:
+            raise SystemExit('먼저 python3 scripts/prepare_cable_demo.py --upper-corners backend/meeting/openscad_sample/cable_organizer.scad 를 실행하세요.')
+        raise SystemExit(f'휴대폰 거치대 CAD 설정을 찾을 수 없습니다. {config}')
     env['AI_MODE'] = 'replay' if replay else 'live'
-    env.setdefault('EDGE_DATA_DIR', str(ROOT / 'artifacts' / ('cable-demo/live' if replay else 'cable-live')))
+    env.setdefault('EDGE_DATA_DIR', str(ROOT / 'artifacts' / ('cable-demo/live' if replay else 'phone-stand-live')))
     env.setdefault('CAD_JOB_TIMEOUT_SECONDS', '70')
     if replay:
         env.setdefault('CABLE_DEMO_PREWARM', '1')
@@ -157,7 +161,7 @@ def command_output(command, timeout=3):
         return None
 
 def doctor():
-    port=8789
+    port=int(meeting_env().get('EDGE_PORT', LIVE_PORT))
     manifest=json.loads((PROJECT/'Packages/manifest.json').read_text())
     packages={name:version for name,version in manifest['dependencies'].items()
               if name.startswith(('com.meta.xr.', 'com.unity.xr.', 'com.unity.inputsystem'))}
@@ -307,10 +311,11 @@ def main():
     elif args.command=='deploy':
         command=device(args.serial)
         if not APK.exists():editor('BuildQuest',True)
-        run(command+['reverse','tcp:8789','tcp:8789'])
+        port=int(meeting_env().get('EDGE_PORT', LIVE_PORT))
+        run(command+['reverse',f'tcp:{LIVE_PORT}',f'tcp:{port}'])
         run(command+['reverse','tcp:8788','tcp:8788'])
         run(command+['install','-r',APK])
-        launch_args = ['shell', 'am', 'start', '-W', '-n', 'org.contextpin.relay/com.unity3d.player.UnityPlayerActivity']
+        launch_args = ['shell', 'am', 'start', '-W', '-n', ANDROID_PACKAGE+'/com.unity3d.player.UnityPlayerActivity']
         if args.open_saved_design:
             launch_args.extend(['--ez', 'contextpin_open_saved_design', 'true'])
         elif args.join_code:
@@ -320,8 +325,8 @@ def main():
         print(launch.stdout, end='')
         if 'LaunchCheckRequires6dofDialogActivity' in launch.stdout:
             print('설치 완료. 헤드셋을 착용하고 기기의 위치 추적 안내를 확인하세요.')
-        elif 'Activity: org.contextpin.relay/' in launch.stdout:
-            print('ContextPin XR 설치·실행 완료.')
+        elif f'Activity: {ANDROID_PACKAGE}/' in launch.stdout:
+            print('ContextPin XR Phone Stand 설치·실행 완료.')
         else:
             print('설치 완료. 헤드셋에 앱 실행을 요청했습니다.')
     elif args.command == 'open-saved-review':

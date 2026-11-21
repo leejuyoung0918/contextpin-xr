@@ -11,7 +11,8 @@ namespace ContextPin
     [Serializable] public sealed class RelayConfig
     {
         public string replayServerUrl="http://127.0.0.1:8788";
-        public string meetingServerUrl="http://127.0.0.1:8789";
+        public const string DefaultMeetingServerUrl="http://127.0.0.1:8791";
+        public string meetingServerUrl=DefaultMeetingServerUrl;
         public float meetingPanelWidthMeters=.32f, meetingPanelDistanceMeters=1.15f, meetingPanelTextScale=1f;
     }
     public sealed class RelayEvidence : MonoBehaviour

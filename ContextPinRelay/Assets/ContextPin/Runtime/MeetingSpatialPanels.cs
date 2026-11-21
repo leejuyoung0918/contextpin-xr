@@ -238,7 +238,7 @@ namespace ContextPin
                 RoundBox("LatestColor", content, x, y + height / 2 - 5, 10, 10, swatch, 5);
                 x += 16;
                 width -= 16;
-                if (meetingModel != null && meetingModel.activeInHierarchy) caption += " · 채택본 / 앞오른쪽";
+                if (meetingModel != null && meetingModel.activeInHierarchy) caption += " · 채택본 / " + PaperLatestPosition;
             }
             Label("ExplicitLatest", content, x, y, width, height, caption, SpatialFont(16), SpatialMuted);
         }
@@ -312,7 +312,8 @@ namespace ContextPin
                     string values = string.Join(", ", Values(candidate, "parameter_diff").Select(change =>
                         $"{TextValue(change, "label")} {change["before"]} → {change["after"]} {TextValue(change, "unit")}".TrimEnd()));
                     string key = TextValue(candidate, "candidate_key");
-                    string side = key == "A" ? "뒤왼쪽" : "뒤오른쪽";
+                    string side = CenteredPaperLatest ? (key == "A" ? "종이 왼쪽" : "종이 오른쪽") :
+                        (key == "A" ? "뒤왼쪽" : "뒤오른쪽");
                     rows.Add(($"후보 {key} · {side} · {values}\n{TextValue(candidate, "interpretation")}", key));
                 }
             }
@@ -523,8 +524,9 @@ namespace ContextPin
             if (A4PreviewActive)
             {
                 BoldLabel("SpatialAlignmentStatus", content, 12, 67, 396, 38,
-                    "실물을 A4 중앙에 놓으세요", SpatialFont(23), HeaderText);
+                    CenteredPaperLatest ? "A4 중앙의 거치대를 확인하세요" : "실물을 A4 중앙에 놓으세요", SpatialFont(23), HeaderText);
                 Label("SpatialAlignmentHint", content, 12, 108, 396, 75,
+                    CenteredPaperLatest ? latestPaperError ?? "중앙에 Latest가 놓입니다. 종이 양옆 15cm가 같은 높이의 빈 책상인지 확인하세요." :
                     CandidateGenerationMeeting ? latestPaperError ?? "중앙은 실물 자리입니다. 앞오른쪽 청록색 Latest의 바닥과 방향을 확인하세요." :
                         "오른쪽 앞의 가상 CAD와 중앙 실물의 바닥과 방향을 확인한 뒤 트리거로 배치를 확인하세요.",
                     SpatialFont(19), HeaderText);

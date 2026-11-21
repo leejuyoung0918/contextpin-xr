@@ -28,6 +28,36 @@ class OpenScadGeometryTests(unittest.TestCase):
         environment.start()
         self.addCleanup(environment.stop)
 
+    def test_phone_stand_exports_keep_the_base_origin_and_exact_scale(self):
+        config = Path(__file__).with_name("phone_stand") / "assembly.json"
+        with patch.dict(os.environ, {"OPENSCAD_ASSEMBLY_CONFIG": str(config)}):
+            profile = load_profile()
+            defaults = default_parameters(profile)
+            self.assertEqual(profile["review_layout"], "center_latest_side_candidates")
+            self.assertEqual(set(defaults), {"viewing_angle", "backrest_length", "backrest_width",
+                                             "base_width", "base_depth", "lip_height", "charging_notch_width"})
+            hashes = set()
+            for variant, values in [("original", defaults),
+                                    ("small", {f["parameter_id"]: f["min_value"] for f in profile["parameters"]}),
+                                    ("large", {f["parameter_id"]: f["max_value"] for f in profile["parameters"]})]:
+                with self.subTest(variant=variant):
+                    version = build_model(self.root, variant, profile, values)
+                    folder = self.root / variant
+                    mesh = version["bounds_m"]
+                    self.assertEqual(mesh["min"][1], 0)
+                    for axis, parameter in ((0, "base_width"), (2, "base_depth")):
+                        half_extent_m = values[parameter] / 2000
+                        self.assertAlmostEqual(mesh["min"][axis], -half_extent_m, places=6)
+                        self.assertAlmostEqual(mesh["max"][axis], half_extent_m, places=6)
+                    if variant == "original":
+                        self.assertAlmostEqual(mesh["max"][1], 0.1279005, places=6)
+                        self.assertEqual((folder / "candidate.scad").read_bytes(),
+                                         config.with_name("phone_stand_parametric.scad").read_bytes())
+                    manifest = json.loads((folder / "build.json").read_text())
+                    self.assertEqual(manifest["preview"]["from_stl_sha256"], digest((folder / "print.stl").read_bytes()))
+                    hashes.add(manifest["stl"]["surface_sha256"])
+            self.assertEqual(len(hashes), 3)
+
     def test_local_corner_removes_only_material_above_the_selected_outer_corner(self):
         location = Path(__file__).resolve().parents[2] / "artifacts/cable-demo"
         if not (location/"corner-assembly.json").is_file():

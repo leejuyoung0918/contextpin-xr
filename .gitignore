@@ -6,6 +6,8 @@ ContextPinRelay/[Uu]ser[Ss]ettings/
 ContextPinRelay/*.csproj
 ContextPinRelay/*.sln*
 ContextPinRelay/Assets/Resources/relay-local.json*
+ContextPinRelay/Assets/Resources/DevAgentSettings.asset
+ContextPinRelay/Assets/Resources/DevAgentSettings.asset.meta
 builds/
 artifacts/
 output/pdf/

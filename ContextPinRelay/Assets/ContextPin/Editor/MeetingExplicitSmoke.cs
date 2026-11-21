@@ -142,7 +142,7 @@ namespace ContextPin.Editor
         {
             var bounds = ModelBoundsInPose(model, measuredPaper);
             var midpoint = new Vector3(bounds.center.x, bounds.min.y, bounds.center.z);
-            var expected = new Vector3(explicitAreaSize.x * .25f, 0, -explicitAreaSize.y * .25f);
+            var expected = checkPhoneStand ? Vector3.zero : new Vector3(explicitAreaSize.x * .25f, 0, -explicitAreaSize.y * .25f);
             Require(Vector3.Distance(midpoint, expected) < .001f && Quaternion.Angle(model.transform.rotation, measuredPaper.rotation) < .1f,
                 $"Latest must sit on the sheet at {expected}, measured {midpoint}.");
             RequireAssemblyMesh(model);

@@ -65,7 +65,7 @@ namespace ContextPin
         {
             if (!string.IsNullOrEmpty(bundleReviewError)) return bundleReviewError;
             if (bundleCommitPending) return "선택한 후보를 서버에 저장하는 중…";
-            if (bundleCommitTarget != null) return "채택한 파일을 확인해 앞오른쪽 Latest를 교체하는 중…";
+            if (bundleCommitTarget != null) return $"채택한 파일을 확인해 {PaperLatestPosition} Latest를 교체하는 중…";
             switch (TextValue(set, "status"))
             {
                 case "generating": case "building": return "수정안 생성 중…";
@@ -73,7 +73,7 @@ namespace ContextPin
                     int count = Values(set, "candidates").Count();
                     if (count == 0) return "사용할 수 있는 수정안 파일이 없습니다.";
                     return $"수정안 {count}개 준비됨 · " + (BundleOnPaper ? "채택할 모형을 가리키고 오른쪽 A" : "모형 불러오는 중…");
-                case "committed": return "앞오른쪽 Latest에 반영됐습니다. 다음 수정 요청을 시작할 수 있습니다.";
+                case "committed": return $"{PaperLatestPosition} Latest에 반영됐습니다. 다음 수정 요청을 시작할 수 있습니다.";
                 case "unsupported_specific_region": return "선택한 부위의 개별 수정 미지원";
                 case "clarification": return "수정 요청 확인 필요";
                 case "superseded": return "후속 요청이 접수됐습니다.";
@@ -83,7 +83,7 @@ namespace ContextPin
         }
         bool BundleLatestReady => A4ReviewSurfaceActive && meetingModel != null && meetingModel.activeInHierarchy &&
             meetingLoadedVersion == AssemblyAdoptedId;
-        const string PaperLatestPosition = "종이 오른쪽 앞";
+        string PaperLatestPosition => CenteredPaperLatest ? "종이 중앙" : "종이 오른쪽 앞";
         bool OtherDeviceRecordsDesign => !string.IsNullOrEmpty(TextValue(meetingSnapshot?["meeting"], "audio_device_id")) &&
             TextValue(meetingSnapshot["meeting"], "audio_device_id") != meetingDeviceId;
         bool ExplicitDesignReady => ExplicitDesignMeeting && AssemblySessionStatus == "recording" && !assemblyStopping &&

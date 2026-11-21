@@ -50,6 +50,10 @@ namespace ContextPin.Editor
                         "The new host must use EditRequestBundle.");
                     Require(((string)state["meeting"]["candidate_generation"] == "ai") == checkCandidateSet,
                         "The server must acknowledge the requested candidate generation mode.");
+                    if (checkPhoneStand)
+                        Require((string)state["profile"]["adapter_id"] == "openscad_phone_stand" &&
+                            (string)state["profile"]["review_layout"] == "center_latest_side_candidates",
+                            "The phone stand smoke requires the registered phone stand profile and its centred Latest layout.");
                     previewsRequested = previewsReceived = 0;
                     previewError = null;
                     captureCorner = 0;
@@ -202,11 +206,11 @@ namespace ContextPin.Editor
                 {
                     var pose = latest.transform;
                     var localBounds = ModelBoundsInPose(latest, new Pose(pose.position, pose.rotation));
-                    // The outer top corner and the center groove's sloped entrance are different surfaces
-                    // of the registered cable STL. Raycast the actual collider at each requested location.
                     var target = index == 0
                         ? new Vector3(localBounds.max.x - .0018f, localBounds.max.y, localBounds.min.z + .0018f)
                         : new Vector3(localBounds.center.x + .0026f, localBounds.max.y, localBounds.center.z);
+                    // Ray onto the side rail (beside the window), then the retaining lip (beside its notch).
+                    if (checkPhoneStand) target = new Vector3(.030f, localBounds.max.y, index == 0 ? .008f : .062f);
                     capturedAim = new Ray(pose.TransformPoint(target) + pose.up * .09f, -pose.up);
                 }
                 else if (!TryRightRay(latest, out capturedAim)) return false;
@@ -217,6 +221,9 @@ namespace ContextPin.Editor
                 capturedPoint = hit.point;
                 capturedNormal = hit.normal;
                 capturedLocal = latest.transform.InverseTransformPoint(hit.point);
+                if (checkPhoneStand)
+                    Require(index == 0 ? capturedLocal.y > .045f : Mathf.Abs(capturedLocal.y - .022f) < .001f,
+                        "The ray must hit the inclined rail, then the top of the retaining lip.");
                 // The fixture moves the actual XR controller and gaze away after the button frame.
                 buttonEarliestMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 Require(PressRightWithLeftActive(app, capturedAim), "A must freeze a tracked Latest hit: " + ExplicitUi("ExplicitDesignStatus"));

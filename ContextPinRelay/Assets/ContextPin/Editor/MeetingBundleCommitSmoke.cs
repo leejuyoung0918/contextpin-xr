@@ -23,14 +23,19 @@ namespace ContextPin.Editor
             Require(string.IsNullOrEmpty(error), error);
             var container = GameObject.Find("CandidateContainer");
             if (container == null) return false;
-            var occupied = new List<Bounds> { PhysicalProductBounds(state) };
+            // For the phone stand the paper centre is the virtual Latest itself.
+            var occupied = new List<Bounds>();
+            if (!checkPhoneStand) occupied.Add(PhysicalProductBounds(state));
             void CheckClearance(Bounds bounds)
             {
-                var gap = occupied.Min(o => Mathf.Max(o.min.x - bounds.max.x, bounds.min.x - o.max.x,
-                    o.min.z - bounds.max.z, bounds.min.z - o.max.z));
-                Require(gap >= .0098f, $"Insufficient space between the physical product, Latest and candidates: {gap * 1000:F2} mm.");
-                report.minimumPaperClearanceMm = report.minimumPaperClearanceMm == 0 ? gap * 1000 :
-                    Mathf.Min(report.minimumPaperClearanceMm, gap * 1000);
+                if (occupied.Count > 0)
+                {
+                    var gap = occupied.Min(o => Mathf.Max(o.min.x - bounds.max.x, bounds.min.x - o.max.x,
+                        o.min.z - bounds.max.z, bounds.min.z - o.max.z));
+                    Require(gap >= .0098f, $"Insufficient space between visible model footprints: {gap * 1000:F2} mm.");
+                    report.minimumPaperClearanceMm = report.minimumPaperClearanceMm == 0 ? gap * 1000 :
+                        Mathf.Min(report.minimumPaperClearanceMm, gap * 1000);
+                }
                 occupied.Add(bounds);
             }
             CheckClearance(ModelBoundsInPose(latest, measuredPaper));
@@ -44,21 +49,29 @@ namespace ContextPin.Editor
                 CheckPhysicalScale(state, root.gameObject);
                 var b = ModelBoundsInPose(root.gameObject, measuredPaper);
                 Require(Quaternion.Angle(root.rotation, latest.transform.rotation) < .1f && Vector3.Distance(root.lossyScale, Vector3.one) < .0001f &&
-                        b.min.y >= -.0002f && b.min.y < .005f && Mathf.Max(-b.min.x, b.max.x) <= explicitAreaSize.x * .5f &&
-                        Mathf.Max(-b.min.z, b.max.z) <= explicitAreaSize.y * .5f, "Each candidate must be full size, upright and inside the measured A4.");
+                        b.min.y >= -.0002f && b.min.y < .005f, "Each candidate must be full size, upright and on the tabletop.");
                 var expectedCenter = new Vector2(key == "A" ? -.25f : .25f, .25f) * explicitAreaSize;
+                if (checkPhoneStand)
+                {
+                    var side = explicitAreaSize.x * .5f + .010f + b.extents.x;
+                    expectedCenter = new Vector2(key == "A" ? -side : side, 0);
+                }
+                else Require(Mathf.Max(-b.min.x, b.max.x) <= explicitAreaSize.x * .5f &&
+                    Mathf.Max(-b.min.z, b.max.z) <= explicitAreaSize.y * .5f, "Cable previews must fit within the paper.");
                 Require(Vector2.Distance(new Vector2(b.center.x, b.center.z), expectedCenter) < .001f,
-                    $"Candidate {key} must stay at its dedicated rear slot {expectedCenter} across edits.");
+                    $"Candidate {key} must stay at its dedicated slot {expectedCenter} across edits.");
                 CheckClearance(b);
                 var diff = (JArray)row["parameter_diff"];
-                Require(diff.Count > 0 && diff.All(v => index == 0
-                    ? (string)v["parameter_id"] == "upper_corner_nx_py" && (double)v["after"] > (double)v["before"]
-                    : (string)v["parameter_id"] == "slot_pitch" && (double)v["after"] < (double)v["before"]),
-                    $"Candidate must apply the requested edit at the pointed region: {diff}");
+                var (parameter, direction) = index == 0 ? ("upper_corner_nx_py", 1) : ("slot_pitch", -1);
+                if (checkPhoneStand)
+                    (parameter, direction) = index == 0 ? ("viewing_angle", -1) : ("lip_height", 1);
+                Require(diff.Count == 1 && (string)diff[0]["parameter_id"] == parameter &&
+                    Math.Sign((double)diff[0]["after"] - (double)diff[0]["before"]) == direction,
+                    $"Expected a change to {parameter} at the pointed region, got {diff}.");
             }
             Require(rows.Select(c => (string)c["stl"]["sha256"]).Distinct().Count() == 2 &&
                     rows.Select(c => (string)c["model_asset"]["sha256"]).Distinct().Count() == 2, "The two geometries must differ.");
-            if (!report.singleCandidateKeptSlot) CheckLimitedGallery(app, occupied[0], occupied[1], rows);
+            if (!checkPhoneStand && !report.singleCandidateKeptSlot) CheckLimitedGallery(app, occupied[0], occupied[1], rows);
             CheckSideLatest(state, latest, Version(latest), true);
             report.fixedPaperSlots = report.bundleModelsPlaced = report.a4FullSizeGallery = true;
             return true;
@@ -111,11 +124,11 @@ namespace ContextPin.Editor
                 if (root == null) return false;
                 var row = set["candidates"].Single(c => (string)c["candidate_key"] == key);
                 var bounds = ModelBoundsInPose(root, measuredPaper);
-                // Cast onto the solid end of the cable organizer, away from its through-slots.
+                // The solid base extends beyond the grooves or backrest.
                 var local = new Vector3(bounds.max.x - .005f, bounds.max.y + .025f, bounds.center.z);
                 var ray = new Ray(measuredPaper.position + measuredPaper.rotation * local, measuredPaper.rotation * Vector3.down);
                 Physics.SyncTransforms();
-                Require(Physics.Raycast(ray, out var hit, .1f) && hit.transform.IsChildOf(root.transform), "Candidate ray must hit its mesh.");
+                Require(Physics.Raycast(ray, out var hit, bounds.size.y + .04f) && hit.transform.IsChildOf(root.transform), "Candidate ray must hit its mesh.");
                 Require(PressRightWithLeftActive(app, ray, selectCandidate: true), "The right A edge must select the pointed candidate.");
                 Require(Version(latest) == (string)set["base_version_id"], "A local button press cannot replace Latest ahead of commit.");
                 report.selectedCandidates[index] = (string)row["candidate_id"];
@@ -146,8 +159,12 @@ namespace ContextPin.Editor
                 else
                 {
                     var previous = state["versions"].Single(v => (string)v["version_id"] == report.middleVersion);
-                    Require(model["parameters"]["upper_corner_nx_py"].Value<double>() == previous["parameters"]["upper_corner_nx_py"].Value<double>() &&
-                            model["parameters"]["upper_corner_nx_py"].Value<double>() > 0, "V3 must preserve the V2 corner.");
+                    string kept = checkPhoneStand ? "viewing_angle" : "upper_corner_nx_py";
+                    var original = state["versions"].First;
+                    Require(JToken.DeepEquals(model["parameters"][kept], previous["parameters"][kept]) &&
+                            !JToken.DeepEquals(model["parameters"][kept], original["parameters"][kept]),
+                            $"V3 must retain the V2 edit to {kept}.");
+                    report.phoneStandCentered = checkPhoneStand;
                     report.finalVersion = id;
                     report.secondEditRound = report.v3Replaced = true;
                 }

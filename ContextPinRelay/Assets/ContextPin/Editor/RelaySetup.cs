@@ -35,10 +35,10 @@ namespace ContextPin.Editor
             Directory.CreateDirectory("Assets/ContextPin/Generated");
             AssetDatabase.Refresh();
             PlayerSettings.companyName="ContextPin";
-            PlayerSettings.productName="ContextPin XR";
+            PlayerSettings.productName="ContextPin XR Phone Stand";
             PlayerSettings.bundleVersion="0.3.0";
             PlayerSettings.Android.bundleVersionCode=3;
-            PlayerSettings.SetApplicationIdentifier(NamedBuildTarget.Android,"org.contextpin.relay");
+            PlayerSettings.SetApplicationIdentifier(NamedBuildTarget.Android,"org.contextpin.relay.phonestand");
             PlayerSettings.SetScriptingBackend(NamedBuildTarget.Android,ScriptingImplementation.IL2CPP);
             PlayerSettings.Android.targetArchitectures=AndroidArchitecture.ARM64;
             PlayerSettings.Android.minSdkVersion=AndroidSdkVersions.AndroidApiLevel32;
@@ -163,7 +163,7 @@ namespace ContextPin.Editor
         {
             Configure();
             var root=Environment.GetEnvironmentVariable("RELAY_WORKSPACE")??Path.GetFullPath(Path.Combine(Application.dataPath,"../.."));
-            var output=Path.Combine(root,"builds/ContextPinXR.apk");
+            var output=Path.Combine(root,"builds/ContextPinPhoneStand.apk");
             Directory.CreateDirectory(Path.GetDirectoryName(output));
             var report=BuildPipeline.BuildPlayer(new BuildPlayerOptions{scenes=new[]{ScenePath},locationPathName=output,target=BuildTarget.Android,
                 options=BuildOptions.Development});
