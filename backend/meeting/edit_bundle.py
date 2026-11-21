@@ -31,6 +31,21 @@ def check_window(state, actor, request_id, base, revision):
         raise MeetingError("수정 요청의 최종 전사를 기다려 주세요.", 409)
 
 
+def command_utterances(state, bundle):
+    """Resolve the exact final revisions selected when the command window closed."""
+    refs = bundle["transcript"]["utterance_refs"]
+    ids = [ref["utterance_id"] for ref in refs]
+    if not ids or bundle.get("command_utterance_ids", ids) != ids or len(ids) != len(set(ids)):
+        raise MeetingError("수정 요청의 발화 ID가 전사 근거와 다릅니다.", 409)
+    timeline = {(u["utterance_id"], u["revision"]): u for u in state["utterances"]
+                if u.get("is_final", u.get("status") == "final")
+                and u.get("meeting_id", u.get("session_id")) == bundle["meeting_id"]}
+    try:
+        return [timeline[(ref["utterance_id"], ref["revision"])] for ref in refs]
+    except KeyError as error:
+        raise MeetingError("회의 전사에서 수정 요청의 확정 발화를 찾을 수 없습니다.", 409) from error
+
+
 def vector(data, key, size=3, normalized=False):
     v = data.get(key)
     if (not isinstance(v, list) or len(v) != size
@@ -97,8 +112,19 @@ def save(coordinator, state, actor, client_id, base_id, ref, lines, fingerprint)
     image = next(i for i in state["images"] if i["evidence_id"] == ref["image_id"])
     image_file = "target.jpg" if image["mime"] == "image/jpeg" else "target.png"
     source = "manual" if window.get("manual_utterance_id") else "stt"
-    if any(line["source_mode"] != ("manual" if source == "manual" else "live_capture") for line in lines):
-        raise MeetingError("최종 발화의 입력 출처를 확인하세요.", 409)
+    if source == "manual":
+        if len(lines) != 1 or lines[0]["source_mode"] != "manual" or lines[0]["utterance_id"] != window["manual_utterance_id"]:
+            raise MeetingError("직접 입력한 수정 요청의 발화를 확인하세요.", 409)
+    else:
+        recorded = {u["utterance_id"] for u in state["utterances"] if u["source_mode"] == "live_capture"
+                    and u.get("audio_stream_id") == window["stream_id"] and u["is_final"]}
+        for line in lines:
+            if line["utterance_id"] not in recorded:
+                raise MeetingError("수정 요청의 원본 전사를 확인하세요.", 409)
+            if line["source_mode"] == "manual" and line.get("prior_revision"):
+                source = "corrected"
+            elif line["source_mode"] != "live_capture":
+                raise MeetingError("최종 발화의 입력 출처를 확인하세요.", 409)
     transcript = {"utterance_id": lines[0]["utterance_id"], "text": " ".join(line["text"] for line in lines),
                   "utterance_refs": [{k: line[k] for k in ("utterance_id", "revision")} for line in lines],
                   "source": source,
@@ -122,10 +148,12 @@ def save(coordinator, state, actor, client_id, base_id, ref, lines, fingerprint)
         if hashlib.sha256(pixels).hexdigest() != image["sha256"]:
             raise MeetingError("업로드한 이미지와 저장된 이미지가 다릅니다.", 409)
         bundle = {"request_id": client_id, "meeting_id": state["session_id"], "participant_id": actor,
-                  "base_version_id": base_id, "created_at": iso_time(max(line["received_at"] for line in lines)), "transcript": transcript,
+                  "base_version_id": base_id, "created_at": iso_time(max(line["received_at"] for line in lines)),
+                  "command_utterance_ids": [line["utterance_id"] for line in lines],
+                  "command_text": transcript["text"], "transcript": transcript,
                   "selection": selection, "visual_evidence": visual, "fingerprint": fingerprint,
                   "audio": {"file": "command.wav", "sha256": hashlib.sha256(audio).hexdigest(),
-                            "sample_rate": capture["sample_rate"], "start_sample": window["start_sample"],
+                            "stream_id": window["stream_id"], "sample_rate": capture["sample_rate"], "start_sample": window["start_sample"],
                             "end_sample": window["end_sample"]}}
         if folder.exists():
             if json.loads((folder / "request.json").read_text()) != bundle:

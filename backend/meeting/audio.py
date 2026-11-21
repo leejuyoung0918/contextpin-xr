@@ -68,8 +68,10 @@ class AudioCapture:
         self.open_design_range = None
         self.command_pcm = None
         self.design_marks = {}
+        self.speech_overlap = body.get("edit_marker_alignment") == "speech_overlap"
         self.actor, self.device = coordinator.audio_start(self.sid, body["token"], stream_id, body.get("device_id"),
-                                                          continuous=True, sample_rate=self.rate)
+                                                          continuous=True, sample_rate=self.rate,
+                                                          marker_overlap=self.speech_overlap, clock_origin_ms=self.started_ms)
         self.view_actor = self.actor if body.get("bind_view") is True else None
 
     def add(self, frame):
@@ -80,10 +82,10 @@ class AudioCapture:
             raise MeetingError("프레임의 샘플 크기가 다릅니다.")
         if seq < self.expected_sequence or sample < self.expected_sample:
             return
-        if sample > self.rate * 60 * 60:
-            raise MeetingError("한 시간 이상 녹음하려면 새 녹음을 시작해 주세요.")
+        if sample - self.expected_sample > self.rate * 3600:
+            raise MeetingError("PCM 시각이 마지막 수신 샘플에서 한 시간 넘게 건너뛰었습니다.")
         if not self.opened:
-            self.coordinator.audio_opened(self.sid, self.stream_id, self.started_ms)
+            self.started_ms = self.coordinator.audio_opened(self.sid, self.stream_id, self.started_ms)
             self.opened = True
         if seq != self.expected_sequence or sample != self.expected_sample:
             self.finish(self.expected_sample)
@@ -142,11 +144,20 @@ class AudioCapture:
                 or (edge == "start" and self.open_design_range is not None)
                 or (edge == "end" and self.open_design_range != rid)):
             raise MeetingError("발언 경계와 서버가 수신한 PCM 샘플이 일치하지 않습니다.", 409)
-        self.finish(sample)
-        self.preroll.clear()
+        sequences = self.segment
+        if self.speech_overlap:
+            # A marker has no effect on the VAD or its STT input. An utterance still
+            # in progress when the window closes may finish with later PCM or EOS.
+            if edge == "end" and self.start_sample is not None and self.last_voiced > self.design_marks[(rid, "start")]:
+                sequences += 1
+        else:
+            # Older headsets require an immediate result without sending trailing PCM.
+            self.finish(sample)
+            self.preroll.clear()
+            sequences = self.segment
         wav = encode_wav(self.command_pcm, self.rate) if edge == "end" and self.command_pcm else None
         bundle = self.coordinator.audio_boundary(self.sid, self.stream_id, self.actor, rid, edge == "start",
-                                                  sample, self.segment, wav, packet.get("base_version_id"))
+                                                  sample, sequences, wav, packet.get("base_version_id"))
         self.command_pcm = bytearray() if bundle and edge == "start" else None
         self.open_design_range = rid if edge == "start" else None
         self.design_marks[key] = sample
@@ -160,7 +171,7 @@ class AudioCapture:
         pcm = self.buffer[:2 * (end_sample - start_sample)]
         self.start_sample = None
         self.buffer.clear()
-        if self.last_voiced - start_sample < self.rate // 8:
+        if not self.speech_overlap and self.last_voiced - start_sample < self.rate // 8:
             return
         start = self.started_ms + round(start_sample / self.rate * 1000)
         end = self.started_ms + round(end_sample / self.rate * 1000)
@@ -174,14 +185,22 @@ class AudioCapture:
         self.segment += 1
         stamp["start_sample"] = start_sample
         stamp["end_sample"] = start_sample + len(pcm) // 2
+        stamp["voice_start_sample"] = self.first_voiced
+        stamp["voice_end_sample"] = min(self.last_voiced, stamp["end_sample"])
         stamp["voice_onset_ms"] = self.started_ms + round(self.first_voiced / self.rate * 1000)
+        wav = encode_wav(pcm, self.rate)
+        if self.speech_overlap:
+            start = stamp["voice_onset_ms"]
+            end = self.started_ms + round(stamp["voice_end_sample"] / self.rate * 1000)
+            if stamp["voice_end_sample"] - self.first_voiced < self.rate // 8:
+                # Close the reserved sequence even when the only sound was a short click.
+                wav = None
         self.coordinator.audio_submit(self.sid, self.stream_id, self.segment, start, end,
-                                      encode_wav(pcm, self.rate), self.actor, self.device, self.view_actor,
-                                      stamp)
+                                      wav, self.actor, self.device, self.view_actor, stamp)
 
-    def close(self, eos=False, last_sequence=None):
+    def close(self, eos=False, last_sequence=None, pending_request=None, pending_selection=None):
         try:
             self.finish()
         finally:
             self.coordinator.audio_stop(self.sid, self.stream_id, eos, self.expected_sample,
-                                        last_sequence, self.expected_sequence - 1)
+                                        last_sequence, self.expected_sequence - 1, pending_request, pending_selection)

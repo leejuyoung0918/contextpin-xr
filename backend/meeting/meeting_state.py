@@ -48,6 +48,10 @@ def snapshot_fields(state):
                "discussion_evidence": topic.get("utterance_id")}
     result = {"design_submit_mode": state["meeting"].get("design_submit_mode", "automatic"),
               "adopted_version_id": state["committed_version_id"], "design_status": design_status, "summary": summary}
+    result["meeting_audio_status"] = state["capture_state"]
+    if "transcript_status" in state["meeting"]:
+        result["transcript_status"] = state["meeting"]["transcript_status"]
+        result["transcript_finalized_at"] = state["meeting"].get("transcript_finalized_at")
     if state.get("meeting", {}).get("design_submit_mode") == "explicit":
         from . import speech_ranges
         result["design_speech_ranges"] = speech_ranges.snapshot(state)
@@ -172,6 +176,7 @@ def apply(coordinator, state, actor, kind, payload, stamp):
             raise MeetingError("회의 시작 시 선택한 후보 생성 방식을 유지하세요.", 409)
         if output == "bundle":
             meeting["edit_request_output"] = output
+            meeting.setdefault("transcript_status", "open")
             state.setdefault("edit_requests", {})
         if generation == "ai":
             meeting["candidate_generation"] = generation
@@ -194,6 +199,8 @@ def apply(coordinator, state, actor, kind, payload, stamp):
             return "meeting.end_repeated", {"session_status": status}, None
         meeting["started_at"] = meeting["started_at"] or now_ms()
         meeting["ended_at"] = now_ms()
+        if "transcript_status" in meeting:
+            meeting["transcript_status"] = "finalizing"
         meeting["capture_requested"] = False
         meeting["adopted_version_id"] = state["committed_version_id"]
         meeting["adopted_revision"] = state["adopted_revision"]

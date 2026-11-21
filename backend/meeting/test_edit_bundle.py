@@ -10,7 +10,7 @@ import wave
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-from . import planner
+from . import meeting_result, planner
 from .contracts import MeetingError
 from .test_explicit_design import ExplicitDesignCase, PNG
 
@@ -31,6 +31,7 @@ class EditBundleCase(ExplicitDesignCase):
         monotonic_ms = time.monotonic_ns() // 1_000_000
         self.edges = {}
         self.socket.send_json({"session_id": self.sid, "token": self.headers["Authorization"].split()[1],
+                               **getattr(self, "stream_options", {}),
                                "device_id": "a", "actual_sample_rate_hz": 8000, "channels": 1,
                                "codec": "pcm_s16le", "stream_start_sample_index": 0,
                                "stream_start_source_monotonic_ms": monotonic_ms,
@@ -123,6 +124,8 @@ class EditBundleCase(ExplicitDesignCase):
         self.assertEqual(meta["transcript"], transcript)
         self.assertEqual((transcript["text"], transcript["source"], transcript["utterance_refs"]),
                          (text, source, request["utterance_refs"]))
+        self.assertEqual(meta["command_utterance_ids"], [u["utterance_id"] for u in request["utterance_refs"]])
+        self.assertEqual(meta["command_text"], text)
         self.assertNotIn("edit_request_draft", self.snapshot()["design_speech_ranges"][key])
         for edge in ("start", "end"):
             index = self.edges[key][edge]
@@ -147,6 +150,33 @@ class EditBundleCase(ExplicitDesignCase):
         return folder
 
 class EditBundleTests(EditBundleCase):
+    def test_final_transcript_survives_cad_export_failure_and_retry(self):
+        self.transcript = "전체 크기는 괜찮은 것 같아."
+        self.send_pcm(3500, 2000)
+        self.socket.send_json({"type": "stop", "last_sequence": self.sequence - 1})
+        self.assertEqual(self.socket.receive_json()["type"], "stopped")
+
+        def wait_status(status):
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if self.snapshot()["session_status"] == status:
+                    return
+                time.sleep(.03)
+            self.fail("Meeting did not reach " + status)
+
+        with patch.object(meeting_result, "save_model", side_effect=OSError("CAD export unavailable")):
+            self.command("meeting_end", {})
+            wait_status("save_error")
+        folder = self.edge.root / "results" / self.sid / "transcript"
+        raw = (folder / "transcript.jsonl").read_bytes()
+        row = json.loads(raw)
+        self.assertEqual((row["meeting_id"], row["text"], row["is_final"]), (self.sid, self.transcript, True))
+        self.assertIn(self.transcript, (folder / "transcript.txt").read_text())
+        self.assertEqual(self.snapshot()["meeting"]["transcript_status"], "finalized")
+        self.command("meeting_retry", {})
+        wait_status("completed")
+        self.assertEqual((folder / "transcript.jsonl").read_bytes(), raw)
+
     def test_pcm_selection_and_immutable_files(self):
         key = "first-edit"
         # A long silent lead-in is fully recorded even when STT only receives the VAD pre-roll.

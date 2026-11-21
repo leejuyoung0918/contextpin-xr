@@ -121,7 +121,19 @@ namespace ContextPin
                 meetingRefreshAt = Time.unscaledTime + 2;
                 Draw();
                 if (!join && startOnCreate && SpatialAssembly && TextValue(snapshot, "provider_mode") == "live")
-                    StartSpatialMeetingWithMode(true);
+                {
+                    if (PreparingLivePaperMeeting)
+                    {
+#if UNITY_ANDROID && !UNITY_EDITOR
+                        // Android's permission dialog suspends tracking. Ask before the first
+                        // paper point; only the subsequent meeting-start press opens the mic.
+                        if (!UnityEngine.Android.Permission.HasUserAuthorizedPermission(UnityEngine.Android.Permission.Microphone))
+                            UnityEngine.Android.Permission.RequestUserPermission(UnityEngine.Android.Permission.Microphone);
+#endif
+                        BeginA4Alignment();
+                    }
+                    else StartSpatialMeetingWithMode(true);
+                }
             }));
         }
 

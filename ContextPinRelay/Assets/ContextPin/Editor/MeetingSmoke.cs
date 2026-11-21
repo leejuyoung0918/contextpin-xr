@@ -43,6 +43,10 @@ namespace ContextPin.Editor
             public bool bundleModelsPlaced, bundleRaySelection, bundleCommit, secondEditRound;
             public bool fixedPaperSlots, singleCandidateKeptSlot, oversizedCandidateRejected;
             public bool phoneStandCentered;
+            public bool microphoneWaitedForStart, silentCommandRejected, spokeWhileGenerating, spokeWhileComparing;
+            public bool singleTimelineVerified, tailFinalized;
+            public int microphoneOpenCount;
+            public string[] timelineTexts;
             public float minimumPaperClearanceMm;
             public string[] selectedCandidates, committedVersions;
             public string[] captureFiles;

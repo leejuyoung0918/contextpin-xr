@@ -505,7 +505,8 @@ def create_app(root=None, planner=None, *, local_inference=False):
                         last_sequence = packet.get("last_sequence")
                         if last_sequence is not None and (type(last_sequence) is not int or last_sequence < -1):
                             raise MeetingError("마지막 오디오 번호가 올바르지 않습니다.")
-                        await run_in_threadpool(capture.close, True, last_sequence)
+                        await run_in_threadpool(capture.close, True, last_sequence,
+                                                packet.get("pending_edit_request_id"), packet.get("pending_selection_id"))
                         capture = None
                         await socket.send_json({"type": "stopped"})
                         await socket.close()

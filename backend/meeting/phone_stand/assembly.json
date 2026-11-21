@@ -1,5 +1,6 @@
 {
   "display_name": "휴대폰 거치대 설계 검토",
+  "speech_vocabulary": "휴대폰 거치대, 앞쪽 받침턱, 등받이, 충전 통로",
   "is_demo": true,
   "object_1": {
     "display_name": "책상"

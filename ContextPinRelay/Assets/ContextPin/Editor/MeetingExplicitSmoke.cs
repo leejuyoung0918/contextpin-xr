@@ -45,6 +45,7 @@ namespace ContextPin.Editor
             followupSamples = string.IsNullOrEmpty(next) ? speechSamples : ReadSpeechFixture(next);
             Func<AudioClip> open = () =>
             {
+                report.microphoneOpenCount++;
                 micStart = Time.realtimeSinceStartupAsDouble;
                 inputRing = AudioClip.Create("Clocked simulator microphone", PcmRate * 190, 1, PcmRate, false);
                 return inputRing;

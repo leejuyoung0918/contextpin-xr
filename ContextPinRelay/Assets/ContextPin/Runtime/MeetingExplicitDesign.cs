@@ -124,9 +124,9 @@ namespace ContextPin
                 if (p?.Conflict == true || p?.Sending == true || bundleCommitPending || bundleCommitTarget != null) return "";
                 if (p?.Speech == DesignSpeech.Marking) return CaptureBundleMeeting ? "발언 완료" : "수정 발언 완료";
                 if (!ExplicitDesignReady || OtherDeviceRecordsDesign || assemblyStarting || assemblyAudio == null || assemblyCaptureFrozen) return "";
-                if (p == null || p.RoundId != null || p.BundleSaved) return CaptureBundleMeeting ? "수정 요청 시작" : "수정 발언 시작";
-                if (p.Speech == DesignSpeech.Failed) return "발언 다시 녹음";
-                return p.Speech == DesignSpeech.Waiting ? (CaptureBundleMeeting ? "수정 요청 시작" : "수정 발언 시작") : "";
+                if (p == null || p.RoundId != null || p.BundleSaved) return CaptureBundleMeeting ? "수정 요청" : "수정 발언 시작";
+                if (p.Speech == DesignSpeech.Failed) return "다시 말하기";
+                return p.Speech == DesignSpeech.Waiting ? (CaptureBundleMeeting ? "수정 요청" : "수정 발언 시작") : "";
             }
         }
 
@@ -152,7 +152,7 @@ namespace ContextPin
                     if (p?.Speech == DesignSpeech.Failed) return p.SpeechError + " PC에서 이 구간의 전사를 입력할 수도 있습니다.";
                     if (!A4ReviewSurfaceActive) return "메뉴의 ‘A4로 다시 맞추기’로 종이 위치를 확인하세요.";
                     if (ExplicitDesignReady && !OtherDeviceRecordsDesign && assemblyAudio != null)
-                        return "‘수정 요청 시작’ 후 발언 원음과 A를 누른 순간의 이미지를 저장합니다.";
+                        return "회의 전체를 전사 중입니다. 수정할 내용은 ‘수정 요청’을 누르고 말하세요.";
                 }
                 if (p?.RoundId != null)
                 {
@@ -501,8 +501,11 @@ namespace ContextPin
                 if (p.RangeId != null && meetingSnapshot["design_speech_ranges"]?[p.RangeId] is JObject range)
                 {
                     var status = TextValue(range, "status");
+                    bool corrected = CaptureBundleMeeting && p.Speech == DesignSpeech.Final && p.Submission == null &&
+                        status == "final" && range["utterances"] is JArray rows &&
+                        !rows.Select(row => row.Value<int>("revision")).SequenceEqual(p.UtteranceRefs.Select(row => row.Value<int>("revision")));
                     if (p.Speech == DesignSpeech.Transcribing || p.Speech == DesignSpeech.Marking && status == "failed" ||
-                        CaptureBundleMeeting && p.Speech == DesignSpeech.Failed && status == "final")
+                        CaptureBundleMeeting && p.Speech == DesignSpeech.Failed && status == "final" || corrected)
                         ReceiveExplicitSpeech(p, range);
                 }
             }
@@ -543,7 +546,7 @@ namespace ContextPin
         {
             var state = TextValue(range, "status");
             if (state is "recording" or "transcribing") return;
-            if (state == "final" && range["utterances"] is JArray items && items.Count > 0 && items.Count <= 5 &&
+            if (state == "final" && range["utterances"] is JArray items && items.Count > 0 && (CaptureBundleMeeting || items.Count <= 5) &&
                 items.All(item => !string.IsNullOrEmpty(TextValue(item,"utterance_id")) && item["revision"]?.Type == JTokenType.Integer &&
                     !string.IsNullOrWhiteSpace(TextValue(item,"text"))))
             {
@@ -559,9 +562,8 @@ namespace ContextPin
             else
             {
                 p.Speech = DesignSpeech.Failed;
-                p.SpeechError = TextValue(range, "error");
-                if (string.IsNullOrWhiteSpace(p.SpeechError)) p.SpeechError = state == "no_speech" ?
-                    "지정한 구간이 무음입니다. 수정 발언을 다시 녹음하세요." : "전사 실패 · 발화 다섯 개 이내로 다시 녹음하세요.";
+                p.SpeechError = state == "no_speech" ? "수정 요청을 듣지 못했습니다. 다시 말해 주세요." : TextValue(range, "error");
+                if (string.IsNullOrWhiteSpace(p.SpeechError)) p.SpeechError = "지정한 구간을 전사하지 못했습니다. 다시 말해 주세요.";
             }
             explicitHint = null;
             Draw();

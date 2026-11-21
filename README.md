@@ -36,6 +36,13 @@ python3 scripts/relay.py deploy
 
 현장 서버는 한국어 발화를 로컬 faster-whisper로 전사하고 선택 이미지, Ray, 현재 CAD와 확정 발화를 로컬 Qwen3-VL로 해석합니다. 외부 AI API 사용료는 0원입니다. 로컬 모델 오류는 회의 화면에 표시됩니다. 팀 키가 있는 PC에서도 이 경로는 로컬 모델만 호출합니다. [후보 해석 구현](backend/meeting/bundle_interpretation.py)
 
+## 회의 녹음과 수정 요청
+
+1. Quest에서 **회의 준비**를 누르고 A4의 네 점을 지정합니다. 중앙의 거치대 V1과 방향을 확인한 뒤 **배치 확인 → 회의 시작**을 누릅니다. 이때부터 같은 마이크 스트림으로 일반 대화와 후보 검토 중의 대화를 전사합니다.
+2. **수정 요청**을 누르고 바꿀 부분을 말한 뒤 **발언 완료**를 누릅니다. 앞뒤 무음을 제외한 발화 길이의 절반 이상이 두 버튼 사이에 들어오면 그 확정 발화 전체가 명령이 됩니다. 한 요청에 여러 문장을 말할 수 있습니다. 무음 안내가 뜨면 **수정 요청**을 다시 누릅니다.
+3. 확정 문구를 확인하고 중앙 모델의 부위를 가리켜 **A**를 누릅니다. 서버는 요청을 시작한 버전과 발화 ID, 표면 좌표, 이미지로 후보를 생성합니다. 원하는 후보를 가리켜 **A**로 채택하면 중앙에 다음 버전이 나타납니다.
+4. **회의 종료**를 누르면 마지막 음성과 대기 중인 전사를 처리합니다. PC에 저장되는 전체 전사와 채택 이력은 발화 ID로 대조할 수 있습니다. [버튼별 시연 대본](DEMO.md)
+
 ## CAD 치수와 기준점
 
 기본 모델에서 OpenSCAD가 생성한 STL의 실제 치수는 **너비 120 × 깊이 145 × 높이 127.9005 mm**입니다. OpenSCAD 원점은 바닥 중심이고 바닥 평면은 `z = 0`입니다. 위쪽은 CAD +Z, 충전 통로가 있는 앞턱은 CAD −Y 쪽에 있습니다. 실제 올린 휴대폰은 모델에 포함되지 않습니다. [SCAD 형상](backend/meeting/phone_stand/phone_stand_parametric.scad)
@@ -56,7 +63,9 @@ python3 scripts/relay.py deploy
 
 ## 결과 파일
 
-**회의 종료 → PC에서 회의록 받기**로 결과 ZIP을 엽니다. `cad/final.scad`와 `cad/final.stl`은 채택한 모델 파일입니다. `cad/parameters.json`, `cad/version.json`, `decisions.json`, `transcript.jsonl`에서 적용 치수, 버전, 선택 기록과 발화를 확인합니다. 선택 이유를 입력하지 않으면 `not_stated`로 남깁니다. [결과물 저장 코드](backend/meeting/meeting_result.py)
+**회의 종료 → PC에서 회의록 받기**로 결과 ZIP을 엽니다. `cad/final.scad`와 `cad/final.stl`은 채택한 모델 파일입니다. `decisions.json`의 `command_utterance_ids`와 각 요청의 `transcript.utterance_refs`로 전체 전사의 원문과 당시 개정을 찾을 수 있습니다. 선택 이유를 입력하지 않으면 `not_stated`로 남깁니다. [결과물 저장 코드](backend/meeting/meeting_result.py)
+
+실시간 회의의 전체 전사는 CAD 내보내기 전에 `artifacts/phone-stand-live/results/<회의 ID>/transcript/`에 확정합니다. `transcript.txt`는 각 발화의 최종 문장을 시간순으로 보여주고, `transcript.jsonl`은 발화 ID, 시작·종료 시각, 입력 출처와 개정을 보존합니다. 결과 ZIP에도 같은 두 파일이 들어갑니다.
 
 현장 PC에서는 `artifacts/phone-stand-live/models/<버전 ID>/` 아래에 적용된 `candidate.scad`, `print.stl`, `preview.glb`를 보관합니다. `edit_requests/<회의 ID>/<요청 ID>/`에는 발화 원음, 확정 전사, 이미지, Ray 선택 근거와 후보 세트를 저장합니다. 이미지 출처는 Quest RGB 촬영이면 `quest_rgb`, 렌더 화면이면 `rendered_debug`입니다.
 
@@ -72,23 +81,18 @@ artifacts/meeting-venv/bin/python -m unittest -v \
 Meta XR Simulator의 두 번 채택 검사는 운영 회의와 분리한 테스트 서버를 사용합니다. 로컬 모델을 실행하고 별도 터미널에서 같은 거치대 프로필로 QA 서버를 시작합니다.
 
 ```sh
-EDGE_PORT=18896 EDGE_DATA_DIR="$PWD/artifacts/phone-stand-qa" python3 scripts/relay.py server
+EDGE_PORT=18896 EDGE_DATA_DIR="$PWD/artifacts/phase2-timeline-qa" python3 scripts/relay.py server
 ```
 
-Mac의 한국어 음성과 FFmpeg가 있으면 두 발화를 시험 입력으로 준비할 수 있습니다. 이 입력은 가상 컨트롤러와 함께 쓰는 시뮬레이터용 음성입니다.
+Mac의 한국어 음성과 FFmpeg로 일반 대화와 수정 명령을 준비합니다. 시뮬레이터가 같은 마이크 입력 경로로 이를 보내고 두 번의 채택, 후보 생성 중 대화, 종료 직전 문장까지 검사합니다.
 
 ```sh
-mkdir -p artifacts/phone-smoke-audio
-say -v Yuna -r 155 -o artifacts/phone-smoke-audio/angle.aiff '등받이 각도를 조금 줄여 주세요.'
-say -v Yuna -r 155 -o artifacts/phone-smoke-audio/lip.aiff '앞쪽 받침턱의 높이를 조금 늘려 주세요.'
-for clip in angle lip; do
-  ffmpeg -v error -y -i "artifacts/phone-smoke-audio/$clip.aiff" -af apad=pad_dur=0.35 \
-    -ar 16000 -ac 1 -f s16le "artifacts/phone-smoke-audio/$clip.pcm"
-done
-MEETING_EDGE_URL=http://127.0.0.1:18896 MEETING_CAPTURE_DATA_DIR="$PWD/artifacts/phone-stand-qa" \
+python3 tests/meeting/prepare_timeline_audio.py artifacts/phase2-timeline-audio
+MEETING_EDGE_URL=http://127.0.0.1:18896 MEETING_CAPTURE_DATA_DIR="$PWD/artifacts/phase2-timeline-qa" \
   MEETING_CANDIDATE_COMMIT_SMOKE=1 MEETING_PHONE_STAND_SMOKE=1 \
-  MEETING_EXPLICIT_PCM="$PWD/artifacts/phone-smoke-audio/angle.pcm" \
-  MEETING_FOLLOWUP_PCM="$PWD/artifacts/phone-smoke-audio/lip.pcm" \
+  MEETING_TIMELINE_PCM_DIR="$PWD/artifacts/phase2-timeline-audio" \
+  MEETING_EXPLICIT_PCM="$PWD/artifacts/phase2-timeline-audio/angle.pcm" \
+  MEETING_FOLLOWUP_PCM="$PWD/artifacts/phase2-timeline-audio/lip.pcm" \
   python3 scripts/relay.py smoke-assembly-simulator
 ```
 

@@ -263,10 +263,12 @@ class OpenScadAdapter(ModelAdapter):
         config = self.config
         profile = dict(config["profile"])
         source = {name: digest(data) for name, data in self.sources.items()}
-        # Alignment and approved comparison ranges do not change the CAD source.
+        # Alignment, speech hints and approved comparison ranges do not change the CAD source.
         # Older sessions retain their own profile snapshot and source identity.
-        cad_config = {key: value for key, value in config.items() if key not in {"qr_alignment", "comparison_maxima"}}
+        cad_config = {key: value for key, value in config.items() if key not in {"qr_alignment", "comparison_maxima", "speech_vocabulary"}}
         source_hash = digest(json_bytes({"assembly": cad_config, "sources": source}))
+        if config.get("speech_vocabulary"):
+            profile["speech_vocabulary"] = config["speech_vocabulary"]
         maxima = config.get("comparison_maxima", {})
         if maxima:
             fields = {f["parameter_id"]: f for f in profile["parameters"]}

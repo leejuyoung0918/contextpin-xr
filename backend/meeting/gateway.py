@@ -169,7 +169,9 @@ def transcribe_live(payload):
                 resampler = av.AudioResampler(format="flt", layout="mono", rate=16000)
                 frames = [*resampler.resample(frame), *resampler.resample(None)]
                 samples = np.concatenate([f.to_ndarray().reshape(-1) for f in frames])
+            hints = payload.get("hotwords")
             segments, _ = model.transcribe(samples, language="ko", beam_size=3,
+                                            hotwords=hints[:240] if isinstance(hints, str) else None,
                                             condition_on_previous_text=False, vad_filter=True)
             line = " ".join(s.text.strip() for s in segments if s.text.strip())
         except (OSError, RuntimeError, ValueError, ImportError) as error:

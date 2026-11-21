@@ -14,8 +14,10 @@ from . import provider_http
 from .bundle_provider import settings as provider_settings
 from .bundle_preview import render_base
 from .contracts import MeetingError
+from .edit_bundle import command_utterances
 from .gateway import provider_failure
 from .parameter_relations import derived_fields, effective_values, normalize_patch
+from .planner import explicit_parameters
 
 
 def sha(data):
@@ -78,7 +80,7 @@ def bundle_context(coordinator, state, bundle):
                  or state["versions"][0]["parameters"].get(name) != value}
     constraints = coordinator.effective(state, version.get("request_constraints", []))
     fields = [*profile["parameters"], *derived_fields(profile)]
-    transcript = bundle["transcript"]["text"]
+    transcript = " ".join(row["text"] for row in command_utterances(state, bundle))
     context = {
         "request_id": rid, "base_version_id": version["version_id"], "base_label": version.get("design_version"),
         "transcript": transcript, "transcript_source": bundle["transcript"]["source"],
@@ -170,6 +172,15 @@ def editable_fields(context):
         allowed = {f["parameter_id"] for f in group_fields if "spacing_parameter" in f}
     else:
         allowed = {f["parameter_id"] for f in context["parameters"]} - corner_fields
+        # When a speaker names a registered dimension, both alternatives must
+        # address it. Other dimensions of the same mesh can look plausible to a VLM.
+        # Korean STT can render the linking particle 의 as 에 (e.g. 받침턱에 높이).
+        dimensions = re.sub(r"[의에]\s+(?=높이|길이|너비|폭|각도|깊이|지름)", " ", text)
+        fields = {"parameters": context["parameters"]}
+        named = explicit_parameters(fields, text) | explicit_parameters(fields, dimensions)
+        named -= context.get("preserve_requested_parameters", {}).keys()
+        if named:
+            allowed &= named
     part = next((p for p in context.get("semantic_parts", []) if p["part_id"] == context["selection"]["part_id"]), {})
     if spans and re.search(r"넓|좁|widen|narrow", text) and any(
         re.search(re.escape(alias.lower()) + r"(?:을|를|의\s*(?:폭|너비|지름))", text) for alias in part.get("aliases", [])

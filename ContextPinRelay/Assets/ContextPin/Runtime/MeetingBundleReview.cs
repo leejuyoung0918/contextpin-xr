@@ -208,7 +208,7 @@ namespace ContextPin
 
         bool HandleBundleCandidateRay(Ray rightAim, bool pressed)
         {
-            if (!BundleOnPaper || bundleCommitPending || bundleCommitTarget != null || AssemblyAdoptedId != bundleBaseId ||
+            if (!BundleOnPaper || assemblyStopping || bundleCommitPending || bundleCommitTarget != null || AssemblyAdoptedId != bundleBaseId ||
                 assemblyMenu || movingMeetingPanel || confirmingMeetingEnd || !AssemblyHeadTracked()) return false;
             MeetingModelSlot slot = null;
             if (Physics.Raycast(rightAim, out var hit, 12))

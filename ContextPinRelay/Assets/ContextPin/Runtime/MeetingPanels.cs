@@ -102,8 +102,8 @@ namespace ContextPin
             DrawPanelHandle(925, 12, 275, 45);
             RoundBox("MeetingSetupNew", content, 36, 206, 537, 398, Card, 16);
             BoldLabel("MeetingSetupCreateTitle", content, 64, 229, 475, 56, "회의 열기", 34, Light);
-            Label("MeetingSetupCreateHelp", content, 65, 300, 470, 74, xr ? "회의 시작을 누르면 대화를 기록하고 실물 정렬과 책상 지정을 준비합니다." : "회의를 만든 뒤 녹음을 시작하면 대화가 서버에 기록됩니다.", 24, Muted);
-            Button("MeetingCreate", 65, 385, 471, 66, meetingBusy ? "연결 중…" : xr ? "회의 시작" : "새 회의 만들기", () => BeginMeetingSession(false, xr), true);
+            Label("MeetingSetupCreateHelp", content, 65, 300, 470, 74, xr ? "A4 네 점을 지정하고 현재 모델을 확인한 뒤 회의 녹음을 시작하세요." : "회의를 만든 뒤 녹음을 시작하면 대화가 서버에 기록됩니다.", 24, Muted);
+            Button("MeetingCreate", 65, 385, 471, 66, meetingBusy ? "연결 중…" : xr ? "회의 준비" : "새 회의 만들기", () => BeginMeetingSession(false, xr), true);
             Button("MeetingExample", 65, 475, 222, 48, "대본으로 체험", BeginExampleMeeting);
             if (PlayerPrefs.HasKey(MostRecentMeeting + "Session"))
                 Button("MeetingResume", 303, 475, 233, 48, "이전 회의 열기", ResumeMeetingSession);

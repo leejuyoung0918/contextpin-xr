@@ -20,6 +20,7 @@ namespace ContextPin.Editor
         static long buttonEarliestMs, buttonLatestMs;
         static int previewsRequested, previewsReceived;
         static string previewError;
+        static bool startRequested;
 
         static bool RunCaptureOnlyStep()
         {
@@ -28,6 +29,8 @@ namespace ContextPin.Editor
                 dataDirectory = Environment.GetEnvironmentVariable("MEETING_CAPTURE_DATA_DIR");
                 Require(Directory.Exists(dataDirectory), "Set MEETING_CAPTURE_DATA_DIR to the isolated live server's EDGE_DATA_DIR.");
                 InstallEditorPcmInput();
+                startRequested = false;
+                ResetTimelineSpeech();
                 report.captureFiles = new string[2];
                 report.selectedCandidates = new string[2];
                 report.committedVersions = new string[2];
@@ -45,11 +48,12 @@ namespace ContextPin.Editor
             switch (step)
             {
                 case 1:
-                    if ((string)state["session_status"] != "recording" || inputRing == null || !StartPaperFixture(app)) return false;
-                    Require((string)state["design_submit_mode"] == "explicit" && (string)state["meeting"]["edit_request_output"] == "bundle",
-                        "The new host must use EditRequestBundle.");
-                    Require(((string)state["meeting"]["candidate_generation"] == "ai") == checkCandidateSet,
-                        "The server must acknowledge the requested candidate generation mode.");
+                    if (checkPhoneStand)
+                        Require((string)state["session_status"] == "ready" && inputRing == null &&
+                            report.microphoneOpenCount == 0 && !state["utterances"].Any(),
+                            "Creating an unaligned phone meeting must not open a microphone or produce speech.");
+                    else if ((string)state["session_status"] != "recording" || inputRing == null) return false;
+                    if (!StartPaperFixture(app)) return false;
                     if (checkPhoneStand)
                         Require((string)state["profile"]["adapter_id"] == "openscad_phone_stand" &&
                             (string)state["profile"]["review_layout"] == "center_latest_side_candidates",
@@ -69,6 +73,19 @@ namespace ContextPin.Editor
                 case 4:
                     if (latest == null || !PaperState(app,"A4ReviewSurfaceActive")) return false;
                     CheckConfirmedPaper(app, latest);
+                    if (checkPhoneStand && !startRequested)
+                    {
+                        Require(report.microphoneOpenCount == 0 && (string)state["session_status"] == "ready",
+                            "Completing four corners and confirming Latest must leave the microphone stopped.");
+                        startRequested = Click("SpatialSessionAction");
+                        report.microphoneWaitedForStart = startRequested;
+                        return false;
+                    }
+                    if ((string)state["session_status"] != "recording" || inputRing == null) return false;
+                    Require((string)state["design_submit_mode"] == "explicit" && (string)state["meeting"]["edit_request_output"] == "bundle",
+                        "The new host must use EditRequestBundle.");
+                    Require(((string)state["meeting"]["candidate_generation"] == "ai") == checkCandidateSet,
+                        "The server must acknowledge the requested candidate generation mode.");
                     report.a4PortraitMeasured = explicitAreaSize.x < explicitAreaSize.y;
                     report.a4LandscapeMeasured = !report.a4PortraitMeasured;
                     Require(rounds.Count == 0, "A4 placement must not generate a candidate round.");
@@ -128,6 +145,7 @@ namespace ContextPin.Editor
             {
                 case 0:
                     if (!ExplicitUi("ExplicitLatest").Contains(index == 0 ? "V1" : "V2")) return false;
+                    if (index == 0 && TimelineTest && !BeforeTimelineCommand(app, state)) return false;
                     CheckSideLatest(state, latest, version, true);
                     captureRoundBaseline = rounds.Count;
                     captureVersionBaseline = versions.Count;
@@ -158,6 +176,7 @@ namespace ContextPin.Editor
                 case 3: return FreezeTrackedCapture(app, latest, index);
                 case 4:
                     if (state["edit_requests"]?[captureId] == null) return false;
+                    if (TimelineTest && index == 0) SpeakDuringGeneration(state);
                     if (checkBundleAdoption) return VerifyReviewModels(app, state, latest, index);
                     return checkCandidateSet ? CheckBundleCandidates(app, state, index, version) : ExplicitUi("ExplicitDesignStatus").Contains("저장 완료");
                 default:

@@ -7,6 +7,20 @@ from .shared_workflows import check_head, point
 from . import edit_bundle
 
 
+def check_selection_state(state, actor, request_id, selection_id):
+    if state["session_status"] == "recording":
+        return
+    if state["session_status"] == "paused" and state["meeting"].get("edit_request_output") == "bundle":
+        window, capture = edit_bundle.window_for(state, request_id)
+        previous = state.get("explicit_design_targets", {}).get(actor, {})
+        already_registered = (previous.get("client_request_id") == request_id and
+                              previous["reference_selection"]["selection_id"] == selection_id)
+        if (capture["status"] == "eos" and window["participant_id"] == actor and
+                (window.get("pending_selection_id") == selection_id or already_registered)):
+            return
+    raise MeetingError("진행 중인 회의에서 수정 요청을 준비하세요.", 409)
+
+
 def capture_identity(state, actor, client_id, selection_id, captured_at, source):
     if state.get("meeting", {}).get("design_submit_mode") != "explicit":
         raise MeetingError("명시적 수정 요청 회의에서 촬영하세요.", 409)
@@ -16,6 +30,8 @@ def capture_identity(state, actor, client_id, selection_id, captured_at, source)
             raise MeetingError("요청 및 선택 ID에 앞뒤 공백을 포함할 수 없습니다.")
     if type(captured_at) is not int or not 0 < captured_at < 253402300799000:
         raise MeetingError("선택 당시의 촬영 시각이 필요합니다.")
+    if state["session_status"] == "paused":
+        check_selection_state(state, actor, client_id, selection_id)
     participant = next(p for p in state["participants"] if p["participant_id"] == actor)
     bundle = state["meeting"].get("edit_request_output") == "bundle"
     if source != "live_capture" and not (source == "xr_render" and (bundle or participant["capabilities"].get("runtime") == "simulator")):
@@ -71,7 +87,7 @@ def reference_hit(coordinator, state, actor, base, client_id, ref):
 
 def apply_selection(coordinator, state, actor, kind, payload, stamp):
     from .speech_ranges import validate_refs
-    if state["session_status"] != "recording":
+    if state["session_status"] not in {"paused", "recording"}:
         raise MeetingError("진행 중인 회의에서 수정 요청을 준비하세요.", 409)
     if payload.get("use_registered_scope"):
         raise MeetingError("모델 위치와 사진을 직접 선택하세요.")
@@ -81,6 +97,7 @@ def apply_selection(coordinator, state, actor, kind, payload, stamp):
     if type(revision) is not int:
         raise MeetingError("채택본 revision이 필요합니다.")
     reference = reference_hit(coordinator, state, actor, base, client_id, payload.get("reference_selection"))
+    check_selection_state(state, actor, client_id, reference["selection_id"])
     bundle = state["meeting"].get("edit_request_output") == "bundle"
     if bundle:
         reference.update(edit_bundle.evidence(payload["reference_selection"], reference, base))
@@ -126,8 +143,6 @@ def apply_selection(coordinator, state, actor, kind, payload, stamp):
         return "design.target_selected", target, None
     if target != prior_target:
         raise MeetingError("먼저 이번 사진과 부위의 선택을 확정하세요.", 409)
-    if not isinstance(speech_id, str) or not speech_id or not isinstance(refs, list) or not 1 <= len(refs) <= 5:
-        raise MeetingError("이번 구간의 확정 발화 1~5개를 지정하세요.")
     lines = validate_refs(state, actor, speech_id, refs)
     if bundle:
         if speech_id != client_id:

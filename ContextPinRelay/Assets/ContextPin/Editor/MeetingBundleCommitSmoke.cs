@@ -122,6 +122,7 @@ namespace ContextPin.Editor
             {
                 var root = GameObject.Find("Candidate" + key);
                 if (root == null) return false;
+                if (TimelineTest && index == 0 && !WaitForReviewSpeech(state)) return false;
                 var row = set["candidates"].Single(c => (string)c["candidate_key"] == key);
                 var bounds = ModelBoundsInPose(root, measuredPaper);
                 // The solid base extends beyond the grooves or backrest.
@@ -173,9 +174,12 @@ namespace ContextPin.Editor
             }
             if (step == 13) return true;
             if (step == 22) return Click("SpatialSessionAction");
-            if (step == 23) return Click("SpatialConfirmEnd");
+            if (step == 23) return (!TimelineTest || ReadyToEndWithSpeech(state)) && Click("SpatialConfirmEnd");
+            if ((string)state["session_status"] == "save_error")
+                throw new InvalidOperationException("Server could not finalize the meeting: " + state["result"]);
             if ((string)state["session_status"] != "completed") return false;
             Require(report.captureFiles.All(File.Exists) && state["decisions"].Count() == 2, "Both requests and decisions must be archived.");
+            if (TimelineTest) CheckArchivedTimeline(state);
             report.savedMeeting = true;
             Finish(null);
             return true;

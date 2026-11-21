@@ -2,6 +2,7 @@
 import json
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import tempfile
 import zipfile
 
@@ -83,10 +84,16 @@ def save_model(folder, models, version, final=False):
 
 
 def transcript_views(state):
-    rows = sorted(state["utterances"], key=lambda u: (u["start_ms"], u["end_ms"], u["utterance_id"], u["revision"]))
+    rows = sorted((u for u in state["utterances"] if u.get("is_final", u.get("status", "final") == "final")),
+                  key=lambda u: (u["start_ms"], u["end_ms"], u["utterance_id"], u["revision"]))
     origin = state["meeting"]["started_at"] or (rows[0]["start_ms"] if rows else 0)
+    readable_rows = rows
+    if "transcript_status" in state["meeting"]:
+        # Corrections keep the same time range and ID. Keep every revision in JSONL
+        # for the CAD evidence, but print each spoken sentence only once.
+        readable_rows = {u["utterance_id"]: u for u in rows}.values()
     lines = []
-    for item in rows:
+    for item in readable_rows:
         label = "예시" if item["source_mode"] == "replay" else "직접 입력" if item["source_mode"] == "manual" or item.get("source_kind") == "manual_input" else "화자 미상"
         if item.get("speaker_label"):
             label += " " + item["speaker_label"]
@@ -94,6 +101,36 @@ def transcript_views(state):
         offset = f"{ms // 60000:02}:{ms // 1000 % 60:02}.{ms % 1000:03}"
         lines.append(f'[{offset}] [{item["utterance_id"]} r{item["revision"]}] {label} · {item["text"]}')
     return rows, "\n".join(lines) + ("\n" if lines else "")
+
+
+def transcript_files(state):
+    rows, readable = transcript_views(state)
+    return {"transcript.jsonl": "".join(json.dumps(u, ensure_ascii=False, sort_keys=True) + "\n" for u in rows).encode(),
+            "transcript.txt": readable.encode()}
+
+
+def freeze_transcript(root, state):
+    """Publish both views together, independently of the later CAD/ZIP export."""
+    if state["meeting"].get("transcript_status") not in ("finalizing", "finalized"):
+        raise ValueError("회의 종료 후 확정 전사를 저장할 수 있습니다.")
+    parent = root / "results" / state["session_id"]
+    parent.mkdir(parents=True, exist_ok=True)
+    target = parent / "transcript"
+    files = transcript_files(state)
+    if not target.exists():
+        with tempfile.TemporaryDirectory(dir=parent, prefix=".transcript-") as temp:
+            draft = Path(temp) / "transcript"
+            draft.mkdir()
+            for name, raw in files.items():
+                (draft / name).write_bytes(raw)
+            try:
+                draft.rename(target)
+            except OSError:
+                if not target.is_dir():
+                    raise
+    if any((target / name).read_bytes() != raw for name, raw in files.items()):
+        raise ValueError("저장된 확정 전사가 회의 기록과 일치하지 않습니다.")
+    return target
 
 
 def readable_minutes(sid, mode, decisions, transcript, missing, revision=None, latest_id=None, latest_label=None):
@@ -213,15 +250,14 @@ def export_design_requests(root, folder, state, missing):
             "decision_round_id": decision.get("round_id"), "adopted_version_id": decision.get("selected_model_version_id"),
             "adopted_changes": decision.get("parameter_changes", []),
             "reason": decision.get("rationale_text"), "decided_at": decision.get("committed_at")})
-    for rid, item in state.get("candidate_sets", {}).items():
-        if item["status"] != "committed":
-            continue
-        bundle = state["edit_requests"][rid]
+    for rid, bundle in state.get("edit_requests", {}).items():
+        item = state.get("candidate_sets", {}).get(rid, {})
         source = root / "edit_requests" / state["session_id"] / rid
         dest = folder / "edit_requests" / rid
         dest.mkdir(parents=True)
         write_json(dest / "request.json", bundle)
-        write_json(dest / "candidate_set.json", item)
+        if item:
+            write_json(dest / "candidate_set.json", item)
         for evidence in (bundle["visual_evidence"], bundle["audio"]):
             filename = evidence["file"]
             if filename not in ("target.jpg", "target.png", "command.wav"):
@@ -234,8 +270,9 @@ def export_design_requests(root, folder, state, missing):
             except (OSError, ValueError):
                 missing.append({"kind": "edit_request_evidence", "request_id": rid, "file": filename})
         requests.append({"request_id": rid, "base_version_id": bundle["base_version_id"],
-                         "candidate_set_id": item["candidate_set_id"], "selected_candidate_id": item["selected_candidate_id"],
-                         "adopted_version_id": item["committed_version_id"], "file": f"edit_requests/{rid}/request.json"})
+                         "command_utterance_ids": [ref["utterance_id"] for ref in bundle["transcript"]["utterance_refs"]],
+                         "candidate_set_id": item.get("candidate_set_id"), "selected_candidate_id": item.get("selected_candidate_id"),
+                         "adopted_version_id": item.get("committed_version_id"), "file": f"edit_requests/{rid}/request.json"})
     if requests:
         write_json(folder / "design_requests.json", requests)
 
@@ -285,14 +322,19 @@ def build_result(root, models, state, revision):
                     save_model(target, models, {**versions[vid], "parameter_units": fields})
                     write_json(target / "review.json", record)
                 except (OSError, ValueError, KeyError, zipfile.BadZipFile):
-                    import shutil
                     shutil.rmtree(target, ignore_errors=True)
                     missing.append({"kind": "reviewed_candidate_assets", "candidate_id": candidate_id})
                 reviewed_records.append(record)
-        rows, readable = transcript_views(state)
-        (folder / "transcript.jsonl").write_text("".join(json.dumps(item, ensure_ascii=False) + "\n" for item in rows),
-                                                  encoding="utf-8")
-        (folder / "transcript.txt").write_text(readable, encoding="utf-8")
+        if state["meeting"].get("transcript_status") == "finalized":
+            for name in ("transcript.jsonl", "transcript.txt"):
+                shutil.copyfile(parent / "transcript" / name, folder / name)
+        else:
+            for name, raw in transcript_files(state).items():
+                (folder / name).write_bytes(raw)
+        readable = (folder / "transcript.txt").read_text(encoding="utf-8")
+        utterance_count = (len({u["utterance_id"] for u in state["utterances"] if u.get("is_final")})
+                           if state["meeting"].get("transcript_status") == "finalized"
+                           else (folder / "transcript.jsonl").read_bytes().count(b"\n"))
         (folder / "summary.md").write_text(summary_markdown(state, selected, unused), encoding="utf-8")
         export_design_requests(root, folder, state, missing)
         write_json(folder / "decisions.json", state["decisions"])
@@ -335,7 +377,7 @@ def build_result(root, models, state, revision):
                     "adopted_version_label": selected.get("design_version"), "adopted_version_id": final_id, "adopted_revision": state["meeting"]["adopted_revision"],
                     "original_version_id": original["version_id"], "final_scad": entry_path,
                     "final_stl": "cad/final.stl", "stl_sha256": selected["assets"]["print.stl"]["sha256"],
-                    "utterance_count": len(rows), "files": files, "missing": missing}
+                    "utterance_count": utterance_count, "files": files, "missing": missing}
         write_json(folder / "manifest.json", manifest)
         with zipfile.ZipFile(folder / "result.zip", "w", zipfile.ZIP_DEFLATED) as archive:
             for name in [*files, "manifest.json"]:

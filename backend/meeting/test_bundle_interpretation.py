@@ -101,6 +101,17 @@ class BundleInterpretationTests(unittest.TestCase):
         self.assertEqual(result["ambiguity_type"], "degree")
         self.assertEqual(result["interpreted_target"]["target_parameter_candidates"], ["groove_diameter"])
 
+    def test_named_stand_dimension_limits_both_proposals(self):
+        config = json.loads((Path(__file__).parent / "phone_stand/assembly.json").read_text())
+        fields = config["profile"]["parameters"]
+        ctx = {**self.context, "parameters": fields, "effective_parameters": {f["parameter_id"]: f["default_value"] for f in fields},
+               "semantic_parts": config["profile"]["semantic_parts"], "preserve_adopted_parameters": {}}
+        for phrase, dimension in (("등받이 각도를 조금 줄여주세요.", "viewing_angle"),
+                                  ("이 부분은 앞쪽 받침턱입니다. 앞쪽 받침턱의 높이를 늘려 주세요.", "lip_height"),
+                                  ("이 부분은 앞쪽 받침턱입니다. 앞쪽 받침턱에 높이를 조금 늘려주세요.", "lip_height")):
+            with self.subTest(phrase=phrase):
+                self.assertEqual(set(ai.change_options({**ctx, "transcript": phrase})), {dimension})
+
     def test_truncated_completion_and_unconfigured_separate_endpoint(self):
         truncated = {"choices": [{"finish_reason": "length", "message": {"content": json.dumps(self.response)}}]}
         with patch.dict(os.environ, {"MEETING_BUNDLE_MODEL": "test-model", "MEETING_BUNDLE_BASE_URL": "http://127.0.0.1:18123/v1"}), \

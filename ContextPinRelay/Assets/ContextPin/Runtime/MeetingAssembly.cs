@@ -262,7 +262,7 @@ namespace ContextPin
             var model = meetingModel.transform;
             var previousError = latestPaperError;
             latestPaperError = null;
-            if (CandidateGenerationMeeting)
+            if (PreparingLivePaperMeeting || CandidateGenerationMeeting)
             {
                 if (sessionOriginalBounds is not Bounds original)
                     latestPaperError = "중앙 실물의 원본 치수를 확인하고 있습니다.";
@@ -290,7 +290,8 @@ namespace ContextPin
             if (revealed) meetingModel.SetActive(true);
             if (attached || revealed)
             {
-                if (CandidateGenerationMeeting && meetingPreview.Material != null) meetingPreview.Material.color = PaperLatestColor;
+                if ((PreparingLivePaperMeeting || CandidateGenerationMeeting) && meetingPreview.Material != null)
+                    meetingPreview.Material.color = PaperLatestColor;
                 string label = TextValue(MeetingVersion(meetingLoadedVersion), "design_version");
                 Debug.Log($"ContextPin A4 Latest: version_id={meetingLoadedVersion} design_version={label} " +
                     $"anchor={latestAnchor.GetEntityId()} position_m={latestAnchor.position:F5} " +

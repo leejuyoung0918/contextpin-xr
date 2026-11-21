@@ -134,13 +134,17 @@ namespace ContextPin
             content = Rect("SpatialAssemblyMeeting", panel, (W - SpatialWidth) / 2f, SpatialOriginY, SpatialWidth, 376);
             var state = AssemblySessionStatus;
             var (status, action) = SpatialSessionAction(state);
+            bool pausedActions = state == "paused" && !assemblyStarting && !assemblyStopping && !confirmingMeetingEnd;
+            float statusWidth = pausedActions ? 112 : 222;
             if (action == null)
             {
-                RoundBox("SpatialSessionBadge", content, 0, 0, 222, 47, SpatialBackground, 10);
-                BoldLabel("SpatialSessionStatus", content, 10, 0, 202, 47, status, SpatialFont(21), HeaderText, TextAnchor.MiddleCenter);
+                RoundBox("SpatialSessionBadge", content, 0, 0, statusWidth, 47, SpatialBackground, 10);
+                BoldLabel("SpatialSessionStatus", content, 6, 0, statusWidth - 12, 47, status, SpatialFont(pausedActions ? 16 : 21), HeaderText, TextAnchor.MiddleCenter);
             }
             else
-                Button("SpatialSessionAction", 0, 0, 222, 47, status, action, true);
+                Button("SpatialSessionAction", 0, 0, statusWidth, 47, status, action, true);
+            if (pausedActions)
+                Button("SpatialPausedEnd", 118, 0, 104, 47, "종료·저장", AskToEndSpatialMeeting);
 
             DrawPanelHandle(238, 0, 182, 47);
 
@@ -156,6 +160,20 @@ namespace ContextPin
             if (state == "completed")
             {
                 if (assemblyMenu) DrawSpatialMenu(); else DrawSavedResult();
+                return;
+            }
+            if (PreparingLivePaperMeeting)
+            {
+                if (!A4ReviewSurfaceActive) { DrawA4Alignment(); return; }
+                RoundBox("SpatialStartPanel", content, 0, 58, SpatialWidth, 145, SpatialBackground, 12);
+                DrawLatestCaption(12, 68, 396, 35);
+                string hint = AdoptedModelFailed ? "Latest CAD를 다시 불러와 배치를 확인하세요." :
+                    !string.IsNullOrEmpty(assemblyFeedback) ? assemblyFeedback :
+                    MeetingHost ? "회의 시작을 누르면 지금부터 회의 전체를 전사합니다." : "진행자의 회의 시작을 기다립니다.";
+                Label("SpatialStartHint", content, 12, 108, 396, 51, hint, SpatialFont(18), HeaderText);
+                Button("A4Restart", 12, 163, 188, 32, "A4 다시 지정", BeginA4Alignment);
+                if (AdoptedModelFailed)
+                    Button("MeetingRetryModel", 220, 163, 188, 32, "CAD 다시 불러오기", RetryAdoptedModel);
                 return;
             }
             if (ExplicitDesignMeeting && explicitTranscriptPage >= 0 && AssemblyActive) { DrawExplicitTranscript(); return; }
@@ -228,10 +246,17 @@ namespace ContextPin
             return "Latest · " + (label.Length == 0 ? MeetingVersionLabel(meetingLoadedVersion) : label);
         }
 
+        string ExplicitTranscriptLabel => explicitRequest?.TranscriptSource switch
+        {
+            "manual" => "수동 전사",
+            "corrected" => "교정된 수정 발언",
+            _ => "수정 발언"
+        };
+
         void DrawLatestCaption(float x, float y, float width, float height)
         {
             var caption = ShownLatestLabel();
-            if (CandidateGenerationMeeting && A4PoseApplied && width >= 230)
+            if ((PreparingLivePaperMeeting || CandidateGenerationMeeting) && A4PoseApplied && width >= 230)
             {
                 var swatch = PaperLatestColor;
                 swatch.a = 1;
@@ -282,11 +307,11 @@ namespace ContextPin
             if (HasReviewTable && !ExplicitCameraReady)
                 Button("ExplicitPrepareCamera", 292, 146 + details, 115, 34, "카메라 준비", () => StartExplicitCamera(true));
             var transcript = ExplicitTranscript;
-            bool manualTranscript = CaptureBundleMeeting && explicitRequest?.TranscriptSource == "manual";
+            string recent = TextValue(LatestFinalUtterance, "text");
+            string caption = transcript.Length > 0 ? ExplicitTranscriptLabel + " · " + transcript :
+                CaptureBundleMeeting && recent.Length > 0 ? "최근 회의 발언 · " + recent : "확정 전사를 기다립니다.";
             Label("ExplicitTranscript", content, 12, 184 + details, 396, 38,
-                string.IsNullOrEmpty(transcript) ? "수정 발언의 확정 전사가 여기에 표시됩니다." :
-                TruncateSpatial(manualTranscript ? "수동 전사 · " + transcript : transcript, "", 74),
-                SpatialFont(17), HeaderText);
+                TruncateSpatial(caption, "", 74), SpatialFont(17), HeaderText);
             if (!string.IsNullOrEmpty(transcript))
                 Button("ExplicitReadTranscript", 300, 224 + details, 107, 40, "원문 보기", () => { explicitTranscriptPage = 0; Draw(); });
             string speech = ExplicitSpeechAction;
@@ -350,7 +375,7 @@ namespace ContextPin
             explicitTranscriptPage = Mathf.Clamp(explicitTranscriptPage, 0, pages - 1);
             int start = explicitTranscriptPage * pageSize;
             RoundBox("ExplicitTranscriptPage", content, 0, 58, SpatialWidth, 240, SpatialBackground, 12);
-            string title = CaptureBundleMeeting && explicitRequest?.TranscriptSource == "manual" ? "수동 전사 원문" : "수정 발언 원문";
+            string title = ExplicitTranscriptLabel + " 원문";
             BoldLabel("Title", content, 12, 65, 396, 33, $"{title}  {explicitTranscriptPage + 1}/{pages}", SpatialFont(20), HeaderText);
             Label("FullText", content, 12, 102, 396, 126, text.Substring(start, Mathf.Min(pageSize, text.Length - start)), SpatialFont(17), HeaderText);
             if (explicitTranscriptPage > 0) Button("Previous", 12, 246, 103, 36, "이전", () => { explicitTranscriptPage--; Draw(); });
@@ -432,6 +457,8 @@ namespace ContextPin
 
         (string label, Action action) SpatialSessionAction(string state)
         {
+            if (assemblyStopping && CaptureBundleMeeting && explicitRequest?.Selection != null && !explicitRequest.BundleSaved &&
+                !explicitRequest.RetryTransfer && !explicitRequest.Conflict && state != "completed") return ("마지막 수정 요청 저장 중", null);
             if (assemblyStopping || state == "finalizing") return ("결과 저장 중", null);
             if (state == "completed") return (Values(meetingSnapshot?["result"], "missing").Any() ? "누락 포함 저장됨" : "저장됨", null);
             if (state == "save_error") return ("저장 다시 시도", RetrySpatialSave);
@@ -450,8 +477,18 @@ namespace ContextPin
             }
             if (assemblyStarting || TextValue(meetingSnapshot, "capture_state") == "starting")
                 return ("마이크 연결 중 · 종료", AskToEndSpatialMeeting);
-            if (state == "paused") return ("녹음 재개", StartSpatialMeeting);
+            if (state == "paused")
+            {
+                if (LivePaperMeeting && !PaperReadyToRecord) return ("A4 배치 대기", null);
+                return ("녹음 재개", StartSpatialMeeting);
+            }
             if (AssemblyCaptureRequested && TextValue(meetingSnapshot?["meeting"], "audio_device_id") != meetingDeviceId) return ("회의 마이크 연결 중", null);
+            if (PreparingLivePaperMeeting)
+            {
+                if (!MeetingHost) return ("진행자 대기", null);
+                if (!PaperReadyToRecord) return ("A4 배치 확인 대기", null);
+                return ("회의 시작", StartSpatialMeeting);
+            }
             return (TextValue(meetingSnapshot, "provider_mode") == "live" ? "회의 시작 · 녹음" : "예시 회의 시작", StartSpatialMeeting);
         }
 

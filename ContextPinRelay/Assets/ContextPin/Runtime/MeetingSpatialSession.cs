@@ -30,6 +30,9 @@ namespace ContextPin
             ? id : TextValue(meetingSnapshot, "committed_version_id");
         bool AssemblyActive => AssemblySessionStatus is "recording" or "paused";
         bool AssemblyCaptureRequested => (meetingSnapshot?["meeting"] as JObject)?.Value<bool?>("capture_requested") == true;
+        bool LivePaperMeeting => SpatialAssembly && CenteredPaperLatest && TextValue(meetingSnapshot, "provider_mode") == "live";
+        bool PreparingLivePaperMeeting => LivePaperMeeting && AssemblySessionStatus == "ready";
+        bool PaperReadyToRecord => BundleLatestReady && AssemblyHeadTracked();
 
         IEnumerator RunAssemblyAction(MeetingTransport transport, string type, JObject payload, Action<JObject, string> completed, bool preserveClock = false)
         {
@@ -61,11 +64,13 @@ namespace ContextPin
             }
         }
 
-        void StartSpatialMeeting() => StartSpatialMeetingWithMode(false);
+        void StartSpatialMeeting() => StartSpatialMeetingWithMode(PreparingLivePaperMeeting);
 
         void StartSpatialMeetingWithMode(bool explicitDesign)
         {
-            if (assemblyStarting || assemblyStopping || meetingTransport == null) return;
+            if (assemblyStarting || assemblyStopping || meetingTransport == null ||
+                PreparingLivePaperMeeting && !MeetingHost ||
+                LivePaperMeeting && !PaperReadyToRecord) return;
             var mode = TextValue(meetingSnapshot, "provider_mode") == "live" ? "live" : "replay";
             var transport = meetingTransport;
             assemblyStarting = true;
@@ -104,6 +109,7 @@ namespace ContextPin
                             Draw();
                             return;
                         }
+                        if (ExplicitDesignMeeting && A4ReviewSurfaceActive) PrepareExplicitCamera();
                         StartCoroutine(OpenSpatialMicrophone(transport));
                         return;
                     }
@@ -183,6 +189,7 @@ namespace ContextPin
                 ["stream_start_source_monotonic_ms"] = Time.realtimeSinceStartupAsDouble * 1000 - position * 1000.0 / clip.frequency,
                 ["stream_start_sample_index"] = 0, ["bind_view"] = false
             };
+            if (CenteredPaperLatest && CaptureBundleMeeting) hello["edit_marker_alignment"] = "speech_overlap";
             if (meetingClockValid)
             {
                 hello["clock_offset_ms"] = meetingClockOffsetMs;
@@ -272,11 +279,11 @@ namespace ContextPin
             assemblyStarting = false;
         }
 
-        IEnumerator CloseSpatialStream()
+        IEnumerator CloseSpatialStream(PendingDesignRequest lastEdit = null)
         {
             var stream = assemblyAudio;
             if (stream == null) yield break;
-            var close = stream.Finish(assemblyAudioSend, assemblyAudioTail.ToArray());
+            var close = stream.Finish(assemblyAudioSend, assemblyAudioTail.ToArray(), lastEdit?.Id, lastEdit?.Selection?.Id);
             while (!close.IsCompleted) yield return null;
             if (stream != assemblyAudio) yield break;
             if (close.IsFaulted || close.IsCanceled)
@@ -315,14 +322,27 @@ namespace ContextPin
 
         IEnumerator FinalizeSpatialMeeting(MeetingTransport transport, bool pause)
         {
-            while (assemblyAdopting && meetingTransport == transport) yield return null;
+            var lastEdit = !pause && CaptureBundleMeeting && explicitRequest?.Selection != null &&
+                !explicitRequest.BundleSaved ? explicitRequest : null;
+            // Flush the last partial PCM packet and receive the server's EOS acknowledgment
+            // before it seals the transcript and exports the meeting result.
+            if (!pause) yield return CloseSpatialStream(lastEdit?.Conflict == true ? null : lastEdit);
+            // A Ray click starts three consecutive HTTP operations (photo, target, bundle).
+            // Each has a 35-second timeout; waiting here never reopens the microphone.
+            double deadline = Time.unscaledTimeAsDouble + 110;
+            while (lastEdit != null && explicitRequest == lastEdit && !lastEdit.BundleSaved && !HasSavedEditBundle(lastEdit) &&
+                !lastEdit.RetryTransfer && !lastEdit.Conflict && meetingTransport == transport && Time.unscaledTimeAsDouble < deadline)
+                yield return null;
+            while ((assemblyAdopting || bundleCommitPending) && meetingTransport == transport) yield return null;
             if (meetingTransport != transport) yield break;
+            bool editUnconfirmed = lastEdit != null && !lastEdit.BundleSaved && !HasSavedEditBundle(lastEdit);
             yield return RunAssemblyAction(transport, pause ? "meeting_pause" : "meeting_end", new JObject(), (_, error) =>
             {
                 if (error != null) assemblyFeedback = error;
+                else if (editUnconfirmed) assemblyFeedback = "마지막 수정 요청의 저장을 확인하지 못했습니다. 전체 회의 전사는 별도로 저장합니다.";
             });
             if (meetingTransport != transport) yield break;
-            yield return CloseSpatialStream();
+            if (pause) yield return CloseSpatialStream();
             assemblyStopping = false;
             Draw();
         }

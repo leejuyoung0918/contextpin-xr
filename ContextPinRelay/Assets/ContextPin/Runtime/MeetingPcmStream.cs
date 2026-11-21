@@ -123,7 +123,7 @@ namespace ContextPin
             await SendText(marker, deadline.Token).ConfigureAwait(false);
         }
 
-        public async Task Finish(Task inFlight, IReadOnlyList<byte[]> tail)
+        public async Task Finish(Task inFlight, IReadOnlyList<byte[]> tail, string pendingRequestId = null, string pendingSelectionId = null)
         {
             var token = lifetime.Token;
             lifetime.CancelAfter(TimeSpan.FromSeconds(12));
@@ -132,6 +132,11 @@ namespace ContextPin
                 await socket.SendAsync(new ArraySegment<byte>(packet), WebSocketMessageType.Binary, true, token).ConfigureAwait(false);
             var end = new JObject { ["type"] = "stop" };
             if (sequence > 0) end["last_sequence"] = sequence - 1;
+            if (pendingRequestId != null && pendingSelectionId != null)
+            {
+                end["pending_edit_request_id"] = pendingRequestId;
+                end["pending_selection_id"] = pendingSelectionId;
+            }
             await SendText(end, token).ConfigureAwait(false);
             var error = await stopReply.ConfigureAwait(false);
             if (error != null) throw new IOException(error);

@@ -174,6 +174,9 @@ class SessionCoordinator:
             raise MeetingError("회의를 찾을 수 없습니다.", 404)
         state = json.loads(row["state"])
         shared_workflows.initialize(state)
+        for line in state["utterances"]:
+            line.setdefault("meeting_id", state["session_id"])
+            line.setdefault("source", "stt" if line.get("source_mode") == "live_capture" else line.get("source_mode"))
         return state
 
     def save(self, state):
@@ -393,6 +396,8 @@ class SessionCoordinator:
                 if old["participant_id"] != actor or old["request_hash"] != request_hash:
                     raise MeetingError("같은 command_id가 다른 요청에 사용되었습니다.", 409)
                 return {**json.loads(old["response"]), "snapshot": self.public(state, actor)}
+            if command.type == "transcript_correction" and state.get("meeting", {}).get("transcript_status") in ("finalizing", "finalized"):
+                raise MeetingError("종료한 회의의 전사는 확정되어 수정할 수 없습니다.", 409)
             if state["status"] != "active" and not (state.get("assembly") and command.type in {
                     "meeting_end", "meeting_retry", "transcript_correction", "capabilities", "verify", "generate_edit_candidates"}):
                 raise MeetingError("종료된 회의입니다.", 409)
@@ -530,6 +535,8 @@ class SessionCoordinator:
                 state, line, timestamp, prior["end_ms"] if prior else timestamp, actor, participant["device_id"],
                 "replay" if kind == "replay" else "manual", prior=prior)
             utterance.update({k: v for k, v in stamp.items() if k != "captured_session_time_ms"})
+            if prior:
+                utterance["corrected_by"] = actor
             if prior and state["status"] != "active":
                 job = ("result", "", 0) if state["session_status"] == "completed" else None
                 return "transcript.corrected", utterance, job
@@ -539,13 +546,15 @@ class SessionCoordinator:
                 if "speech_range_id" in payload:
                     from . import edit_bundle, speech_ranges
                     rid = text_field(payload, "speech_range_id", 100)
-                    window, _ = edit_bundle.window_for(state, rid)
+                    window, capture = edit_bundle.window_for(state, rid)
                     if (state["meeting"].get("edit_request_output") != "bundle" or
                             state["session_status"] != "recording" or not window.get("command_audio") or
                             rid in state["edit_requests"] or window["base_version_id"] != state["committed_version_id"] or
                             speech_ranges.snapshot(state)[rid]["status"] not in ("failed", "no_speech")):
                         raise MeetingError("이 수정 요청에는 수동 입력을 연결할 수 없습니다.", 409)
                     window["manual_utterance_id"] = utterance["utterance_id"]
+                    utterance["start_ms"] = speech_ranges.sample_time(capture, window["start_sample"])
+                    utterance["end_ms"] = speech_ranges.sample_time(capture, window["end_sample"])
                     if speech_ranges.snapshot(state)[rid]["status"] != "final":
                         raise MeetingError("녹음한 오디오에 공백이 있습니다. 다시 녹음하세요.", 409)
                     return "transcript.finalized", utterance, None
@@ -858,6 +867,7 @@ class SessionCoordinator:
     def utterance(state, line, start, end, actor, device, source, prior=None, **extra):
         uid_value = prior["utterance_id"] if prior else uid("utterance")
         item = {"utterance_id": uid_value, "evidence_id": uid_value, "revision": prior["revision"] + 1 if prior else 1,
+                "meeting_id": state["session_id"], "source": "stt" if source == "live_capture" else source,
                 "text": line, "participant_id": prior["participant_id"] if prior else actor,
                 "device_id": prior["device_id"] if prior else device, "speaker_id": None,
                 "start_ms": start, "end_ms": end, "source_mode": source,
@@ -1196,7 +1206,8 @@ class SessionCoordinator:
             self.emit(state, "image.added", evidence, actor)
             return evidence
 
-    def audio_start(self, sid, token, stream_id, device, *, continuous=False, sample_rate=None):
+    def audio_start(self, sid, token, stream_id, device, *, continuous=False, sample_rate=None,
+                    marker_overlap=False, clock_origin_ms=None):
         with self.transaction():
             actor = self.actor(sid, token)
             state = self.load(sid)
@@ -1219,8 +1230,17 @@ class SessionCoordinator:
             state["capture_state"] = "starting" if tracked else "recording"
             self.audio_streams[sid] = stream_id
             if tracked:
+                if marker_overlap and clock_origin_ms is not None:
+                    # A resumed microphone resets its sample counter. Clock sync
+                    # jitter must not move a new utterance into the previous stream.
+                    from .speech_ranges import sample_time
+                    for info in state["meeting_audio"].values():
+                        through = sample_time(info, info["last_sample"])
+                        if through is not None:
+                            clock_origin_ms = max(clock_origin_ms, through)
                 state["meeting_audio"][stream_id] = {"status": "open", "last_sample": 0, "segments": {}, "gaps": [],
-                                                     "started_at": None, "sample_rate": sample_rate}
+                                                     "started_at": None, "sample_rate": sample_rate,
+                                                     "marker_overlap": marker_overlap, "clock_origin_ms": clock_origin_ms}
             self.emit(state, "capture.state_changed", {"capture_state": state["capture_state"], "stream_id": stream_id}, actor)
             return actor, actual_device
 
@@ -1229,11 +1249,14 @@ class SessionCoordinator:
             state = self.load(sid)
             capture = meeting_state.state_of_capture(state, stream_id)
             if capture is None or state["session_status"] in meeting_state.TERMINAL:
-                return
+                return started_at
+            if capture.get("marker_overlap"):
+                started_at = capture["clock_origin_ms"]
             capture["started_at"] = started_at
             state.update(capture_state="recording", session_status="recording")
             state["meeting"]["started_at"] = state["meeting"]["started_at"] or started_at
             self.emit(state, "meeting.started", {"session_status": "recording", "stream_id": stream_id})
+            return started_at
 
     def audio_progress(self, sid, stream_id, sample):
         with self.transaction():
@@ -1258,8 +1281,12 @@ class SessionCoordinator:
                 directory.mkdir(exist_ok=True)
                 (directory / asset).write_bytes(command_wav)
                 capture["design_ranges"][range_id]["command_audio"] = asset
+            window = capture["design_ranges"][range_id]
+            timestamp = speech_ranges.sample_time(capture, sample)
             self.emit(state, "speech.range_changed", {"range_id": range_id, "stream_id": stream_id,
-                                                     "edge": "start" if start else "end", "sample_index": sample}, actor)
+                      "marker": "edit_command_start" if start else "edit_command_end",
+                      "edge": "start" if start else "end", "sample_index": sample, "timestamp_ms": timestamp,
+                      "base_version_id": window.get("base_version_id")}, actor, occurred=timestamp)
             return bundle
 
     def audio_cutoff(self, sid, stream_id):
@@ -1267,7 +1294,8 @@ class SessionCoordinator:
             state = self.load(sid)
             return state["meeting"]["ended_at"] if meeting_state.state_of_capture(state, stream_id) else None
 
-    def audio_stop(self, sid, stream_id, eos=False, sample=0, expected_sequence=None, actual_sequence=None):
+    def audio_stop(self, sid, stream_id, eos=False, sample=0, expected_sequence=None, actual_sequence=None,
+                   pending_request=None, pending_selection=None):
         with self.transaction():
             if self.audio_streams.get(sid) != stream_id:
                 return
@@ -1277,6 +1305,11 @@ class SessionCoordinator:
             capture = meeting_state.state_of_capture(state, stream_id)
             if capture is not None:
                 capture.update(status="eos" if eos else "interrupted", last_sample=sample)
+                if (eos and isinstance(pending_request, str) and isinstance(pending_selection, str)
+                        and re.fullmatch(r"[A-Za-z0-9_-]{1,100}", pending_selection)):
+                    window = capture.get("design_ranges", {}).get(pending_request)
+                    if window and window.get("base_version_id") and window["end_sample"] is not None:
+                        window["pending_selection_id"] = pending_selection
                 if expected_sequence is not None and expected_sequence != actual_sequence:
                     capture["gaps"].append({"reason": "eos_sequence_mismatch", "expected_sequence": expected_sequence,
                                             "last_received_sequence": actual_sequence})
@@ -1297,25 +1330,48 @@ class SessionCoordinator:
             self.emit(state, "audio.gap", {"stream_id": stream_id, **gap})
 
     def audio_submit(self, sid, stream_id, sequence, start, end, wav, actor, device, view_actor=None, stamp=None):
-        with self.lock:
+        # Apply backpressure to the PCM reader rather than dropping a spoken segment
+        # when CAD work or another meeting temporarily slows down the shared STT worker.
+        while not self.pending_audio.acquire(timeout=.5):
             if self.stopped:
                 return
-            queued = self.pending_audio.acquire(blocking=False)
-            with self.transaction():
-                state = self.load(sid)
-                capture = meeting_state.state_of_capture(state, stream_id)
-                if capture is not None:
-                    capture["segments"][str(sequence)] = {"source_sequence": sequence, "start_ms": start, "end_ms": end,
-                                                          "status": "pending" if queued else "queue_full"}
-                    self.save(state)
-            if not queued:
-                raise MeetingError("전사 대기열이 가득 찼습니다.", 429)
-            def work():
-                try:
-                    self.transcribe_audio(sid, stream_id, sequence, start, end, wav, actor, device, view_actor, stamp)
-                finally:
-                    self.pending_audio.release()
-            self.speech_pool.submit(work)
+        future = None
+        try:
+            with self.lock:
+                if self.stopped:
+                    return
+                with self.transaction():
+                    state = self.load(sid)
+                    capture = meeting_state.state_of_capture(state, stream_id)
+                    if capture is not None:
+                        if str(sequence) in capture["segments"]:
+                            return
+                        job = {"source_sequence": sequence, "start_ms": start, "end_ms": end,
+                               "status": "pending" if wav is not None else "no_speech"}
+                        if stamp:
+                            job.update({k: stamp[k] for k in ("voice_start_sample", "voice_end_sample") if k in stamp})
+                        capture["segments"][str(sequence)] = job
+                        self.save(state)
+                if wav is None:
+                    return
+                future = self.speech_pool.submit(self.transcribe_audio, sid, stream_id, sequence, start, end,
+                                                 wav, actor, device, view_actor, stamp)
+        finally:
+            if future is None:
+                self.pending_audio.release()
+
+        def finished(task):
+            self.pending_audio.release()
+            if task.cancelled() or task.exception() is not None:
+                with self.transaction():
+                    state = self.load(sid)
+                    capture = meeting_state.state_of_capture(state, stream_id)
+                    if capture and capture["segments"][str(sequence)]["status"] == "pending":
+                        self.finish_segment(state, stream_id, sequence, "failed")
+                        self.emit(state, "speech.failed", {"stream_id": stream_id, "source_sequence": sequence,
+                                  "message": "전사 결과를 저장하지 못했습니다."}, actor)
+
+        future.add_done_callback(finished)
 
     def transcribe_audio(self, sid, stream_id, sequence, start, end, wav, actor, device, view_actor, stamp):
         import base64
@@ -1329,7 +1385,10 @@ class SessionCoordinator:
             state["audio_segments"].append(segment_key)
             self.emit(state, "speech.transcribing", record, actor)
         try:
-            result = gateway_request("/v1/transcriptions", {"wav_base64": base64.b64encode(wav).decode()})
+            payload = {"wav_base64": base64.b64encode(wav).decode()}
+            if state["profile"].get("speech_vocabulary"):
+                payload["hotwords"] = state["profile"]["speech_vocabulary"]
+            result = gateway_request("/v1/transcriptions", payload)
             line = result["transcript"].strip()[:1200] if result.get("status", "final") == "final" else ""
         except Exception as error:
             with self.transaction():
@@ -1344,8 +1403,9 @@ class SessionCoordinator:
         if not line:
             with self.transaction():
                 state = self.load(sid)
-                self.finish_segment(state, stream_id, sequence, "no_speech")
-                self.emit(state, "speech.no_speech", record, actor)
+                outcome = "partial_discarded" if result.get("status") == "partial" else "no_speech"
+                self.finish_segment(state, stream_id, sequence, outcome)
+                self.emit(state, "speech." + outcome, record, actor)
             if state.get("session_status") == "completed":
                 self.submit(sid, "result", "", 0)
             return
@@ -1421,11 +1481,19 @@ class SessionCoordinator:
                     pending = any(stream["status"] == "open" or any(s["status"] == "pending"
                                   for s in stream["segments"].values()) for stream in state["meeting_audio"].values())
                     remaining = deadline - time.monotonic()
-                    if not pending or remaining <= 0:
+                    strict = "transcript_status" in state["meeting"]
+                    if not pending or not strict and remaining <= 0:
                         break
-                    self.changed.wait(timeout=remaining)
+                    self.changed.wait(timeout=None if strict else remaining)
                 revision = max((int(key) for key in state["result_exports"]), default=0) + 1
             try:
+                if strict:
+                    meeting_result.freeze_transcript(self.root, state)
+                    with self.transaction():
+                        state = self.load(sid)
+                        if state["meeting"]["transcript_status"] != "finalized":
+                            state["meeting"].update(transcript_status="finalized", transcript_finalized_at=now_ms())
+                            self.emit(state, "transcript.sealed", {"utterance_count": len(state["utterances"])})
                 manifest, key = meeting_result.build_result(self.root, self.models, state, revision)
             except (OSError, ValueError, KeyError) as error:
                 with self.transaction():

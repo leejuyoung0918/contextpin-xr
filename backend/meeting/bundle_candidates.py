@@ -6,6 +6,7 @@ from pathlib import Path
 
 from . import geometry
 from .contracts import MeetingError, canonical, now_ms, text_field, uid
+from .edit_bundle import command_utterances
 from .parameter_relations import effective_values
 
 
@@ -93,28 +94,34 @@ def commit(edge, state, actor, payload):
     edge.verify_model(model)
     reason = text_field(payload, "reason_text", 600, required=False)
     transcript, selection, image = bundle["transcript"], bundle["selection"], bundle["visual_evidence"]
+    lines = command_utterances(state, bundle)
+    command_ids = [line["utterance_id"] for line in lines]
+    command_text = " ".join(line["text"] for line in lines)
     evidence = {"utterance_id": transcript["utterance_id"], "utterance_refs": transcript["utterance_refs"],
-                "transcript": transcript["text"], "transcript_source": transcript["source"],
+                "transcript": command_text, "transcript_source": transcript["source"],
                 "selection_id": selection["selection_id"], "hit_model_local_position": selection["hit_model_local_position"],
                 "image_asset_id": image["image_asset_id"], "image_sha256": image["sha256"]}
     source = {"source_request_id": rid, "candidate_set_id": item["candidate_set_id"], "candidate_id": candidate["candidate_id"],
               "candidate_interpretation": candidate["interpretation"], "parameter_diff": candidate["parameter_diff"],
               "evidence": evidence, "reason": reason or "not_stated"}
     model.update(source, full_parameters=candidate["full_parameters"])
-    refs = {(r["utterance_id"], r["revision"]) for r in transcript["utterance_refs"]}
+    committed_at = now_ms()
     decision = {**source, "decision_id": uid("decision"), "type": "adopt", "outcome": "commit",
+                "edit_request_id": rid, "command_utterance_ids": command_ids, "selected_candidate_id": candidate["candidate_id"],
+                "result_version_id": vid, "selection_id": selection["selection_id"], "image_id": image["image_asset_id"],
+                "commit_time": committed_at,
                 "selected_model_version_id": vid, "previous_committed_model_version_id": base, "base_version_id": base,
                 "candidate_label": "후보 " + candidate["label"], "candidate_title": candidate["interpretation"],
                 "parameter_changes": candidate["parameter_diff"], "actor_id": actor, "confirmed_by": [actor],
-                "committed_at": now_ms(), "rationale_text": reason, "rationale_source": "explicit" if reason else "not_stated",
+                "committed_at": committed_at, "rationale_text": reason, "rationale_source": "explicit" if reason else "not_stated",
                 "consensus_status": "not_checked", "constraints": item["preserved_constraints"],
-                "responses": [], "evidence_refs": [*[r["utterance_id"] for r in transcript["utterance_refs"]],
+                "responses": [], "evidence_refs": [*command_ids,
                                                    selection["selection_id"], image["image_asset_id"]],
-                "evidence_utterances": [u for u in state["utterances"] if (u["utterance_id"], u["revision"]) in refs],
+                "evidence_utterances": lines,
                 "proposal_provenance": item["proposal_provenance"]}
     decision["assembly_record"] = {
         "request_id": rid, "base_model_id": base, "candidate_set_id": item["candidate_set_id"],
-        "source_utterance": transcript["text"], "source_mode": transcript["source"], "evidence": evidence,
+        "source_utterance": command_text, "source_mode": transcript["source"], "evidence": evidence,
         "candidates": [edge.assembly_candidate_record(state, {**option, "status": "valid"}) for option in item["candidates"]],
         "selected_candidate_id": candidate["candidate_id"], "selected_model_file": model["stl_url"],
         "selected_model_sha256": candidate["stl"]["sha256"], "preserved_conditions": state["assembly"]["preserved_conditions"],

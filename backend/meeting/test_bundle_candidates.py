@@ -154,6 +154,13 @@ class CandidateSetTests(CandidateSetCase):
                 self.assertEqual(chosen_model["full_parameters"], chosen["full_parameters"])
                 self.assertEqual(chosen_model["parameters"]["groove_diameter"], 6.5)
                 bundle = state["edit_requests"][key]
+                decision = state["decisions"][-1]
+                self.assertEqual((decision["edit_request_id"], decision["command_utterance_ids"],
+                                  decision["base_version_id"], decision["result_version_id"], decision["selected_candidate_id"]),
+                                 (key, bundle["command_utterance_ids"], self.original, vid, chosen["candidate_id"]))
+                self.assertEqual((decision["selection_id"], decision["image_id"], decision["commit_time"]),
+                                 (bundle["selection"]["selection_id"], bundle["visual_evidence"]["image_asset_id"],
+                                  decision["committed_at"]))
                 self.assertEqual(chosen_model["evidence"]["hit_model_local_position"], bundle["selection"]["hit_model_local_position"])
                 self.assertEqual(chosen_model["evidence"]["image_asset_id"], bundle["visual_evidence"]["image_asset_id"])
                 self.assertEqual(chosen_model["reason"], payload.get("reason_text", "not_stated"))
@@ -231,6 +238,13 @@ class ArchivedCandidateSetTests(CandidateSetCase):
                 self.fail("Archive did not finish.")
             time.sleep(.05)
         before = self.snapshot()
+        download = self.client.get(before["result"]["zip_url"], headers=self.headers)
+        self.assertEqual(download.status_code, 200)
+        with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
+            row, = json.loads(archive.read("design_requests.json"))
+            self.assertEqual(row["command_utterance_ids"], before["edit_requests"][key]["command_utterance_ids"])
+            self.assertIsNone(row["selected_candidate_id"])
+            self.assertEqual(json.loads(archive.read(row["file"])), before["edit_requests"][key])
         self.command("generate_edit_candidates", {"request_id": key}, headers=self.peer, status=(403,))
         with patch.object(bundle_interpretation, "call_provider", side_effect=lambda c, imgs:
                           (self.proposed(c, 6.1, 6.5), {"source": "test_provider"})):
