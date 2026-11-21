@@ -3,7 +3,9 @@
   "dependencies": {
     "com.meta.xr.sdk.core": "209.0.0",
     "com.meta.xr.mrutilitykit": "209.0.0",
+    "com.unity.cloud.gltfast": "6.21.0",
     "com.unity.inputsystem": "1.19.0",
+    "com.unity.nuget.newtonsoft-json": "3.2.2",
     "com.unity.xr.management": "4.5.2",
     "com.unity.xr.openxr": "1.16.1",
     "com.unity.xr.hands": "1.7.3",

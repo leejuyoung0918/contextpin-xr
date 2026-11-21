@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#141827">
+  <meta name="color-scheme" content="light">
+  <title>ContextPin XR · 3D 회의록</title>
+  <link rel="icon" type="image/png" href="/meeting/icon.png">
+  <link rel="stylesheet" href="/meeting/styles.css">
+  <script type="module" src="/meeting/app.js"></script>
+</head>
+<body>
+  <header class="masthead">
+    <a class="brand" href="/meeting/" aria-label="ContextPin XR 3D 회의록">
+      <span class="brand-mark" aria-hidden="true">C</span>
+      <span><strong>ContextPin<span class="brand-xr"> XR</span></strong><small>3D 회의록</small></span>
+    </a>
+    <div class="masthead-actions">
+      <span class="connection" id="connection" role="status">EDGE 확인 중</span>
+      <button class="button pale" id="invite-button" hidden>참가 코드</button>
+      <button class="button pale" id="leave-button" hidden>나가기</button>
+    </div>
+  </header>
+
+  <main class="page">
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <section class="setup" id="setup">
+      <div class="intro">
+        <h1>3D 모델 검토 회의</h1>
+        <p>모델을 보며 수정안을 만들고, 팀이 선택한 모델과 결정 이유를 함께 남기세요.</p>
+      </div>
+      <div class="setup-grid">
+        <form id="create-form" class="panel setup-card">
+          <h2>회의 만들기</h2>
+          <label for="create-name">내 이름</label>
+          <input id="create-name" name="name" maxlength="40" autocomplete="nickname" required placeholder="예: 진행자">
+          <label for="profile-select">모델 프로필</label>
+          <select id="profile-select" name="profile" required disabled></select>
+          <button id="create-submit" class="button primary" disabled>회의 시작</button>
+        </form>
+        <form id="join-form" class="panel setup-card">
+          <h2>회의 참가</h2>
+          <label for="join-name">내 이름</label>
+          <input id="join-name" name="name" maxlength="40" autocomplete="nickname" required placeholder="예: 검토자">
+          <label for="join-code">참가 코드</label>
+          <input id="join-code" name="code" maxlength="24" autocapitalize="characters" spellcheck="false" required placeholder="진행자에게 받은 코드">
+          <button class="button">참가하기</button>
+        </form>
+      </div>
+    </section>
+
+    <section id="meeting" hidden>
+      <div class="meeting-head">
+        <div>
+          <h1 id="object-title"></h1>
+          <p id="participants" class="subtle"></p>
+        </div>
+        <div class="chips" aria-label="회의 상태">
+          <span id="source-mode" class="chip"></span>
+          <span id="capture-status" class="chip"></span>
+        </div>
+      </div>
+      <div class="workspace">
+        <div class="left-column">
+          <section class="panel viewport-panel" aria-labelledby="model-heading">
+            <div class="panel-head">
+              <div>
+                <h2 id="model-heading">3D 모델</h2>
+                <p id="model-meta" class="subtle"></p>
+              </div>
+              <button id="head-view" class="button small" hidden>확정 모델로</button>
+            </div>
+            <div class="viewport">
+              <canvas id="model-canvas" tabindex="0" aria-label="3D 모델 뷰어. 방향 키로 돌리고 클릭해 부위를 선택합니다."></canvas>
+              <div id="view-message" role="status" class="view-message"></div>
+              <div id="viewport-label" class="viewport-label">화면 크기에 맞춤</div>
+              <div class="viewport-tools" role="group" aria-label="모델 화면 배율">
+                <button id="zoom-out" class="tool" title="축소" aria-label="축소">−</button>
+                <button id="zoom-in" class="tool" title="확대" aria-label="확대">+</button>
+                <button id="reset-view" class="tool reset" title="시점 초기화" aria-label="시점 초기화">초기화</button>
+              </div>
+            </div>
+            <div class="model-controls">
+              <div>
+                <h3>부위 선택</h3>
+                <div id="parts" class="chips" role="group" aria-label="모델 부위"></div>
+              </div>
+              <div id="model-files" class="file-actions" role="group" aria-label="현재 모델 파일" hidden>
+                <button id="download-stl" class="button small">STL</button>
+                <button id="download-zip" class="button small">버전 내보내기</button>
+              </div>
+            </div>
+          </section>
+          <details id="media-panel" class="panel detail-panel" hidden>
+            <summary>모델에 연결된 사진</summary>
+            <div id="media-items" class="file-actions"></div>
+            <img id="reference-image" alt="" hidden>
+          </details>
+          <details id="param-section" class="panel detail-panel">
+            <summary>치수 직접 수정과 유지 조건</summary>
+            <form id="parameter-form">
+              <p id="parameter-status" class="subtle"></p>
+              <div id="parameters" class="parameter-grid"></div>
+              <button class="button" id="edit-submit">수정 모델 만들기</button>
+            </form>
+          </details>
+          <section class="panel minutes" aria-labelledby="minutes-heading">
+            <div class="panel-head">
+              <h2 id="minutes-heading">회의록</h2>
+              <button class="button small" id="download-minutes">기록 JSON</button>
+            </div>
+            <div id="minutes-list"></div>
+          </section>
+          <details id="print-panel" class="panel detail-panel" hidden>
+            <summary>실제 출력 결과 기록</summary>
+            <div id="print-results"></div>
+            <form id="print-form">
+              <p class="subtle">현재 표시된 버전을 실제로 출력한 뒤 관찰한 결과를 기록하세요.</p>
+              <label class="view-link"><input id="print-scale" type="checkbox"> 슬라이서의 출력 배율을 확인했습니다.</label>
+              <label for="fit-notes">실물 모양과 맞음새</label>
+              <textarea id="fit-notes" rows="2" maxlength="1200"></textarea>
+              <label for="print-issues">확인한 문제</label>
+              <textarea id="print-issues" rows="2" maxlength="1200"></textarea>
+              <button class="button small">출력 결과 저장</button>
+            </form>
+          </details>
+        </div>
+
+        <aside class="right-column" aria-label="대화와 후보 검토">
+          <section class="panel discussion" aria-labelledby="discussion-heading">
+            <div class="panel-head">
+              <h2 id="discussion-heading">대화</h2>
+              <div class="file-actions">
+                <button id="audio-host" class="button small" title="이 브라우저를 회의 마이크로 지정" hidden>마이크 지정</button>
+                <button id="record-button" class="button small" hidden>녹음 시작</button>
+              </div>
+            </div>
+            <p id="mic-note" class="subtle"></p>
+            <ol id="transcripts" class="transcripts" aria-label="발화 기록" aria-live="polite"></ol>
+            <form id="text-form">
+              <label for="speech-text" class="sr-only">회의 발언</label>
+              <textarea id="speech-text" maxlength="3000" rows="2" required placeholder="변경하고 싶은 부위와 유지할 조건을 함께 적어보세요."></textarea>
+              <div class="composer-actions">
+                <button id="sample-button" class="button small" type="button" hidden>예시 발화 넣기</button>
+                <label id="media-label" class="button small" for="media-input" hidden>사진 추가</label>
+                <input id="media-input" class="sr-only" type="file" accept="image/jpeg,image/png" capture="environment">
+                <button class="button primary small" id="text-submit">발언 보내기</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="panel proposals" aria-labelledby="proposals-heading">
+            <div class="panel-head">
+              <h2 id="proposals-heading">설계 후보</h2>
+              <label class="sr-only" for="round-select">검토 라운드</label>
+              <select id="round-select" hidden></select>
+            </div>
+            <p id="round-status" class="subtle" role="status"></p>
+            <div id="round-content"></div>
+          </section>
+          <details class="panel detail-panel">
+            <summary>기기 및 요청 정보</summary>
+            <dl id="device-info" class="debug-grid"></dl>
+          </details>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="invite-dialog" aria-labelledby="invite-heading">
+    <div class="panel-head">
+      <h2 id="invite-heading">참가 코드</h2>
+      <form method="dialog"><button class="button small">닫기</button></form>
+    </div>
+    <p>검토자가 이 화면의 주소를 열고 아래 코드를 입력하면 같은 모델을 볼 수 있습니다.</p>
+    <p id="invite-code" class="join-code"></p>
+    <button class="button primary" id="copy-code">코드 복사</button>
+  </dialog>
+
+  <dialog id="mic-dialog" aria-labelledby="mic-heading">
+    <div class="panel-head">
+      <h2 id="mic-heading">회의 마이크</h2>
+      <form method="dialog"><button class="button small">취소</button></form>
+    </div>
+    <p id="mic-consent-note">회의 참가자가 녹음과 발화 전사에 동의했는지 확인해 주세요.</p>
+    <label class="view-link"><input type="checkbox" id="bind-voice-view"> 이 마이크에서 내 발언만 수집하고 내 부위 선택을 연결합니다.</label>
+    <button class="button primary" id="allow-record">동의 확인 후 녹음</button>
+  </dialog>
+</body>
+</html>

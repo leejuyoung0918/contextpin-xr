@@ -20,7 +20,7 @@ namespace ContextPin
         public int CurrentReviewIndex => reviewIndex;
 
         enum ScreenState { Home, Consent, Align, Recording, Finishing, Review, Replay, Quiz, Result, Library, Transcript,
-            GuideReview, GuidePractice, GuideResult, Diagnostics }
+            GuideReview, GuidePractice, GuideResult, Diagnostics, Meeting }
         ScreenState screen=ScreenState.Home, transcriptReturn;
         TraceBoard board;
         TraceCapture capture;
@@ -146,6 +146,7 @@ namespace ContextPin
             if(awaitingTrackedHead && InputDevices.GetDeviceAtXRNode(XRNode.Head).TryGetFeatureValue(UnityEngine.XR.CommonUsages.isTracked,out var tracked) && tracked)
             {awaitingTrackedHead=false;Recenter();}
             if(Keyboard.current?.rKey.wasPressedThisFrame==true)Recenter();
+            if(screen==ScreenState.Meeting)UpdateMeeting();
             UpdateGuideTracking();
             UpdatePhysicalBoardVisibility();
             if(!xr && Mouse.current?.rightButton.isPressed==true)
@@ -463,6 +464,6 @@ namespace ContextPin
             }
         }
         void OnApplicationQuit(){if(TraceData!=null)Save();}
-        void OnDestroy(){ReleaseGuideTracking();ReleasePhysicalGuideRegistration();StopTransferRelay();StopSourceAudio();ReleaseControllerBeam();if(ownedPhoto!=null)Destroy(ownedPhoto);}
+        void OnDestroy(){CloseMeeting();ReleaseGuideTracking();ReleasePhysicalGuideRegistration();StopTransferRelay();StopSourceAudio();ReleaseControllerBeam();if(ownedPhoto!=null)Destroy(ownedPhoto);}
     }
 }

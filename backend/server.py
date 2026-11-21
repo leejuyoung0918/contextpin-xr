@@ -12,9 +12,13 @@ import time
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
-import trace_board
-import trace_guide
-from transfer import TransferError, TransferStore, obj
+if __package__:
+    from . import trace_board, trace_guide
+    from .transfer import TransferError, TransferStore, obj
+else:
+    import trace_board
+    import trace_guide
+    from transfer import TransferError, TransferStore, obj
 
 MAX_BYTES = 8 * 1024 * 1024
 ROLES = {"confirm", "cancel", "reset", "yellow", "blue", "power", "auxiliary"}

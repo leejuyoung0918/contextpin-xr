@@ -1,0 +1,50 @@
+{
+  "object_id": "demo_fixture",
+  "display_name": "예제 · 파라메트릭 조형 블록",
+  "adapter_id": "rounded_fixture",
+  "adapter_revision": 1,
+  "design_units": "mm",
+  "capabilities": {
+    "can_view": true, "can_annotate": true, "can_parametric_edit": true, "can_export_stl": true
+  },
+  "semantic_parts": [
+    {"part_id": "base", "label": "바닥", "aliases": ["밑면", "하단", "받침", "base"], "selectable_regions": ["base"]},
+    {"part_id": "body", "label": "몸체", "aliases": ["옆면", "측면", "허리", "전체 윤곽", "body"], "selectable_regions": ["body"]},
+    {"part_id": "rim", "label": "윗부분", "aliases": ["상단", "윗면", "상부", "어깨", "rim"], "selectable_regions": ["rim"]}
+  ],
+  "parameters": [
+    {"parameter_id": "width_mm", "label": "폭", "type": "number", "unit": "mm", "default_value": 100, "min_value": 60, "max_value": 180, "affected_part_ids": ["base", "body", "rim"], "aliases": ["너비", "가로", "width"], "change_aliases": ["넓혀", "넓게", "좁혀", "좁게"]},
+    {"parameter_id": "depth_mm", "label": "깊이", "type": "number", "unit": "mm", "default_value": 60, "min_value": 40, "max_value": 120, "affected_part_ids": ["base", "body", "rim"], "aliases": ["세로", "depth"], "change_aliases": ["깊게", "얕게"]},
+    {"parameter_id": "height_mm", "label": "높이", "type": "number", "unit": "mm", "default_value": 36, "min_value": 22, "max_value": 100, "affected_part_ids": ["body", "rim"], "aliases": ["키", "height"], "change_aliases": ["높여", "높게", "낮춰", "낮게"]},
+    {"parameter_id": "corner_radius_mm", "label": "모서리 반경", "type": "number", "unit": "mm", "default_value": 3, "min_value": 1, "max_value": 15, "affected_part_ids": ["base", "body", "rim"], "aliases": ["반경", "모서리", "코너", "corner", "radius"], "change_aliases": ["둥글게", "둥글려", "라운드"]},
+    {"parameter_id": "waist_inset_mm", "label": "몸체 윤곽 깊이", "type": "number", "unit": "mm", "default_value": 1, "min_value": 0, "max_value": 12, "affected_part_ids": ["body"], "aliases": ["허리 곡선", "몸체 곡선", "윤곽", "waist", "contour"], "change_aliases": ["잘록", "오목"]},
+    {"parameter_id": "rim_bevel_mm", "label": "상단 경사 깊이", "type": "number", "unit": "mm", "default_value": 2, "min_value": 0.5, "max_value": 10, "affected_part_ids": ["rim"], "aliases": ["윗모서리", "상단 경사", "상단 마감", "bevel"], "change_aliases": ["경사지게", "깎아"]}
+  ],
+  "edit_capabilities": [
+    {
+      "operation_id": "set_parameter",
+      "meaning": "허용된 매개변수의 절댓값을 설정합니다.",
+      "applicable_part_ids": ["base", "body", "rim"],
+      "input_parameter_schema": {"part_id": "semantic_part_id", "parameter_id": "parameter_id", "value": "parameter_value", "unit": "parameter_unit"},
+      "allowed_ranges": "parameters",
+      "affected_properties": ["width_mm", "depth_mm", "height_mm", "base_width_mm"],
+      "preserved_properties": []
+    }
+  ],
+  "measured_properties": [
+    {"property_id": "width_mm", "label": "전체 폭", "unit": "mm", "aliases": ["폭", "너비", "가로", "width"]},
+    {"property_id": "depth_mm", "label": "전체 깊이", "unit": "mm", "aliases": ["깊이", "세로", "depth"]},
+    {"property_id": "height_mm", "label": "전체 높이", "unit": "mm", "aliases": ["높이", "height"]},
+    {"property_id": "base_width_mm", "label": "바닥 폭", "unit": "mm", "aliases": ["바닥 폭", "바닥폭", "바닥 너비", "base width"]}
+  ],
+  "default_constraints": [],
+  "print_profile_metadata": {"build_axis": "+Z", "process_validation": "not_performed"},
+  "optional_physical_reference": null,
+  "demo_utterance": "전체 높이는 그대로, 좀 더 곡선적인 느낌이면 좋겠어.",
+  "demo_ambiguity_aliases": ["곡선적", "곡선으로", "부드럽게", "더 둥근 느낌", "둥글게", "more curved"],
+  "demo_interpretations": [
+    {"parameter_id": "corner_radius_mm", "part_id": "body", "title": "평면 모서리를 둥글게", "interpretation": "곡선적인 느낌을 평면에서 본 네 모서리의 반경으로 해석했습니다.", "delta": 6},
+    {"parameter_id": "waist_inset_mm", "part_id": "body", "title": "몸체 윤곽을 완만하게", "interpretation": "몸체의 중간 단면을 안쪽으로 넣어 측면에 곡선을 만듭니다.", "delta": 7},
+    {"parameter_id": "rim_bevel_mm", "part_id": "rim", "title": "윗부분 경사를 길게", "interpretation": "윗면으로 이어지는 상단 마감의 경사를 더 길고 부드럽게 만듭니다.", "delta": 5}
+  ]
+}

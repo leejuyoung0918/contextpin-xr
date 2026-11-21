@@ -11,6 +11,7 @@ namespace ContextPin
     [Serializable] public sealed class RelayConfig
     {
         public string serverUrl="http://127.0.0.1:8787";
+        public string meetingServerUrl="http://127.0.0.1:8788";
         // Optional for providers without speech recognition. Never put an API key here.
         public string suppliedTranscript="";
     }
@@ -73,9 +74,9 @@ namespace ContextPin
             done("녹음 중 · 핀치 직전 최대 12초만 분석합니다.");
         }
 
-        public byte[] AudioSnapshot()
+        public byte[] AudioSnapshot(bool mono=false)
         {
-            return _buffer?.Snapshot(Microphone.GetPosition(null), Time.realtimeSinceStartup);
+            return _buffer?.Snapshot(Microphone.GetPosition(null), Time.realtimeSinceStartup, mono);
         }
         public void StopMicrophone()
         {
@@ -182,7 +183,7 @@ namespace ContextPin
         readonly AudioClip clip;
         readonly float started;
         public MicrophoneBuffer(AudioClip clip,float started) { this.clip=clip; this.started=started; }
-        public byte[] Snapshot(int position,float now)
+        public byte[] Snapshot(int position,float now,bool mono=false)
         {
             if(position<0) return null;
             int frames=Math.Min(Math.Min((int)((now-started)*clip.frequency),clip.samples),clip.frequency*12);
@@ -191,15 +192,27 @@ namespace ContextPin
             int start=(position-frames+clip.samples)%clip.samples;
             using(var stream=new MemoryStream()) using(var writer=new BinaryWriter(stream))
             {
-                int bytes=frames*clip.channels*2;
+                int channels=mono?1:clip.channels;
+                int bytes=frames*channels*2;
                 writer.Write(Encoding.ASCII.GetBytes("RIFF"));writer.Write(36+bytes);writer.Write(Encoding.ASCII.GetBytes("WAVEfmt "));
-                writer.Write(16);writer.Write((short)1);writer.Write((short)clip.channels);writer.Write(clip.frequency);
-                writer.Write(clip.frequency*clip.channels*2);writer.Write((short)(clip.channels*2));writer.Write((short)16);
+                writer.Write(16);writer.Write((short)1);writer.Write((short)channels);writer.Write(clip.frequency);
+                writer.Write(clip.frequency*channels*2);writer.Write((short)(channels*2));writer.Write((short)16);
                 writer.Write(Encoding.ASCII.GetBytes("data"));writer.Write(bytes);
-                for(int i=0;i<frames;i++)for(int ch=0;ch<clip.channels;ch++)
-                    writer.Write((short)Mathf.RoundToInt(Mathf.Clamp(ring[((start+i)%clip.samples)*clip.channels+ch],-1,1)*32767));
+                for(int frame=0;frame<frames;frame++)
+                {
+                    int offset=((start+frame)%clip.samples)*clip.channels;
+                    if(mono)
+                    {
+                        float average=0;
+                        for(int channel=0;channel<clip.channels;channel++)average+=ring[offset+channel];
+                        writer.Write(Pcm16(average/clip.channels));
+                    }
+                    else
+                        for(int channel=0;channel<channels;channel++)writer.Write(Pcm16(ring[offset+channel]));
+                }
                 return stream.ToArray();
             }
         }
+        static short Pcm16(float value) => (short)Mathf.RoundToInt(Mathf.Clamp(value,-1,1)*32767);
     }
 }

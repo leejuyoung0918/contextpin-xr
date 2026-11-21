@@ -15,15 +15,16 @@ namespace ContextPin
         void DrawHome()
         {
             RoundBox("HomeArticle",content,36,103,1168,398,Card,18);
-            Label("HomeSubject",content,64,119,559,39,"브레드보드 LED 실습",23,Mint);
-            BoldLabel("Title",content,64,167,542,122,"교수의 시연을 따라\n회로를 완성하세요",48,Light);
+            Label("HomeSubject",content,64,119,559,39,"시제품 설계",23,Mint);
+            BoldLabel("Title",content,64,167,542,122,"같은 모델을 보며\n설계를 결정하세요",48,Light);
             Label("Description",content,66,300,520,72,
-                "시연을 실습 단계로 만들고, 막힌 곳에서 그때의 설명을 다시 들을 수 있어요.",25,Muted);
-            Button("HomeGuideExample",64,403,256,66,"LED 예시 시연",OpenGuideExample,true);
-            Button("HomeGuideLive",333,403,256,66,"실물 기록",BeginGuideLiveConsent);
+                "수정한 3D 형태를 비교하고, 결정한 모델과 회의 기록을 함께 남기세요.",25,Muted);
+            Button("HomeMeeting",64,403,525,66,"3D 설계 회의",EnterMeeting,true);
             DrawGuideBoard(new GuideStep {kind="led",fromPoint="a-2",toPoint="b-1"},
-                609,123,572,357,"a-2","b-1","LED 양극과 음극을 연결할 위치",
+                609,123,572,267,"a-2","b-1","브레드보드 LED 실습",
                 false,null,true);
+            Button("HomeGuideExample",609,403,279,66,"LED 예시 시연",OpenGuideExample);
+            Button("HomeGuideLive",903,403,278,66,"실물 기록",BeginGuideLiveConsent);
 
             RoundBox("Saved practice card",content,36,519,1168,143,Card,14);
             BoldLabel("Saved title",content,63,532,539,45,"회로 설명 복습과 저장 기록",28,Light);

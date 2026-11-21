@@ -91,6 +91,7 @@ namespace ContextPin
                 case ScreenState.GuidePractice: DrawGuidePractice();DrawGuideStudentMarkers();break;
                 case ScreenState.GuideResult: DrawGuideResult();break;
                 case ScreenState.Diagnostics: DrawTransferDiagnostics();break;
+                case ScreenState.Meeting: DrawMeeting();break;
             }
             Box("FooterRule",content,36,688,W-72,2,Divider);
             feedbackText=Label("Notice",content,36,696,960,52,"",20,Gold);
@@ -113,7 +114,7 @@ namespace ContextPin
             Box("Brand trace",content,47,33,14,3,Deep);
             RoundBox("Brand pad 1",content,43,30,10,10,Deep,5);
             RoundBox("Brand pad 2",content,57,30,10,10,Deep,5);
-            BoldLabel("Brand",content,86,13,420,45,"ContextPin Trace",28,HeaderText);
+            BoldLabel("Brand",content,86,13,420,45,screen==ScreenState.Meeting || screen==ScreenState.Home?"ContextPin XR":"ContextPin Trace",28,HeaderText);
             if(guideRecording || guideAlignment!=GuideAlignment.None || screen==ScreenState.GuideReview ||
                 screen==ScreenState.GuidePractice || screen==ScreenState.GuideResult)
             {

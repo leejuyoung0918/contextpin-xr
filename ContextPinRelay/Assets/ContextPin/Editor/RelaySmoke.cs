@@ -24,6 +24,11 @@ namespace ContextPin.Editor
                     SessionState.SetBool("TraceSimulatorSmoke",false);
                     TraceSimulatorSmoke.Begin();
                 }
+                if(state==PlayModeStateChange.EnteredPlayMode && SessionState.GetBool("MeetingSmoke",false))
+                {
+                    SessionState.SetBool("MeetingSmoke",false);
+                    MeetingSmoke.Begin(SessionState.GetBool("ContextPinExplicitSimulator",false));
+                }
                 if(state==PlayModeStateChange.EnteredEditMode && SessionState.GetBool("TraceSimulatorExit",false))
                 {
                     SessionState.SetBool("TraceSimulatorExit",false);
@@ -44,6 +49,22 @@ namespace ContextPin.Editor
 
         public static void RunSimulator()
         {
+            SetupSimulator("TraceSimulatorSmoke");
+        }
+
+        public static void RunMeeting()
+        {
+            SessionState.SetBool("MeetingSmoke",true);
+            RelaySetup.DesktopPreview();
+        }
+
+        public static void RunMeetingSimulator()
+        {
+            SetupSimulator("MeetingSmoke");
+        }
+
+        static void SetupSimulator(string checkName)
+        {
             string root=Environment.GetEnvironmentVariable("RELAY_WORKSPACE");
             string runtime=Environment.GetEnvironmentVariable("XR_RUNTIME_JSON");
             if(string.IsNullOrEmpty(root) || string.IsNullOrEmpty(runtime) || !File.Exists(runtime))
@@ -57,7 +78,7 @@ namespace ContextPin.Editor
             if(settings==null)throw new InvalidOperationException("Missing Standalone XR settings");
             settings.InitManagerOnStart=true;
             SessionState.SetBool("ContextPinExplicitSimulator",true);
-            SessionState.SetBool("TraceSimulatorSmoke",true);
+            SessionState.SetBool(checkName,true);
             EditorApplication.ExecuteMenuItem("Window/General/Game");
             EditorApplication.isPlaying=true;
         }

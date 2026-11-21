@@ -175,9 +175,67 @@ def doctor():
         result['relay']={'status':'unreachable','port':port}
     print(json.dumps(result,ensure_ascii=False,indent=2))
 
+def smoke_meeting(simulator):
+    artifacts = ROOT / 'artifacts'
+    artifacts.mkdir(exist_ok=True)
+    env = {**os.environ, 'RELAY_WORKSPACE': str(ROOT)}
+    edge = env.setdefault('MEETING_EDGE_URL', 'http://127.0.0.1:8788')
+    try:
+        with urllib.request.urlopen(edge.rstrip('/') + '/healthz', timeout=3) as health:
+            if health.status != 200:
+                raise ValueError(f'HTTP {health.status}')
+    except (OSError, ValueError) as error:
+        raise SystemExit(f'회의 EDGE를 먼저 시작하세요. {edge} · {error}') from error
+    report = artifacts / ('meeting-simulator-report.json' if simulator else 'meeting-smoke-report.json')
+    log = artifacts / ('unity-meeting-simulator.log' if simulator else 'unity-meeting.log')
+    report.unlink(missing_ok=True)
+    options = ['-force-metal'] if simulator else ['-batchmode']
+    method = 'RunMeetingSimulator' if simulator else 'RunMeeting'
+    if simulator:
+        env.update(simulator_env())
+    command = [unity(), '-projectPath', unity_project(), *options,
+               '-executeMethod', f'ContextPin.Editor.RelaySmoke.{method}', '-logFile', log]
+    try:
+        if simulator:
+            # The native simulator can keep an editor window alive after Unity
+            # writes its report. Bound teardown for the editor this check owns.
+            with subprocess.Popen([str(arg) for arg in command], env=env) as child:
+                deadline = time.monotonic() + 160
+                try:
+                    while child.poll() is None and time.monotonic() < deadline:
+                        if report.is_file():
+                            try:
+                                if 'success' in json.loads(report.read_text()):
+                                    try:
+                                        child.wait(timeout=15)
+                                    except subprocess.TimeoutExpired:
+                                        pass
+                                    break
+                            except json.JSONDecodeError:
+                                pass
+                        time.sleep(.5)
+                finally:
+                    if child.poll() is None:
+                        child.terminate()
+                        try:
+                            child.wait(timeout=8)
+                        except subprocess.TimeoutExpired:
+                            child.kill()
+                            child.wait()
+        else:
+            run(command, env=env, timeout=180)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        detail = json.loads(report.read_text()).get('error') if report.is_file() else None
+        raise SystemExit(detail or f'Unity 회의 검증을 완료하지 못했습니다. {log}') from error
+    saved = json.loads(report.read_text()) if report.is_file() else {}
+    if not saved.get('success'):
+        raise SystemExit(saved.get('error') or f'회의 검증 결과를 받지 못했습니다. {log}')
+    print(report)
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=['doctor','open','prepare','desktop','simulator','build','deploy','export','server','test','smoke','smoke-simulator','report'])
+    parser.add_argument('command',choices=['doctor','open','prepare','desktop','simulator','build','deploy','export','server','test','smoke','smoke-simulator','smoke-meeting','smoke-meeting-simulator','report'])
     parser.add_argument('--serial',help='deploy/export 대상 Quest ADB 기기번호')
     parser.add_argument('--archive',type=Path,help='report용 기기 export 폴더, Trace 폴더 또는 session.json')
     parser.add_argument('--relay-data',type=Path,help='report용 PC relay 저장 폴더 또는 transfer.sqlite3')
@@ -197,6 +255,8 @@ def main():
         env={**os.environ,'RELAY_WORKSPACE':str(ROOT)}
         run([unity(),'-projectPath',unity_project(),'-batchmode',
              '-executeMethod','ContextPin.Editor.RelaySmoke.Run','-logFile',artifacts/'unity-smoke.log'],env=env,timeout=600)
+    elif args.command in {'smoke-meeting', 'smoke-meeting-simulator'}:
+        smoke_meeting(args.command.endswith('-simulator'))
     elif args.command=='smoke-simulator':
         artifacts=ROOT/'artifacts';artifacts.mkdir(exist_ok=True)
         log=artifacts/'unity-simulator-smoke.log'
@@ -243,6 +303,7 @@ def main():
         command=device(args.serial)
         if not APK.exists():editor('BuildQuest',True)
         run(command+['reverse','tcp:8787',f'tcp:{relay_port(server_env())}'])
+        run(command+['reverse','tcp:8788','tcp:8788'])
         run(command+['install','-r',APK])
         run(command+['shell','am','start','-n','org.contextpin.relay/com.unity3d.player.UnityPlayerActivity'])
         print('설치·실행 완료. 실제 AI는 별도 터미널에서 server 명령을 실행하세요.')
