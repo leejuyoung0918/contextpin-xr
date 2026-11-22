@@ -55,6 +55,22 @@ def _status(capture, window, utterances_by_id):
     result.update(edit_request_id=window["range_id"], start_ms=sample_time(capture, start), end_ms=sample_time(capture, end),
                   received_through_sample=min(acknowledged, end) if end is not None else acknowledged,
                   utterances=[], error=None)
+    if "b_status" in window:
+        from .paper_space import pose_fields
+        status = window["b_status"]
+        result.update(status=status, base_version_id=window["base_version_id"], created_at=window["created_at"],
+                      error=window.get("error"), command_requested_by=window["participant_id"], speaker_id=None,
+                      command_text_source=window.get("command_text_source"), command_start_sample_index=start,
+                      command_end_sample_index=end, adopted_revision=window["adopted_revision"], **pose_fields(window))
+        if status == "final":
+            lines = [utterances_by_id.get(uid) for uid in window["linked_ids"]]
+            if any(not line or line["status"] != "final" for line in lines):
+                return {**result, "status": "failed", "error": "연결된 확정 전사를 찾지 못했습니다."}
+            result["utterances"] = [{k: line[k] for k in ("utterance_id", "revision", "text")} for line in lines]
+            corrected = window["command_text_source"] == "linked_meeting_utterances" and any(
+                line["source_mode"] == "manual" and line.get("prior_revision") for line in lines)
+            result["transcript_source"] = "corrected" if corrected else "stt"
+        return result
     if "base_version_id" in window:
         result.update(base_version_id=window["base_version_id"], created_at=window["created_at"])
         if end == start and capture.get("marker_overlap"):
@@ -120,19 +136,31 @@ def snapshot(state):
             item = _status(capture, window, evidence)
             lines = item["utterances"] if item["status"] == "final" else []
             item["command_utterance_ids"] = [line["utterance_id"] for line in lines]
-            item["command_text"] = " ".join(line["text"] for line in lines)
+            item["command_text"] = (window["clip_text"] if item["status"] == "final" and "clip_text" in window
+                                    else " ".join(line["text"] for line in lines))
+            if "b_status" in window:
+                origin = state["meeting"].get("started_at")
+                for key in ("start", "end"):
+                    instant = item[key + "_ms"]
+                    item["command_" + key + "_session_ms"] = instant - origin if instant is not None and origin is not None else None
             if "base_version_id" in window and item["status"] == "final" and not saved:
                 item["edit_request_draft"] = {"request_id": rid, "meeting_id": state["session_id"],
-                    "base_version_id": window["base_version_id"], "utterance_id": lines[0]["utterance_id"],
+                    "base_version_id": window["base_version_id"], "utterance_id": lines[0]["utterance_id"] if lines else None,
                     "command_utterance_ids": item["command_utterance_ids"], "transcript": item["command_text"],
                     "transcript_source": item["transcript_source"],
-                    "created_at": max(utterances[line["utterance_id"]]["received_at"] for line in lines)}
+                    "created_at": window.get("finalized_at") or max(utterances[line["utterance_id"]]["received_at"] for line in lines)}
+                if "b_status" in window:
+                    item["edit_request_draft"].update(command_requested_by=window["participant_id"],
+                                                     command_text_source=item["command_text_source"], speaker_id=None,
+                                                     adopted_revision=window["adopted_revision"],
+                                                     **{k: item[k] for k in ("latest_pose_paper", "latest_pose_revision",
+                                                                             "paper_frame_revision") if k in item})
             result[rid] = item
     return result
 
 
 def validate_refs(state, actor, speech_range_id, utterance_refs):
-    if not isinstance(speech_range_id, str) or not isinstance(utterance_refs, list) or not utterance_refs:
+    if not isinstance(speech_range_id, str) or not isinstance(utterance_refs, list):
         raise MeetingError("확정된 수정 발언 구간의 발화가 필요합니다.", 409)
     utterances = {u["utterance_id"]: u for u in state["utterances"]}
     for capture in state.get("meeting_audio", {}).values():
@@ -141,6 +169,7 @@ def validate_refs(state, actor, speech_range_id, utterance_refs):
             view = _status(capture, window, utterances)
             expected = [{k: ref[k] for k in ("utterance_id", "revision")} for ref in view["utterances"]]
             if (view["participant_id"] != actor or view["status"] != "final" or expected != utterance_refs
+                    or not expected and window.get("command_text_source") != "command_window_stt"
                     or any(type(ref.get("revision")) is not int for ref in utterance_refs)):
                 break
             return [utterances[ref["utterance_id"]] for ref in expected]

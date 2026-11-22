@@ -36,7 +36,10 @@ namespace ContextPin
             rightTriggerWasDown = rightDown;
 
             var active = OVRInput.GetActiveController();
+            bool aimAtLatest = rightTracked && !leftClicked && RightLatestGripHeld(XRController.rightHand) &&
+                (latestGrab != null || CanMoveLatest);
             if (leftClicked != rightClicked) preferLeftController = leftClicked;
+            else if (aimAtLatest) preferLeftController = false;
             else if (active == OVRInput.Controller.LTouch) preferLeftController = true;
             else if (active == OVRInput.Controller.RTouch) preferLeftController = false;
 
@@ -51,7 +54,7 @@ namespace ContextPin
             bool pinchClicked = pinching && !wasPressed;
             wasPressed = pinching;
             bool handsActive = pinching || (active & OVRInput.Controller.Hands) != 0;
-            if (leftClicked || rightClicked || (!handsActive && tracking != 0))
+            if (leftClicked || rightClicked || aimAtLatest || (!handsActive && tracking != 0))
             {
                 controllerPointer = true;
                 bool useLeft = leftTracked && (!rightTracked || preferLeftController);
@@ -170,7 +173,23 @@ namespace ContextPin
         bool ReadExplicitTargetButton(bool panelOwnsPointer)
         {
             var right = XRController.rightHand;
-            if (BundleOnPaper && !CapturingPaperEdit)
+            if (IntegratedPaperControls)
+            {
+                if (panelOwnsPointer || assemblyMenu || movingMeetingPanel || confirmingMeetingEnd ||
+                    !TryReadTrackedAim(right, out var ray)) { SetBundleHover(null); return false; }
+                switch (CurrentPaperInteraction)
+                {
+                    case PaperInteraction.CandidatesDisplayed:
+                        return HandleBundleCandidateRay(ray, RightAWasPressed(right));
+                    case PaperInteraction.LatestDisplayed:
+                        return RightAWasPressed(right) && SharePaperRay(ray);
+                    case PaperInteraction.AwaitingTarget:
+                        if (!OwnPaperTarget) return false;
+                        break;
+                    default: return false;
+                }
+            }
+            else if (BundleOnPaper && !CapturingPaperEdit)
             {
                 if (!panelOwnsPointer && TryReadTrackedAim(right, out var candidateRay))
                 {
@@ -178,9 +197,10 @@ namespace ContextPin
                 }
                 else SetBundleHover(null);
             }
-            if (SharedPaperMeeting && !CapturingPaperEdit && !panelOwnsPointer && RightAWasPressed(right) &&
+            if (!IntegratedPaperControls && SharedPaperMeeting && !CapturingPaperEdit && !panelOwnsPointer && RightAWasPressed(right) &&
                 TryReadTrackedAim(right, out var paperRay) && SharePaperRay(paperRay)) return true;
-            if (!ExplicitDesignReady || OtherDeviceRecordsDesign || panelOwnsPointer || AssemblySampling || AssemblyQrScanning ||
+            if (!ExplicitDesignReady || OtherDeviceRecordsDesign && explicitRequest?.RemoteWindow != true ||
+                panelOwnsPointer || AssemblySampling || AssemblyQrScanning ||
                 movingMeetingPanel || explicitRequest?.Conflict == true) return false;
             if (CaptureBundleMeeting && (explicitRequest?.Speech != DesignSpeech.Final ||
                 explicitRequest.BundleSaved || explicitRequest.Selection != null)) return false;

@@ -65,7 +65,7 @@ namespace ContextPin
         int PaperFrameRevision => PaperState?.Value<int?>("paper_frame_revision") ?? 0;
         // The original phone stand's CAD pivot is its base centre. The old layout published
         // it at the paper origin. Only the host can replace that frozen, shared layout.
-        bool PublishedCenterLayout => OffsetPaperGallery && paperLatestPose is Pose pose &&
+        bool PublishedCenterLayout => OffsetPaperGallery && LatestPoseRevision <= 0 && paperLatestPose is Pose pose &&
             new Vector2(pose.position.x, pose.position.z).sqrMagnitude < .03f * .03f;
         bool PaperLayoutNeedsReset => SharedPaperMeeting && MeetingHost && PublishedCenterLayout &&
             AssemblySessionStatus is not ("completed" or "finalizing" or "save_error");
@@ -110,6 +110,10 @@ namespace ContextPin
 
         void ResetPaperState()
         {
+            latestGrab = null;
+            latestGripHeld = false;
+            latestMoveInFlight = false;
+            appliedPaperVersion = null;
             paperRevisionSeen = 0;
             paperSyncPending = paperGuestOpened = false;
             paperRetryAt = 0;
@@ -185,13 +189,16 @@ namespace ContextPin
                     var pivot = bundleSlots[i].Root.transform;
                     poses[TextValue(bundleCandidates[i], "candidate_id")] = CapturePose(WorldToPaperPose(reviewTable, new Pose(pivot.position, pivot.rotation)));
                 }
-                SendPaperCommand("paper_layout", new JObject { ["latest_version_id"] = AssemblyAdoptedId,
-                    ["active_candidate_set_id"] = bundleSetId, ["candidate_poses_paper"] = poses }, true);
+                var body = new JObject { ["latest_version_id"] = AssemblyAdoptedId,
+                    ["active_candidate_set_id"] = bundleSetId, ["candidate_poses_paper"] = poses };
+                if (LatestPoseRevision >= 0) body["expected_pose_revision"] = LatestPoseRevision;
+                SendPaperCommand("paper_layout", body, true);
             }
         }
 
         bool SharePaperRay(Ray ray)
         {
+            if (IntegratedPaperControls && CurrentPaperInteraction != PaperInteraction.LatestDisplayed) return false;
             if (!PaperRenderable || assemblyMenu || confirmingMeetingEnd || movingMeetingPanel || meetingModel == null ||
                 meetingLoadedVersion != AssemblyAdoptedId || !meetingModel.activeInHierarchy ||
                 !Physics.Raycast(ray, out var hit, 12) || !hit.transform.IsChildOf(meetingModel.transform)) return false;
@@ -202,7 +209,7 @@ namespace ContextPin
         void DisplayPaperHit()
         {
             var selection = PaperState?["shared_selection"] as JObject;
-            if (!PaperRenderable || selection?.Value<int?>("paper_frame_revision") != PaperFrameRevision ||
+            if (latestGrab != null || !PaperRenderable || selection?.Value<int?>("paper_frame_revision") != PaperFrameRevision ||
                 TextValue(selection, "model_version_id") != meetingLoadedVersion || meetingLoadedVersion != AssemblyAdoptedId ||
                 meetingModel == null || !meetingModel.activeInHierarchy || a4DisplayRoot == null ||
                 ReadMeetingVector(selection?["hit_position_paper"]) is not Vector3 hit)

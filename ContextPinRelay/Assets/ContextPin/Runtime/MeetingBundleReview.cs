@@ -16,6 +16,7 @@ namespace ContextPin
 
         readonly MeetingModelSlot[] bundleSlots = { new MeetingModelSlot(), new MeetingModelSlot() };
         GameObject bundleContainer;
+        Pose? bundlePlacementPose;
         string bundleSetId, bundleRequestId, bundleBaseId, bundleCommitTarget, bundleReviewError;
         JObject[] bundleCandidates = Array.Empty<JObject>();
         bool bundleCommitPending;
@@ -74,6 +75,7 @@ namespace ContextPin
             bundleSetId = setId;
             bundleRequestId = TextValue(set, "request_id");
             bundleBaseId = TextValue(set, "base_version_id");
+            bundlePlacementPose = TryPaperPose(set["latest_pose_paper"], out var frozen) ? frozen : (Pose?)null;
             bundleCandidates = Values(set, "candidates").OfType<JObject>().OrderBy(c => TextValue(c, "candidate_key")).ToArray();
             if (bundleCandidates.Length is < 1 or > 2 ||
                 bundleCandidates.Any(c => TextValue(c, "candidate_key") is not ("A" or "B") ||
@@ -113,6 +115,7 @@ namespace ContextPin
             }
             if (bundleContainer != null) Destroy(bundleContainer);
             bundleContainer = null;
+            bundlePlacementPose = null;
             bundleCandidates = Array.Empty<JObject>();
             bundleSetId = bundleRequestId = bundleBaseId = bundleCommitTarget = bundleReviewError = null;
             bundleCommitPending = false;
@@ -145,7 +148,8 @@ namespace ContextPin
                     if (bundleContainer.activeSelf) bundleContainer.SetActive(false);
                     return;
                 }
-                var latest = FootprintOnTable(meetingAssetBounds, latestAnchor.position, latestAnchor.rotation, 0);
+                var layout = PaperToWorldPose(reviewTable, BundleLayoutPose);
+                var latest = FootprintOnTable(meetingAssetBounds, layout.position, layout.rotation, 0);
                 var physical = OriginalFootprintOnTable(0);
                 if (!TryBundlePositions(physical, latest, out a, out b))
                 {
@@ -175,7 +179,8 @@ namespace ContextPin
                     var world = PaperToWorldPose(reviewTable, local);
                     root.SetPositionAndRotation(world.position, world.rotation);
                 }
-                else root.SetPositionAndRotation(reviewTable.position + reviewTable.rotation * (i == 0 ? a : b), latestAnchor.rotation);
+                else root.SetPositionAndRotation(reviewTable.position + reviewTable.rotation * (i == 0 ? a : b),
+                    reviewTable.rotation * BundleLayoutPose.rotation);
                 if (SharedPaperMeeting && slot.Material != null)
                 {
                     bool selected = TextValue(PaperState, "selected_candidate_id") == TextValue(bundleCandidates[i], "candidate_id");
@@ -206,28 +211,50 @@ namespace ContextPin
             a.xMin >= b.xMax + BundleGap || b.xMin >= a.xMax + BundleGap ||
             a.yMin >= b.yMax + BundleGap || b.yMin >= a.yMax + BundleGap;
 
+        Pose BundleLayoutPose => bundlePlacementPose ?? paperLatestPose ??
+            WorldToPaperPose(reviewTable, new Pose(latestAnchor.position, latestAnchor.rotation));
+
         bool TryBundlePositions(Rect physical, Rect latest, out Vector3 first, out Vector3 second)
         {
             first = second = default;
+            if (!OffsetPaperGallery && (!SpaceBetween(physical, latest) ||
+                !FitsPaper(physical, reviewTableSize) || !FitsPaper(latest, reviewTableSize))) return false;
+            var anchor = BundleLayoutPose;
+            if (TryBundleRow(physical, latest, anchor, PaperCandidateForward, out first, out second)) return true;
+            // Moving Latest can put the preferred row over the real stand. Keep A/B together on the other side.
+            return OffsetPaperGallery && TryBundleRow(physical, latest, anchor, -PaperCandidateForward, out first, out second);
+        }
+
+        bool TryBundleRow(Rect physical, Rect latest, Pose anchor, float forwardOffset, out Vector3 first, out Vector3 second)
+        {
+            first = second = default;
             bool fixedGallery = OffsetPaperGallery;
-            if (!SpaceBetween(physical, latest) ||
-                !fixedGallery && (!FitsPaper(physical, reviewTableSize) || !FitsPaper(latest, reviewTableSize))) return false;
             Rect previous = default;
             for (int i = 0; i < bundleCandidates.Length; i++)
             {
                 var b = bundleSlots[i].Bounds;
-                var footprint = FootprintOnTable(b, reviewTable.position, latestAnchor.rotation, 0);
+                var footprint = FootprintOnTable(b, reviewTable.position, reviewTable.rotation * anchor.rotation, 0);
                 // The key identifies the physical place even when only B passed validation.
                 float sign = bundleSlots[i].BundleKey == "A" ? -1 : 1;
-                var center = fixedGallery ? new Vector2(sign * PaperCandidateSide, PaperCandidateForward) :
-                    new Vector2(sign * .25f, .25f) * reviewTableSize;
-                // The stand is authored with its base centre at the origin. An overhanging
-                // backrest changes its bounds, but must not slide the base on the desk.
-                var offset = fixedGallery ? center : center - footprint.center;
+                Vector2 offset;
+                if (fixedGallery)
+                {
+                    // Keep the registered base pivots for ordinary sizes. Extend the spacing
+                    // when either projected edge would cross the centre gap or Latest.
+                    float side = Mathf.Max(PaperCandidateSide,
+                        (sign < 0 ? footprint.xMax : -footprint.xMin) + BundleGap * .5f);
+                    float z = anchor.position.z + forwardOffset;
+                    z = forwardOffset > 0 ? Mathf.Max(z, latest.yMax + BundleGap - footprint.yMin) :
+                        Mathf.Min(z, latest.yMin - BundleGap - footprint.yMax);
+                    // Reject models larger than the entire comparison area on the desk.
+                    if (footprint.width > 4 * PaperCandidateSide || footprint.height > 2 * PaperCandidateForward) return false;
+                    offset = new Vector2(anchor.position.x - PaperLatestRight + sign * side, z);
+                }
+                else offset = new Vector2(sign * .25f, .25f) * reviewTableSize - footprint.center;
                 footprint.center += offset;
                 if (!fixedGallery && !FitsPaper(footprint, reviewTableSize) || !SpaceBetween(footprint, physical) ||
                     !SpaceBetween(footprint, latest) || i > 0 && !SpaceBetween(footprint, previous)) return false;
-                var position = new Vector3(offset.x, fixedGallery ? 0 : BundleLift - b.min.y, offset.y);
+                var position = new Vector3(offset.x, fixedGallery ? anchor.position.y : BundleLift - b.min.y, offset.y);
                 if (i == 0) first = position; else second = position;
                 previous = footprint;
             }
@@ -236,6 +263,7 @@ namespace ContextPin
 
         bool HandleBundleCandidateRay(Ray rightAim, bool pressed)
         {
+            if (IntegratedPaperControls && CurrentPaperInteraction != PaperInteraction.CandidatesDisplayed) return false;
             if (!BundleOnPaper || assemblyStopping || bundleCommitPending || bundleCommitTarget != null || AssemblyAdoptedId != bundleBaseId ||
                 assemblyMenu || movingMeetingPanel || confirmingMeetingEnd || !AssemblyHeadTracked()) return false;
             MeetingModelSlot slot = null;
@@ -251,8 +279,11 @@ namespace ContextPin
             {
                 int index = Array.IndexOf(bundleSlots, slot);
                 if (SharedPaperMeeting && !MeetingHost)
-                    SendPaperCommand("paper_candidate_select", new JObject { ["candidate_set_id"] = bundleSetId,
-                        ["candidate_id"] = bundleCandidates[index]["candidate_id"] });
+                {
+                    var choice = new JObject { ["candidate_set_id"] = bundleSetId, ["candidate_id"] = bundleCandidates[index]["candidate_id"] };
+                    if (IntegratedPaperControls) choice["expected_pose_revision"] = LatestPoseRevision;
+                    SendPaperCommand("paper_candidate_select", choice);
+                }
                 else CommitBundleCandidate(index);
             }
             return true;
@@ -280,6 +311,7 @@ namespace ContextPin
             {
                 if (!MeetingHost || !BundleOnPaper) return;
                 payload["paper_frame_revision"] = PaperFrameRevision;
+                if (IntegratedPaperControls) payload["expected_pose_revision"] = LatestPoseRevision;
             }
             AddMeetingClock(payload);
             bundleCommitPending = true;

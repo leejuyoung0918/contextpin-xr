@@ -14,7 +14,7 @@ from . import provider_http
 from .bundle_provider import settings as provider_settings
 from .bundle_preview import render_base
 from .contracts import MeetingError
-from .edit_bundle import command_utterances
+from .edit_bundle import command_utterances, frozen_command_text
 from .gateway import provider_failure
 from .parameter_relations import derived_fields, effective_values, normalize_patch
 from .planner import explicit_parameters
@@ -80,12 +80,18 @@ def bundle_context(coordinator, state, bundle):
                  or state["versions"][0]["parameters"].get(name) != value}
     constraints = coordinator.effective(state, version.get("request_constraints", []))
     fields = [*profile["parameters"], *derived_fields(profile)]
-    transcript = " ".join(row["text"] for row in command_utterances(state, bundle))
+    linked_text = " ".join(row["text"] for row in command_utterances(state, bundle))
+    transcript = frozen_command_text(bundle, linked_text)
     context = {
         "request_id": rid, "base_version_id": version["version_id"], "base_label": version.get("design_version"),
         "transcript": transcript, "transcript_source": bundle["transcript"]["source"],
+        "command_requested_by": bundle["participant_id"],
+        "command_text_source": bundle.get("command_text_source", "linked_meeting_utterances"),
+        "utterance_refs": bundle["transcript"]["utterance_refs"],
+        "audio_window": {k: bundle["audio"][k] for k in ("stream_id", "sample_rate", "start_sample", "end_sample")},
         "selection": {k: selection[k] for k in ("selection_id", "part_id", "hit_model_local_position",
-                      "hit_normal_world", "latest_model_pose", "paper_frame_revision", "hit_position_paper",
+                      "ray_origin_world", "ray_direction_world", "hit_world_position", "hit_normal_world",
+                      "latest_model_pose", "paper_frame_revision", "latest_pose_revision", "hit_position_paper",
                       "ray_origin_paper", "ray_direction_paper") if k in selection},
         "scad_hit_mm": point, "base_scad": scad, "base_parameters": parameters,
         "effective_parameters": effective_values(profile, {**fixed, **parameters}),
@@ -99,8 +105,11 @@ def bundle_context(coordinator, state, bundle):
         "constraints": constraints, "geometric_relations": profile.get("parameter_constraints", []),
         "preserved_conditions": profile["assembly"].get("preserved_conditions", []),
         "base_stl_bounds_mm": version["assets"]["print.stl"]["bounds_mm"],
-        "selection_image": {k: visual[k] for k in ("image_source", "capture_timestamp", "image_uv", "image_uv_origin") if k in visual},
+        "selection_image": {k: visual[k] for k in ("image_source", "capture_timestamp", "camera_pose", "image_uv", "image_uv_origin") if k in visual},
     }
+    for key in ("latest_pose_paper", "paper_frame_revision", "latest_pose_revision"):
+        if key in bundle:
+            context[key] = bundle[key]
     build = json.loads(base_asset(source, version, "build.json"))
     if build.get("dependencies"):
         with zipfile.ZipFile(io.BytesIO(base_asset(source, version, "candidate_source.zip"))) as archive:
@@ -356,8 +365,10 @@ def scope_limitation(context):
         if re.search(r"모든|전부|전체|네\s*(?:군데|곳|모서리)|all corners", text):
             return "이번 수정은 선택한 상부 외곽 모서리 한 곳에 적용됩니다."
         return None
-    if "corner_radius" in context["fixed_parameters"] and corner_request(text):
-        return "현재 기준 CAD는 모서리 반경이 고정돼 있습니다. 등록된 편집 치수로 모서리를 둥글게 할 수 없습니다."
+    if corner_request(text):
+        fixed_radii = [key for key in context["fixed_parameters"] if key.endswith("corner_radius")]
+        if fixed_radii and not any(f["parameter_id"].endswith("corner_radius") for f in context["parameters"]):
+            return "현재 기준 CAD는 모서리 반경이 고정돼 있습니다. 등록된 편집 치수로 모서리를 둥글게 할 수 없습니다."
     shared = context["shared_edit_scope"] or {}
     if shared.get("individual_slot_editing") is False and _LOCAL_FEATURE.search(text):
         return "선택한 한 곳을 독립적으로 수정할 수 없습니다. 현재 등록된 치수는 전체에 공통 적용됩니다."

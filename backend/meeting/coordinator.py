@@ -3,6 +3,7 @@ import copy
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import secrets
@@ -13,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import bundle_candidates, cable_demo, geometry, meeting_state, meeting_result, paper_space, shared_workflows
+from . import bundle_candidates, cable_demo, command_window, geometry, meeting_state, meeting_result, paper_space, shared_workflows
 from .contracts import MeetingError, canonical, clock_stamp, digest, now_ms, text_field, uid
 from .planner import CANDIDATE_LETTER, NUMBER, ORDINAL, compile_context, contains, explicit_parameters, resolve_reference, validated_plan
 
@@ -40,6 +41,9 @@ class SessionCoordinator:
         self.models = self.root / "models"
         self.models.mkdir(exist_ok=True)
         self.profile = geometry.load_profile()
+        self.paper_move_margin_m = float(os.environ.get("PAPER_MOVE_MARGIN_M", "0.20"))
+        if not math.isfinite(self.paper_move_margin_m) or self.paper_move_margin_m < 0:
+            raise ValueError("PAPER_MOVE_MARGIN_M must be a finite, nonnegative distance in metres")
         mode = os.environ.get("AI_MODE", "replay")
         if mode not in ("live", "replay"):
             raise ValueError("AI_MODE must be live or replay")
@@ -52,6 +56,12 @@ class SessionCoordinator:
         self.lock = threading.RLock()
         self.changed = threading.Condition(self.lock)
         self.audio_streams = {}
+        self.command_tails = {}
+        self.edit_command_limits = {"min_ms": int(os.environ.get("MIN_EDIT_COMMAND_MS", "400")),
+                                    "max_ms": round(float(os.environ.get("MAX_EDIT_COMMAND_SECONDS", "15")) * 1000)}
+        if not 0 < self.edit_command_limits["min_ms"] <= self.edit_command_limits["max_ms"] <= 15000:
+            raise ValueError("B command limits require 0 < min_ms <= max_ms <= 15000 (STT WAV limit)")
+        self.command_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="command-window")
         self.event_connections = {}
         self.timers = set()
         self.stopped = False
@@ -117,6 +127,7 @@ class SessionCoordinator:
                 if state.get("edit_draft"):
                     shared_workflows.clear(self, state, "서버가 재시작되어 편집권을 해제했습니다.")
                 if state.get("assembly"):
+                    paper_space.interrupt_pending(state, "서버가 재시작되었습니다. 정렬 후 다시 요청하세요.")
                     if state["status"] == "active":
                         for participant in state["participants"]:
                             actor = participant["participant_id"]
@@ -126,6 +137,9 @@ class SessionCoordinator:
                     for capture in state["meeting_audio"].values():
                         if capture["status"] == "open":
                             capture["status"] = "interrupted"
+                        for window in capture.get("design_ranges", {}).values():
+                            if window.get("b_status") in ("recording", "transcribing"):
+                                window.update(b_status="failed", error="서버 연결이 끊겼습니다. B를 눌러 다시 말해주세요.")
                         for segment in capture["segments"].values():
                             if segment["status"] == "pending":
                                 segment["status"] = "interrupted"
@@ -167,10 +181,13 @@ class SessionCoordinator:
     def close(self):
         with self.lock:
             self.stopped = True
+            for ring in self.command_tails.values():
+                ring.close()
             for timer in self.timers:
                 timer.cancel()
         with self.changed:
             self.changed.notify_all()
+        self.command_pool.shutdown(wait=True, cancel_futures=True)
         self.result_pool.shutdown(wait=True, cancel_futures=True)
         self.speech_pool.shutdown(wait=True, cancel_futures=True)
         self.plan_pool.shutdown(wait=True, cancel_futures=True)
@@ -206,14 +223,14 @@ class SessionCoordinator:
         self.save(state)
         return event
 
-    @staticmethod
-    def public(state, actor):
+    def public(self, state, actor):
         private = {"explicit_design_targets", "design_target_history", "view_history", "audio_segments", "shared_view_history",
                    "meeting_audio", "result_exports", "pending_minutes_export", "paper_frame", "last_paper_candidate_request"}
         public = {k: v for k, v in state.items() if k not in private}
         if state.get("assembly"):
             public.update(meeting_state.snapshot_fields(state))
-            public["spatial"] = paper_space.snapshot(state)
+            public["edit_command_limits"] = self.edit_command_limits
+            public["spatial"] = paper_space.snapshot(state, self.paper_move_margin_m)
             if state.get("paper_frame") and "edit_requests" in public:
                 public["edit_requests"] = dict(state["edit_requests"])
                 for rid, bundle in state["edit_requests"].items():
@@ -260,7 +277,16 @@ class SessionCoordinator:
                 rows = self.db.execute(
                     "SELECT body FROM events WHERE session_id=? AND server_seq>? ORDER BY server_seq LIMIT 100",
                     (sid, after_seq)).fetchall()
-            return [json.loads(row["body"]) for row in rows], self.public(self.load(sid), actor)
+            events = [json.loads(row["body"]) for row in rows]
+            state = self.load(sid)
+            frame = state.get("paper_frame") or {}
+            if frame.get("active_grab_id") and not paper_space.drag_active(frame):
+                with self.transaction():
+                    grab = frame.pop("active_grab_id")
+                    event = self.emit(state, "paper.grip_expired", {"grab_id": grab, "paper_frame_revision": frame["paper_frame_revision"]})
+                if len(events) < 100 and event["server_seq"] > after_seq:
+                    events.append(event)
+            return events, self.public(state, actor)
 
     def code(self):
         while True:
@@ -421,7 +447,8 @@ class SessionCoordinator:
                 raise MeetingError("종료된 회의입니다.", 409)
             stamp = clock_stamp(command.payload, now_ms())
             event_type, result, job = self.apply(state, actor, command.type, command.payload, stamp)
-            self.emit(state, event_type, result, actor, command.command_id, stamp["captured_session_time_ms"])
+            occurred = result["timestamp_ms"] if command.type == "design_speech_boundary" else stamp["captured_session_time_ms"]
+            self.emit(state, event_type, result, actor, command.command_id, occurred)
             response = {"command_id": command.command_id, **result}
             self.db.execute("INSERT INTO commands VALUES (?,?,?,?,?)",
                             (sid, command.command_id, actor, request_hash, canonical(response)))
@@ -434,6 +461,8 @@ class SessionCoordinator:
         sid = state["session_id"]
         if kind in paper_space.COMMAND_FIELDS:
             return paper_space.apply(self, state, actor, kind, payload)
+        if kind in ("design_speech_boundary", "cancel_design_speech"):
+            return command_window.remote(self, state, actor, kind, payload, stamp)
         if kind == "generate_edit_candidates":
             request_id = text_field(payload, "request_id", 100)
             bundle = state.get("edit_requests", {}).get(request_id)
@@ -567,7 +596,7 @@ class SessionCoordinator:
                     from . import edit_bundle, speech_ranges
                     rid = text_field(payload, "speech_range_id", 100)
                     window, capture = edit_bundle.window_for(state, rid)
-                    if (state["meeting"].get("edit_request_output") != "bundle" or
+                    if (window.get("b_status") or state["meeting"].get("edit_request_output") != "bundle" or
                             state["session_status"] != "recording" or not window.get("command_audio") or
                             rid in state["edit_requests"] or window["base_version_id"] != state["committed_version_id"] or
                             speech_ranges.snapshot(state)[rid]["status"] not in ("failed", "no_speech")):
@@ -1000,6 +1029,8 @@ class SessionCoordinator:
                     self.result_pool.submit(self.run_result, sid)
             elif kind == "bundle_plan":
                 self.plan_pool.submit(bundle_candidates.interpret, self, sid, rid)
+            elif kind == "command_window":
+                self.command_pool.submit(command_window.resolve, self, sid, rid, epoch, self.command_tails.get((sid, epoch)))
             elif kind == "plan":
                 delay = max(0, min(3000, int(os.environ.get("FINAL_CONTEXT_DEBOUNCE_MS", "600")))) / 1000
                 def launch():
@@ -1231,7 +1262,7 @@ class SessionCoordinator:
             return evidence
 
     def audio_start(self, sid, token, stream_id, device, *, continuous=False, sample_rate=None,
-                    marker_overlap=False, clock_origin_ms=None):
+                    marker_overlap=False, clock_origin_ms=None, command_tail=None):
         with self.transaction():
             actor = self.actor(sid, token)
             state = self.load(sid)
@@ -1264,7 +1295,10 @@ class SessionCoordinator:
                             clock_origin_ms = max(clock_origin_ms, through)
                 state["meeting_audio"][stream_id] = {"status": "open", "last_sample": 0, "segments": {}, "gaps": [],
                                                      "started_at": None, "sample_rate": sample_rate,
-                                                     "marker_overlap": marker_overlap, "clock_origin_ms": clock_origin_ms}
+                                                     "marker_overlap": marker_overlap, "clock_origin_ms": clock_origin_ms,
+                                                     "b_hold": command_tail is not None}
+                if command_tail is not None:
+                    self.command_tails[sid, stream_id] = command_tail
             self.emit(state, "capture.state_changed", {"capture_state": state["capture_state"], "stream_id": stream_id}, actor)
             return actor, actual_device
 
@@ -1288,14 +1322,38 @@ class SessionCoordinator:
             capture = meeting_state.state_of_capture(state, stream_id)
             if capture is not None:
                 capture["last_sample"] = sample
+                for rid, w in capture.get("design_ranges", {}).items():
+                    if (w.get("latest_pose_paper") and w.get("b_status") == "recording" and
+                            (sample - w["start_sample"]) * 1000 > (self.edit_command_limits["max_ms"] + 6000) * capture["sample_rate"]):
+                        w.update(b_status="too_long", error="버튼 종료 신호가 없습니다. 짧게 다시 말해주세요.")
+                        self.emit(state, "speech.range_changed", {"range_id": rid, "status": "too_long"}, w["participant_id"])
                 self.save(state)
 
-    def audio_boundary(self, sid, stream_id, actor, range_id, start, sample, segments_finished, command_wav=None, base_id=None):
+    def reject_hold_marker(self, sid, stream_id, actor, rid, sample, base_id, reason):
+        with self.transaction():
+            state = self.load(sid)
+            command_window.reject(state, stream_id, actor, rid, sample, base_id, reason)
+            self.emit(state, "speech.range_changed", {"range_id": rid, "error": reason}, actor)
+
+    def audio_boundary(self, sid, stream_id, actor, range_id, start, sample, segments_finished, command_wav=None, base_id=None, observed=None):
         from . import speech_ranges
         with self.transaction():
             state = self.load(sid)
             capture = meeting_state.state_of_capture(state, stream_id)
             bundle = state["meeting"].get("edit_request_output") == "bundle"
+            if bundle and capture and capture.get("b_hold"):
+                try:
+                    kind, payload, job = command_window.mark(self, state, stream_id, actor, range_id, start, sample, base_id, observed)
+                except MeetingError as error:
+                    # A rejected button marker must never disconnect the room microphone.
+                    command_window.reject(state, stream_id, actor, range_id, sample, base_id, str(error))
+                    self.emit(state, "speech.range_changed", {"range_id": range_id, "error": str(error)}, actor)
+                    return bundle
+                capture["last_sample"] = sample
+                self.emit(state, kind, payload, actor, occurred=payload["timestamp_ms"])
+                if job:
+                    self.submit(sid, *job)
+                return bundle
             if bundle and start and base_id is not None and base_id != state["committed_version_id"]:
                 raise MeetingError("채택본이 바뀌었습니다. 현재 Latest에서 수정을 다시 시작하세요.", 409)
             speech_ranges.boundary(state, capture, stream_id, actor, range_id, start, sample, segments_finished)
@@ -1324,11 +1382,15 @@ class SessionCoordinator:
             if self.audio_streams.get(sid) != stream_id:
                 return
             self.audio_streams.pop(sid)
+            self.command_tails.pop((sid, stream_id), None)
             state = self.load(sid)
             state["capture_state"] = "off"
             capture = meeting_state.state_of_capture(state, stream_id)
             if capture is not None:
                 capture.update(status="eos" if eos else "interrupted", last_sample=sample)
+                for window in capture.get("design_ranges", {}).values():
+                    if window.get("b_status") == "recording":
+                        window.update(b_status="failed", error="마이크 연결이 끝났습니다. B를 눌러 다시 말해주세요.")
                 if (eos and isinstance(pending_request, str) and isinstance(pending_selection, str)
                         and re.fullmatch(r"[A-Za-z0-9_-]{1,100}", pending_selection)):
                     window = capture.get("design_ranges", {}).get(pending_request)
@@ -1598,6 +1660,14 @@ class SessionCoordinator:
             if self.event_connections[key]:
                 return
             state = self.load(sid)
+            interrupted = paper_space.interrupt_pending(state, "요청자의 연결이 끊겼습니다. B를 눌러 다시 말해주세요.", actor)
+            if interrupted:
+                self.emit(state, "speech.ranges_interrupted", {"range_ids": interrupted}, actor)
+            for capture in state.get("meeting_audio", {}).values():
+                for rid, window in capture.get("design_ranges", {}).items():
+                    if window["participant_id"] == actor and window.get("b_status") == "recording":
+                        window.update(b_status="failed", error="버튼 연결이 끊겼습니다. B를 눌러 다시 말해주세요.")
+                        self.emit(state, "speech.range_changed", {"range_id": rid, "status": "failed"}, actor)
             if state["status"] == "active" and paper_space.lose_alignment(state, actor):
                 self.emit(state, "paper.alignment_changed", {"paper_frame_revision": state["paper_frame"]["paper_frame_revision"],
                                                             "participant_id": actor, "status": "lost"}, actor)

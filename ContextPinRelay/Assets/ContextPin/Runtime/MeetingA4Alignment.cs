@@ -5,7 +5,7 @@ namespace ContextPin
     public sealed partial class RelayApp
     {
         const float A4Short = .210f, A4Long = .297f;
-        const float A4EdgeTolerance = .022f, A4HeightTolerance = .020f, A4MaxCornerCosine = .18f;
+        const float A4EdgeTolerance = .022f, A4PlaneTolerance = .020f, A4MaxCornerCosine = .18f;
         readonly Vector3[] a4Corners = new Vector3[4];
         readonly Transform[] a4Marks = new Transform[4];
         LineRenderer a4Border, a4CenterCross;
@@ -83,13 +83,11 @@ namespace ContextPin
             if (!float.IsFinite(point.sqrMagnitude)) return "표시점 위치를 다시 확인하세요.";
             for (int i = 0; i < a4Count; i++)
             {
-                if (Mathf.Abs(point.y - a4Corners[i].y) > A4HeightTolerance)
-                    return "높이 차이가 큽니다. 표시점을 같은 종이 표면에 대고 다시 짚으세요.";
-                if (Horizontal(point - a4Corners[i]).sqrMagnitude < .04f * .04f)
+                if ((point - a4Corners[i]).sqrMagnitude < .04f * .04f)
                     return "이미 짚은 점입니다. 다음 모서리를 짚으세요.";
             }
             if (a4Count == 0) return null;
-            var front = Horizontal((a4Count == 1 ? point : a4Corners[1]) - a4Corners[0]);
+            var front = (a4Count == 1 ? point : a4Corners[1]) - a4Corners[0];
             if (a4Count == 1)
             {
                 if (Mathf.Min(Mathf.Abs(front.magnitude - A4Short), Mathf.Abs(front.magnitude - A4Long)) > A4EdgeTolerance)
@@ -98,14 +96,17 @@ namespace ContextPin
             }
             float width = Mathf.Abs(front.magnitude - A4Short) < Mathf.Abs(front.magnitude - A4Long) ? A4Short : A4Long;
             float depth = width == A4Short ? A4Long : A4Short;
-            var side = Horizontal((a4Count == 2 ? point : a4Corners[2]) - a4Corners[1]);
+            var side = (a4Count == 2 ? point : a4Corners[2]) - a4Corners[1];
             if (!A4RightTurn(front, side) || Mathf.Abs(side.magnitude - depth) > A4EdgeTolerance)
                 return "②에서 직각으로 이어진 ③을 짚으세요.";
             if (a4Count == 2) return null;
-            var rear = Horizontal(point - a4Corners[2]);
-            var left = Horizontal(a4Corners[0] - point);
-            float diagonal1 = Horizontal(a4Corners[2] - a4Corners[0]).magnitude;
-            float diagonal2 = Horizontal(point - a4Corners[1]).magnitude;
+            var normal = Vector3.Cross(side, front).normalized;
+            if (Mathf.Abs(Vector3.Dot(point - a4Corners[0], normal)) > A4PlaneTolerance)
+                return "④가 앞의 세 점으로 정한 면에서 벗어났습니다. 종이 표면에 대고 다시 짚으세요.";
+            var rear = point - a4Corners[2];
+            var left = a4Corners[0] - point;
+            float diagonal1 = (a4Corners[2] - a4Corners[0]).magnitude;
+            float diagonal2 = (point - a4Corners[1]).magnitude;
             if (!A4RightTurn(side, rear) || !A4RightTurn(rear, left) || !A4RightTurn(left, front) ||
                 Mathf.Abs(rear.magnitude - width) > A4EdgeTolerance || Mathf.Abs(left.magnitude - depth) > A4EdgeTolerance ||
                 Mathf.Abs(front.magnitude - rear.magnitude) > .025f || Mathf.Abs(side.magnitude - left.magnitude) > .025f ||
@@ -113,8 +114,6 @@ namespace ContextPin
                 return "네 점이 A4 사각형과 맞지 않습니다. ④를 다시 짚거나 이전 점을 취소하세요.";
             return null;
         }
-
-        static Vector3 Horizontal(Vector3 delta) => new Vector3(delta.x, 0, delta.z);
 
         static bool A4RightTurn(Vector3 edge, Vector3 next)
         {
@@ -125,17 +124,20 @@ namespace ContextPin
         void MeasureA4Surface()
         {
             var center = (a4Corners[0] + a4Corners[1] + a4Corners[2] + a4Corners[3]) * .25f;
-            var right = Horizontal((a4Corners[1] - a4Corners[0]) + (a4Corners[2] - a4Corners[3])).normalized;
-            var forward = Vector3.Cross(right, Vector3.up);
-            a4Surface = new Pose(center, Quaternion.LookRotation(forward, Vector3.up));
+            // Average opposite edges so all four physical samples determine the tabletop normal.
+            var right = ((a4Corners[1] - a4Corners[0]) + (a4Corners[2] - a4Corners[3])).normalized;
+            var depthEdges = (a4Corners[2] - a4Corners[1]) + (a4Corners[3] - a4Corners[0]);
+            var normal = Vector3.Cross(depthEdges, right).normalized;
+            var forward = Vector3.Cross(right, normal);
+            a4Surface = new Pose(center, Quaternion.LookRotation(forward, normal));
             float width = Vector3.Dot(right, (a4Corners[1] - a4Corners[0]) + (a4Corners[2] - a4Corners[3])) * .5f;
-            float depth = Vector3.Dot(forward, (a4Corners[2] - a4Corners[1]) + (a4Corners[3] - a4Corners[0])) * .5f;
+            float depth = Vector3.Dot(forward, depthEdges) * .5f;
             // With hand-sampled corners the quadrilateral can be slightly skew. Inscribe the
             // rectangle in all four measured edges so models never use unmeasured desk space.
             float scale = 1;
             for (int i = 0; i < 4; i++)
             {
-                var inward = Vector3.Cross(Horizontal(a4Corners[(i + 1) % 4] - a4Corners[i]), Vector3.up).normalized;
+                var inward = Vector3.Cross(a4Corners[(i + 1) % 4] - a4Corners[i], normal).normalized;
                 float radius = (width * Mathf.Abs(Vector3.Dot(inward, right)) + depth * Mathf.Abs(Vector3.Dot(inward, forward))) * .5f;
                 scale = Mathf.Min(scale, Vector3.Dot(inward, center - a4Corners[i]) / radius);
             }
@@ -175,7 +177,7 @@ namespace ContextPin
 
         void UpdateA4Marks()
         {
-            var lift = Vector3.up * .002f;
+            var lift = (a4Count == 4 ? a4Surface.rotation * Vector3.up : Vector3.up) * .002f;
             for (int i = 0; i < a4Marks.Length; i++)
             {
                 if (i < a4Count)

@@ -48,6 +48,12 @@ namespace ContextPin.Editor
             public bool minutesGeneratingShown, minutesSavedShown, minutesPackageVerified;
             public bool numberedCornersOppositeView, paperCandidatesAgree, paperLatestAgrees, paperHitAgrees;
             public bool paperCommitReceived, paperLateJoin, paperLostHidden, paperRealigned;
+            public bool bDownUp, shortBRejected, longBAutoClosed, cancelledBeforeTarget, bSampleExact, bRequesterVerified, bAwaitedTarget;
+            public string integratedMeetingId, integratedGuestId;
+            public int peerModelChecks, peerGalleryChecks;
+            public bool sameMeetingTwoGrips, sameMeetingTwoCommands, frozenPlacementVerified, guestHostBoundsAgree, guestMeasuredSeparatePaper, inputStateChecks;
+            public bool hostGripMoved, gripHeightLocked, gripClamped, guestGripBlocked, gripReviewLocked, guestReceivedLiveGrip;
+            public float draggedWorldHeightChangeMm, maxDragNormalDriftMm;
             public int microphoneOpenCount;
             public string[] timelineTexts;
             public float minimumPaperClearanceMm;
@@ -82,6 +88,8 @@ namespace ContextPin.Editor
 
         public static void Begin(bool simulator)
         {
+            expectedPhoneLatest = new Vector3(.24f, 0, 0);
+            sentGuestLiveMove = false;
             report = new Report { simulator = simulator, assembly = Environment.GetEnvironmentVariable("MEETING_SMOKE_ASSEMBLY") == "1" };
             checkSavedDesign = Environment.GetEnvironmentVariable("MEETING_SAVED_DESIGN_SMOKE") == "1";
             checkLiveAlignment = Environment.GetEnvironmentVariable("MEETING_LIVE_ALIGNMENT_SMOKE") == "1";
@@ -116,7 +124,7 @@ namespace ContextPin.Editor
                     report.runtime = OpenXRRuntime.name;
                     if (report.renderViews < 2 || report.runtime.IndexOf("simulat", StringComparison.OrdinalIgnoreCase) < 0) return;
                 }
-                bool advance = ColocationTest && step >= 11 ? RunPaperGuestStep() : checkCaptureOnly ? RunCaptureOnlyStep() : checkExplicit ? RunExplicitStep() : checkLiveAlignment ? RunLiveAlignmentStep() : checkSavedDesign ? RunSavedDesignStep()
+                bool advance = ColocationTest && !IntegratedTest && step >= 11 ? RunPaperGuestStep() : checkCaptureOnly ? RunCaptureOnlyStep() : checkExplicit ? RunExplicitStep() : checkLiveAlignment ? RunLiveAlignmentStep() : checkSavedDesign ? RunSavedDesignStep()
                     : report.assembly ? (report.simulator ? RunSpatialStep() : RunAssemblyStep()) : RunStep();
                 if (advance) { step++; performedFrame = Time.frameCount; }
             }
@@ -1126,6 +1134,7 @@ namespace ContextPin.Editor
         static void Finish(Exception error)
         {
             EditorApplication.update -= Tick;
+            StopPeerObserver();
             hostEvents?.Dispose();
             hostEvents = null;
             report.success = error == null;

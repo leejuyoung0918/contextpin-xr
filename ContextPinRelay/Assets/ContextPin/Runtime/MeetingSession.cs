@@ -153,7 +153,11 @@ namespace ContextPin
             if (connected != meetingEventsConnected) { meetingEventsConnected = connected; changed = true; }
             if (changed) Draw();
             if (!connected && !meetingRefresh && !meetingBusy && Time.unscaledTime >= meetingRefreshAt) RefreshMeetingSnapshot();
-            if (SpatialAssembly) UpdateSpatialMicrophone();
+            if (SpatialAssembly)
+            {
+                ReadEditCommandButton();
+                UpdateSpatialMicrophone();
+            }
             else if (meetingCapture != null && meetingCapture.Recording && Time.unscaledTime >= meetingAutoSendAt) SendMeetingAudio();
             if (SpatialAssembly && ExplicitDesignMeeting && AssemblyActive && !assemblyStarting && !assemblyPrepOpened)
             {
@@ -230,6 +234,7 @@ namespace ContextPin
             {
                 if (oldCommitted.Length > 0 && IsAssemblyMeeting)
                 {
+                    if (IntegratedPaperControls) appliedPaperVersion = AssemblyAdoptedId;
                     targetSelectionRevision++;
                     selectedTargetVersion = selectedTargetPart = selectedTargetImage = null;
                     targetSnapshotPending = false;

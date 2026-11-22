@@ -23,6 +23,8 @@ namespace ContextPin
         int writePosition, readPosition, available;
         uint sequence;
         ulong sample;
+        public int SampleRate => clip.frequency;
+        public long LastMarkerSample { get; private set; }
 
         public MeetingPcmStream(AudioClip clip)
         {
@@ -66,10 +68,19 @@ namespace ContextPin
             return false;
         }
 
-        public byte[] ReadPacket(bool flush = false)
+        public bool AtSampleLimit(int position, long limit)
         {
-            if (available == 0 || (!flush && available < packetFrames)) return null;
-            int frames = Math.Min(available, packetFrames);
+            if (position < 0 || position >= clip.samples) return false;
+            // Peek without consuming the ring. ObservePosition reports overruns on the regular audio path.
+            return (long)sample + available + (position - writePosition + clip.samples) % clip.samples >= limit;
+        }
+
+        public byte[] ReadPacket(bool flush = false) => ReadFrames(flush, int.MaxValue);
+
+        byte[] ReadFrames(bool flush, int maxFrames)
+        {
+            if (available == 0 || maxFrames <= 0 || (!flush && available < packetFrames)) return null;
+            int frames = Math.Min(maxFrames, Math.Min(available, packetFrames));
             var interleaved = new float[frames * clip.channels];
             if (!clip.GetData(interleaved, readPosition)) throw new InvalidOperationException("마이크 샘플을 읽을 수 없습니다.");
             var packet = new byte[16 + frames * 2];
@@ -98,19 +109,30 @@ namespace ContextPin
 
         // Called on Unity's main thread to freeze the microphone cursor at the button press.
         // Only this PCM owner reads the ring. Network sends remain serialized with ordinary frames.
-        public Task MarkSpeech(Task inFlight, string rangeId, bool start, int microphonePosition, string baseVersionId = null)
+        public Task MarkSpeech(Task inFlight, string rangeId, bool start, int microphonePosition, string baseVersionId = null,
+            long endLimit = long.MaxValue, int? paperFrame = null, int? poseRevision = null)
         {
-            if (microphonePosition < 0 || microphonePosition >= clip.samples)
+            if (microphonePosition >= 0 && microphonePosition < clip.samples)
+                ObservePosition(microphonePosition);
+            else if (start)
                 throw new InvalidOperationException("마이크의 현재 샘플 위치를 읽을 수 없습니다.");
-            ObservePosition(microphonePosition);
+            // On a lost microphone finish at the last observed sample on this socket.
+            long captured = (long)sample + available;
+            long boundary = Math.Min(captured, endLimit);
             var tail = new List<byte[]>();
-            while (ReadPacket(flush: true) is byte[] packet) tail.Add(packet);
+            while ((long)sample < boundary && ReadFrames(true, (int)(boundary - (long)sample)) is byte[] packet) tail.Add(packet);
+            LastMarkerSample = (long)sample;
             var marker = new JObject
             {
                 ["type"] = "design_speech_boundary", ["range_id"] = rangeId,
                 ["edge"] = start ? "start" : "end", ["sample_index"] = (long)sample
             };
             if (!string.IsNullOrEmpty(baseVersionId)) marker["base_version_id"] = baseVersionId;
+            if (start && paperFrame.HasValue && poseRevision.HasValue)
+            {
+                marker["paper_frame_revision"] = paperFrame.Value;
+                marker["expected_pose_revision"] = poseRevision.Value;
+            }
             return SendBoundary(inFlight, tail, marker);
         }
 

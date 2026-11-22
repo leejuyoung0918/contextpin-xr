@@ -91,6 +91,24 @@ class MinutesContextTests(unittest.TestCase):
         self.assertEqual((d["base_label"], d["result_label"], d["parameter_diff"][0]["after"]), ("V2", "V1", 65))
         self.assertEqual((d["edit_request_id"], d["candidate_selected"], d["selected_candidate_id"]), (None, None, None))
 
+    def test_clipped_command_and_its_original_meeting_utterance_stay_distinct(self):
+        path = "edit_requests/r/request.json"
+        original = json.loads((self.folder / path).read_bytes())
+        clipped = "등받이 각도를 낮춰줘."
+        request = {**original, "command_text_source": "command_window_stt", "command_text": clipped,
+                   "participant_id": "person-b", "transcript": {**original["transcript"], "text": clipped}}
+        self.write(path, request)
+        ctx = build_context(self.folder, self.manifest)
+        edit, = ctx["edit_rounds"]
+        self.assertEqual((edit["command_text"], edit["command_text_source"], edit["command_requested_by"]),
+                         (clipped, "command_window_stt", "person-b"))
+        self.assertEqual(ctx["design_decisions"][0]["command"], clipped)
+        self.assertEqual(ctx["full_transcript"][0]["text"], "각도는 충분해.")
+        self.assertIsNone(ctx["full_transcript"][0]["speaker_id"])
+        self.write(path, {**request, "command_text_source": "linked_meeting_utterances"})
+        with self.assertRaisesRegex(ValueError, "확정 전사"):
+            build_context(self.folder, self.manifest)
+
     def test_rejected_replaced_deferred_and_unfinished_are_distinguishable(self):
         row = {"request_id": "r", "command_utterance_ids": ["line"], "command_text": "수정 의견"}
         for status in ("dismissed", "superseded"):

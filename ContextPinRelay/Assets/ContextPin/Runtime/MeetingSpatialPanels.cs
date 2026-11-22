@@ -183,6 +183,9 @@ namespace ContextPin
             if (sharedGuest)
             {
                 if (PaperLocalStatus != "aligned") DrawA4Alignment();
+                else if (HoldCommandMeeting && explicitTranscriptPage >= 0) DrawExplicitTranscript();
+                else if (HoldCommandMeeting && explicitRequest?.ButtonWindow == true && !explicitRequest.BundleSaved)
+                    DrawExplicitRequestPanel();
                 else DrawPaperGuestReview();
                 return;
             }
@@ -266,6 +269,19 @@ namespace ContextPin
 
         void DrawPaperParticipants()
         {
+            if (PaperRenderable && OffsetPaperGallery && LatestPoseRevision >= 0)
+            {
+                string hint = MeetingHost
+                    ? (string.IsNullOrEmpty(paperPoseSetId) ? "Grip · Latest 이동   |   A · 선택" : "후보 검토 중 · A로 채택")
+                    : "A · 지점 공유/후보 제안   |   Grip 이동은 진행자만";
+                if (HoldCommandMeeting && AssemblySessionStatus == "recording" && string.IsNullOrEmpty(paperPoseSetId))
+                    hint = "B 길게 · 수정 발언   |   " + hint;
+                if (!IntegratedPaperControls || CurrentPaperInteraction == PaperInteraction.LatestDisplayed)
+                {
+                    RoundBox("PaperInputHint", content, 0, -72, SpatialWidth, 26, SpatialBackground, 7);
+                    Label("PaperInputLabel", content, 8, -72, 404, 26, hint, SpatialFont(15), HeaderText);
+                }
+            }
             RoundBox("PaperParticipants", content, 0, -43, SpatialWidth, 36, SpatialBackground, 9);
             string alignment = PaperLocalStatus switch {
                 "aligned" => "공간 정렬 완료", "lost" => "공간 정렬 필요", "calibrating" => "A4 정렬 중", _ => "공간 정렬 필요"
@@ -293,8 +309,12 @@ namespace ContextPin
             string hint = !PaperSessionReady ? "진행자가 같은 A4의 모델 배치를 확인하면 여기에 표시됩니다." :
                 !PaperRenderable ? "공간 정렬 상태를 서버와 맞추고 있습니다." :
                 AdoptedModelFailed || BundleAssetsFailed ? "CAD를 불러오지 못했습니다." :
+                IntegratedPaperControls && CurrentPaperInteraction != PaperInteraction.LatestDisplayed ? PaperInteractionHint() :
                 meetingLoadedVersion != AssemblyAdoptedId ? "현재 채택된 CAD를 불러오는 중입니다." :
                 TextValue(set, "status") == "ready" ? "후보를 가리키고 A를 누르면 진행자에게 제안합니다." :
+                TextValue(set, "status") is ("generating" or "building") ? "수정안 생성 중…" :
+                HoldCommandMeeting && AssemblySessionStatus == "recording" ? explicitHint ?? (IntegratedPaperControls ? PaperInteractionHint() :
+                    "B를 누른 채 수정 요청을 말하세요. 회의 마이크가 함께 듣습니다.") :
                 "Latest의 한 지점을 가리키고 오른손 A를 눌러 함께 보세요.";
             Label("PaperGuestHint", content, 12, 105, 396, 53, hint, SpatialFont(18), HeaderText);
             float details = PaperRenderable ? DrawBundleCandidateInfo(set, 164) : 0;
@@ -385,9 +405,12 @@ namespace ContextPin
             string speech = ExplicitSpeechAction;
             if (HasReviewTable && !string.IsNullOrEmpty(speech))
                 Button("ExplicitSpeechAction", 10, 224 + details, 155, 40, speech, ToggleExplicitSpeech, true);
+            if (explicitRequest?.ButtonWindow == true && explicitRequest.Speech == DesignSpeech.Final &&
+                explicitRequest.Selection == null && !explicitRequest.Sending && !explicitRequest.Conflict)
+                Button("ExplicitCancelSpeech", 10, 224 + details, 110, 40, "요청 취소", CancelHeldCommand);
             if (CanRetryExplicitRequest)
                 Button("ExplicitRetry", 173, 224 + details, 120, 40, "다시 시도", RetryExplicitRequest);
-            DrawTablePlacementControls(282 + details);
+            if (!SharedPaperMeeting || MeetingHost) DrawTablePlacementControls(282 + details);
             if (!CaptureBundleMeeting && !string.IsNullOrEmpty(TextValue(MeetingLatestRound, "round_id")) &&
                 TextValue(MeetingLatestRound, "status") is "reviewable" or "needs_input")
                 Button("SpatialOpenComparison", 10, 344, 206, 38, "최근 수정안 열기", () => OpenSpatialComparison(MeetingLatestRound));
@@ -408,7 +431,8 @@ namespace ContextPin
                     string values = string.Join(", ", Values(candidate, "parameter_diff").Select(change =>
                         $"{TextValue(change, "label")} {change["before"]} → {change["after"]} {TextValue(change, "unit")}".TrimEnd()));
                     string key = TextValue(candidate, "candidate_key");
-                    string side = PublishedCenterLayout ? (key == "A" ? "①·④ 쪽" : "②·③ 쪽") :
+                    string side = LatestPoseRevision > 0 ? (key == "A" ? "비교 줄 왼쪽" : "비교 줄 오른쪽") :
+                        PublishedCenterLayout ? (key == "A" ? "①·④ 쪽" : "②·③ 쪽") :
                         OffsetPaperGallery ? (key == "A" ? "④ 너머" : "③ 너머") :
                         (key == "A" ? "뒤왼쪽" : "뒤오른쪽");
                     string suggestion = proposed.Length > 0 && proposed == TextValue(candidate, "candidate_id")
@@ -662,6 +686,7 @@ namespace ContextPin
             {
                 BoldLabel("SpatialAlignmentStatus", content, 12, 67, 396, 38, "실물을 A4 중앙에 놓으세요", SpatialFont(23), HeaderText);
                 Label("SpatialAlignmentHint", content, 12, 108, 396, 75,
+                    LatestPoseRevision > 0 ? "진행자가 놓은 위치에 청록색 Latest가 보이는지, 바닥과 방향이 책상에 맞는지 확인하세요." :
                     OffsetPaperGallery ? latestPaperError ?? "Latest는 중심에서 ②·③ 쪽으로 24cm에 놓입니다. ④·③ 너머의 후보 자리도 같은 높이의 책상 위인지 확인하세요." :
                     CandidateGenerationMeeting ? latestPaperError ?? "중앙은 실물 자리입니다. 앞오른쪽 청록색 Latest의 바닥과 방향을 확인하세요." :
                         "오른쪽 앞의 가상 CAD와 중앙 실물의 바닥과 방향을 확인한 뒤 트리거로 배치를 확인하세요.",

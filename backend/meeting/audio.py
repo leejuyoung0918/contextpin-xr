@@ -69,9 +69,15 @@ class AudioCapture:
         self.command_pcm = None
         self.design_marks = {}
         self.speech_overlap = body.get("edit_marker_alignment") == "speech_overlap"
+        self.hold = self.speech_overlap and body.get("edit_command_mode") == "b_hold"
+        self.tail = None
+        if self.hold:
+            from .command_window import PcmTail
+            self.tail = PcmTail(self.rate, coordinator.edit_command_limits["max_ms"])
         self.actor, self.device = coordinator.audio_start(self.sid, body["token"], stream_id, body.get("device_id"),
                                                           continuous=True, sample_rate=self.rate,
-                                                          marker_overlap=self.speech_overlap, clock_origin_ms=self.started_ms)
+                                                          marker_overlap=self.speech_overlap, clock_origin_ms=self.started_ms,
+                                                          command_tail=self.tail)
         self.view_actor = self.actor if body.get("bind_view") is True else None
 
     def add(self, frame):
@@ -109,6 +115,9 @@ class AudioCapture:
             self._append_pcm(sample, pcm[:take])
             sample += take // 2
             pcm = pcm[take:]
+        if self.tail:
+            self.tail.append(self.expected_sample - count, frame[16:],
+                             self.first_voiced if self.start_sample is not None else None)
 
     def _append_pcm(self, sample, pcm):
         count = len(pcm) // 2
@@ -134,6 +143,19 @@ class AudioCapture:
 
     def design_boundary(self, packet):
         rid, sample, edge = packet.get("range_id"), packet.get("sample_index"), packet.get("edge")
+        if self.hold:
+            # Never turn a rejected editing gesture into an error on the room audio stream.
+            valid_id = isinstance(rid, str) and bool(re.fullmatch(r"[A-Za-z0-9_-]{1,100}", rid))
+            if valid_id and edge in ("start", "end") and type(sample) is int and self.design_marks.get((rid, edge)) == sample:
+                return
+            if not valid_id or edge not in ("start", "end") or type(sample) is not int or sample != self.expected_sample:
+                self.coordinator.reject_hold_marker(self.sid, self.stream_id, self.actor, rid if valid_id else None,
+                    self.expected_sample, packet.get("base_version_id"), "버튼 경계와 마이크 시각이 다릅니다. 다시 말해주세요.")
+                return
+            self.coordinator.audio_boundary(self.sid, self.stream_id, self.actor, rid, edge == "start", sample,
+                                            self.segment, base_id=packet.get("base_version_id"), observed=packet)
+            self.design_marks[rid, edge] = sample
+            return
         if (not isinstance(rid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", rid)
                 or type(sample) is not int or edge not in ("start", "end")):
             raise MeetingError("수정 발언 구간 정보를 확인하세요.")
@@ -202,5 +224,7 @@ class AudioCapture:
         try:
             self.finish()
         finally:
+            if self.tail:
+                self.tail.close()
             self.coordinator.audio_stop(self.sid, self.stream_id, eos, self.expected_sample,
                                         last_sequence, self.expected_sequence - 1, pending_request, pending_selection)

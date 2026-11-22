@@ -190,6 +190,7 @@ namespace ContextPin
                 ["stream_start_sample_index"] = 0, ["bind_view"] = false
             };
             if (OffsetPaperGallery && CaptureBundleMeeting) hello["edit_marker_alignment"] = "speech_overlap";
+            if (HoldCommandMeeting) hello["edit_command_mode"] = "b_hold";
             if (meetingClockValid)
             {
                 hello["clock_offset_ms"] = meetingClockOffsetMs;
@@ -240,18 +241,20 @@ namespace ContextPin
             catch (InvalidOperationException error) { AssemblyAudioFailed(error.Message); }
         }
 
-        bool TryMarkDesignSpeech(string speechRangeId, bool start, out string error)
+        bool TryMarkDesignSpeech(string speechRangeId, bool start, out string error, long endLimit = long.MaxValue)
         {
             error = null;
-            if (assemblyAudio == null || assemblyStarting || assemblyCaptureFrozen || !SpatialMicRecording())
+            if (assemblyAudio == null || assemblyStarting || assemblyCaptureFrozen || start && !SpatialMicRecording())
             {
                 error = "이 기기의 회의 마이크가 연결된 뒤 수정 발언을 시작하세요.";
                 return false;
             }
             try
             {
-                assemblyAudioSend = assemblyAudio.MarkSpeech(assemblyAudioSend, speechRangeId, start, SpatialMicPosition(),
-                    CaptureBundleMeeting ? explicitRequest?.BaseId : null);
+                assemblyAudioSend = assemblyAudio.MarkSpeech(assemblyAudioSend, speechRangeId, start, SpatialMicRecording() ? SpatialMicPosition() : -1,
+                    CaptureBundleMeeting ? explicitRequest?.BaseId : null, endLimit,
+                    explicitRequest?.FrozenPose != null ? explicitRequest.PaperFrame : (int?)null,
+                    explicitRequest?.FrozenPose != null ? explicitRequest.PoseRevision : (int?)null);
                 return true;
             }
             catch (InvalidOperationException failure)
@@ -264,6 +267,7 @@ namespace ContextPin
         void FreezeSpatialMicrophone()
         {
             if (assemblyCaptureFrozen) return;
+            EndOpenHeldCommand();
             assemblyCaptureFrozen = true;
             if (assemblyAudio != null && !assemblyStarting)
             {

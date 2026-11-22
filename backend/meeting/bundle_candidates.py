@@ -6,7 +6,7 @@ from pathlib import Path
 
 from . import geometry, paper_space
 from .contracts import MeetingError, canonical, now_ms, text_field, uid
-from .edit_bundle import command_utterances
+from .edit_bundle import command_utterances, frozen_command_text
 from .parameter_relations import effective_values
 
 
@@ -19,7 +19,10 @@ def queue(edge, state, request_id):
     if previous:
         return "candidate_set.existing", identity(previous), None
     base = edge.version(state, bundle["base_version_id"])
-    item = {"candidate_set_id": uid("set"), "request_id": request_id, "base_version_id": base["version_id"],
+    lock = paper_space.edit_lock(state)
+    if lock and lock["request_id"] != request_id:
+        raise MeetingError("진행 중인 종이 기준 수정 요청을 먼저 마치세요.", 409)
+    item = {**paper_space.pose_fields(bundle), "candidate_set_id": uid("set"), "request_id": request_id, "base_version_id": base["version_id"],
             "created_at": now_ms(), "status": "generating", "reason": None, "limitations": [], "candidates": [],
             "preserved_constraints": edge.effective(state, base.get("request_constraints", [])),
             "constraint_revision": state["constraint_revision"], "proposal_provenance": None}
@@ -84,6 +87,8 @@ def commit(edge, state, actor, payload):
     ack = {**identity(item), "candidate_id": candidate["candidate_id"], "version_id": vid, "status": "version_committed"}
     if item["status"] == "committed" and item["selected_candidate_id"] == candidate["candidate_id"]:
         return "version.commit_repeated", ack, None
+    if not paper_space.matches_frame(state, item):
+        raise MeetingError("후보를 생성한 종이 기준 위치가 바뀌었습니다. 다시 수정 요청하세요.", 409)
     paper_space.check_commit(state, actor, payload)
     if item["status"] != "ready" or base != state["committed_version_id"] or item["constraint_revision"] != state["constraint_revision"]:
         raise MeetingError("채택본 또는 유지 조건이 변경됐습니다. 현재 Latest를 확인하세요.", 409,
@@ -99,9 +104,11 @@ def commit(edge, state, actor, payload):
     transcript, selection, image = bundle["transcript"], bundle["selection"], bundle["visual_evidence"]
     lines = command_utterances(state, bundle)
     command_ids = [line["utterance_id"] for line in lines]
-    command_text = " ".join(line["text"] for line in lines)
+    command_text = frozen_command_text(bundle, " ".join(line["text"] for line in lines))
     evidence = {"utterance_id": transcript["utterance_id"], "utterance_refs": transcript["utterance_refs"],
                 "transcript": command_text, "transcript_source": transcript["source"],
+                "command_text_source": bundle.get("command_text_source", "linked_meeting_utterances"),
+                "command_requested_by": bundle["participant_id"],
                 "selection_id": selection["selection_id"], "hit_model_local_position": selection["hit_model_local_position"],
                 "image_asset_id": image["image_asset_id"], "image_sha256": image["sha256"]}
     source = {"source_request_id": rid, "candidate_set_id": item["candidate_set_id"], "candidate_id": candidate["candidate_id"],

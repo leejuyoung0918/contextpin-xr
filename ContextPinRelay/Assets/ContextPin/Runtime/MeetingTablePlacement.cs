@@ -310,10 +310,11 @@ namespace ContextPin
 
         bool StoreReviewTable(Pose tableTop, Vector2 size, bool manual, bool confirmedArea, bool a4 = false)
         {
+            float upDot = Vector3.Dot(tableTop.rotation * Vector3.up, Vector3.up);
             if (!SpatialAssembly || !float.IsFinite(tableTop.position.sqrMagnitude) || !float.IsFinite(size.sqrMagnitude) ||
                 size.x < (a4 ? .15f : .20f) || size.y < .15f || !float.IsFinite(Quaternion.Dot(tableTop.rotation, tableTop.rotation)) ||
                 Mathf.Abs(Quaternion.Dot(tableTop.rotation, tableTop.rotation) - 1) > .01f ||
-                Vector3.Dot(tableTop.rotation * Vector3.up, Vector3.up) < .995f) return false;
+                (a4 ? upDot <= 0 : upDot < .995f)) return false;
             if (!manual && view && Vector3.Dot(tableTop.rotation * Vector3.right, view.transform.right) < 0)
                 tableTop.rotation *= Quaternion.Euler(0, 180, 0);
             reviewTable = tableTop;

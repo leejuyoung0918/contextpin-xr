@@ -12,7 +12,7 @@ namespace ContextPin.Editor
     {
         // Inject Input System control state on the simulator's Touch layouts. Head and scene
         // tracking keep running. Right aim targets CAD while the active left UI ray misses it.
-        static bool PressRightWithLeftActive(RelayApp app, Ray target, bool samplePaper = false, bool selectCandidate = false)
+        static bool WithTestHands(Func<XRController, XRController, bool> exercise)
         {
             var left = XRController.leftHand;
             var right = XRController.rightHand;
@@ -23,7 +23,10 @@ namespace ContextPin.Editor
                     ""name"": ""ContextPinSmokeTouch"", ""extend"": ""XRController"", ""controls"": [
                       {""name"":""pointer"", ""layout"":""Pose"", ""offset"":64},
                       {""name"":""primaryButton"", ""layout"":""Button"", ""format"":""FLT"", ""offset"":128},
-                      {""name"":""triggerPressed"", ""layout"":""Button"", ""format"":""FLT"", ""offset"":132}
+                      {""name"":""triggerPressed"", ""layout"":""Button"", ""format"":""FLT"", ""offset"":132},
+                      {""name"":""gripPressed"", ""layout"":""Button"", ""format"":""FLT"", ""offset"":136},
+                      {""name"":""grip"", ""layout"":""Axis"", ""format"":""FLT"", ""offset"":140},
+                      {""name"":""secondaryButton"", ""layout"":""Button"", ""format"":""FLT"", ""offset"":144}
                     ]}");
             try
             {
@@ -35,7 +38,7 @@ namespace ContextPin.Editor
                 }
                 if (addLeft) left = AddHand("LeftHand");
                 if (addRight) right = AddHand("RightHand");
-                return ExerciseRightA(app, target, left, right, samplePaper, selectCandidate);
+                return exercise(left, right);
             }
             finally
             {
@@ -44,6 +47,9 @@ namespace ContextPin.Editor
                 if (addLeft || addRight) InputSystem.RemoveLayout(layout);
             }
         }
+
+        static bool PressRightWithLeftActive(RelayApp app, Ray target, bool samplePaper = false, bool selectCandidate = false)
+            => WithTestHands((left, right) => ExerciseRightA(app, target, left, right, samplePaper, selectCandidate));
 
         static bool ExerciseRightA(RelayApp app, Ray target, XRController left, XRController right, bool samplePaper, bool selectCandidate)
         {
@@ -134,7 +140,7 @@ namespace ContextPin.Editor
         }
 
         static void SetControllerState(XRController device, Transform tracking, Ray world,
-            bool trigger, bool primary)
+            bool trigger, bool primary, bool grip = false)
         {
             using var buffer = StateEvent.From(device, out var data);
             var position = tracking.InverseTransformPoint(world.origin);
@@ -148,6 +154,8 @@ namespace ContextPin.Editor
             device.GetChildControl<QuaternionControl>("pointer/rotation").WriteValueIntoEvent(rotation, data);
             device.GetChildControl<ButtonControl>("primaryButton").WriteValueIntoEvent(primary ? 1f : 0f, data);
             device.GetChildControl<ButtonControl>("triggerPressed").WriteValueIntoEvent(trigger ? 1f : 0f, data);
+            device.TryGetChildControl<AxisControl>("grip")?.WriteValueIntoEvent(grip ? 1f : 0f, data);
+            device.TryGetChildControl<ButtonControl>("gripPressed")?.WriteValueIntoEvent(grip ? 1f : 0f, data);
             InputSystem.QueueEvent(data);
         }
     }

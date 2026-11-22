@@ -27,6 +27,10 @@ class PaperSpaceTests(CandidateSetCase):
         self.align()
         self.paper("paper_layout", {"latest_version_id": self.original, "latest_pose_paper": self.latest_pose})
 
+    def move_payload(self, xz, expected=0, final=True):
+        return {"latest_version_id": self.original, "grab_id": "grip-1", "expected_pose_revision": expected,
+                "paper_size_m": [.297, .210], "position_xz_m": xz, "final": final}
+
     def snapshot(self, headers=None):
         # Real headsets stream even while OpenSCAD builds. Keep the fixture's marked
         # microphone alive during the three builds, including on slow development PCs.
@@ -50,6 +54,7 @@ class PaperSpaceTests(CandidateSetCase):
     def test_restart_notifies_an_aligned_client_at_the_previous_sequence(self):
         self.setup_layout()
         self.align(self.peer)
+        self.latest_pose = self.paper("paper_move_latest", self.move_payload([.2, -.14], final=False))["latest_pose_paper"]
         self.paper("paper_selection", self.shared_ray(self.original))
         before = self.snapshot()
         directory = self.edge.root.parent / "restart"
@@ -62,8 +67,63 @@ class PaperSpaceTests(CandidateSetCase):
             self.assertEqual([e["event_type"] for e in events], ["paper.alignments_lost"])
             self.assertEqual([p["status"] for p in after["spatial"]["participants"]], ["lost", "lost"])
             self.assertIsNone(after["spatial"]["shared_selection"])
-            for key in ("latest_version_id", "latest_pose_paper", "paper_frame_revision"):
+            for key in ("latest_version_id", "latest_pose_paper", "paper_frame_revision", "latest_pose_revision"):
                 self.assertEqual(after["spatial"][key], before["spatial"][key])
+
+    def test_host_drag_authority_bounds_order_and_release(self):
+        start = self.move_payload([.25, -.12], final=False)
+        self.paper("paper_move_latest", start, status=(409,))
+        self.setup_layout()
+        self.align(self.peer)
+        self.paper("paper_selection", self.shared_ray(self.original), headers=self.peer)
+        self.paper("paper_move_latest", start, headers=self.peer, status=(403,))
+        self.paper("paper_move_latest", {**start, "participant_id": self.actor}, headers=self.peer, status=(400,))
+        self.paper("paper_move_latest", {**start, "latest_version_id": "old"}, status=(409,))
+        self.paper("paper_move_latest", start, revision=2, status=(409,))
+        self.paper("paper_move_latest", {**start, "expected_pose_revision": True}, status=(409,))
+        self.paper("paper_move_latest", {**start, "paper_size_m": [10, 10]}, status=(400,))
+        self.paper("paper_move_latest", {**start, "position_xz_m": [1, 1]}, status=(400,))
+        self.paper("paper_move_latest", {**start, "position_xz_m": [0, .5, 0]}, status=(400,))
+        self.paper("paper_move_latest", {**start, "rotation_xyzw": [0, 0, 0, 1]}, status=(400,))
+        with self.client.websocket_connect(self.prefix + "/events") as ws:
+            ws.send_json({"token": self.peer["Authorization"].split()[1]})
+            before = ws.receive_json()["snapshot"]["spatial"]
+            self.assertEqual(before["latest_pose_revision"], 0)
+            self.assertEqual(before["paper_move_margin_m"], self.edge.paper_move_margin_m)
+            with patch("backend.meeting.paper_space.now_ms", return_value=123450):
+                self.paper("paper_move_latest", start)
+                event = ws.receive_json()
+                self.assertEqual(event["event"]["event_type"], "paper.latest_pose_changed")
+                spatial = event["snapshot"]["spatial"]
+                self.assertIsNone(spatial["shared_selection"])
+                self.assertEqual(spatial["latest_pose_paper"],
+                                 {"position": [.25, self.latest_pose["position"][1], -.12],
+                                  "rotation_xyzw": self.latest_pose["rotation_xyzw"]})
+                self.paper("paper_move_latest", start, status=(409,))
+                self.paper("paper_move_latest", self.move_payload([.22, 0], expected=1, final=False), status=(429,))
+                released = {"paper_frame_revision": 1, **self.move_payload([.21, .01], expected=1)}
+                final = self.command("paper_move_latest", released, cmd_id="release-once")
+                self.assertEqual(ws.receive_json()["snapshot"]["spatial"]["latest_pose_paper"], final["latest_pose_paper"])
+                duplicate = self.command("paper_move_latest", released, cmd_id="release-once")
+                self.assertEqual(final["latest_pose_revision"], duplicate["latest_pose_revision"])
+                self.assertEqual(duplicate["snapshot"]["last_seq"], final["snapshot"]["last_seq"])
+        with self.client.websocket_connect(self.prefix + "/events") as host_ws:
+            host_ws.send_json({"token": self.headers["Authorization"].split()[1]})
+            host_ws.receive_json()
+            progress = self.paper("paper_move_latest", self.move_payload([.23, .02], expected=2, final=False))
+            # Wait for ASGI to handle the disconnect before TestClient cancels the socket task.
+            host_ws.close()
+            cursor = progress["snapshot"]["last_seq"]
+            deadline = time.monotonic() + 4
+            while True:
+                _, state = self.edge.wait_events(self.sid, self.actor, cursor)
+                cursor = state["last_seq"]
+                if state["spatial"]["participants"][0]["status"] == "lost":
+                    break
+                self.assertLess(time.monotonic(), deadline, "Host disconnect must invalidate alignment")
+        # Unplugged during a grab; preserve its last accepted position for the guest.
+        self.paper("paper_move_latest", self.move_payload([0, 0], expected=3), status=(409,))
+        self.assertEqual(self.snapshot(self.peer)["spatial"]["latest_pose_paper"], progress["latest_pose_paper"])
 
     def test_alignment_identity_and_revision_protect_poses_and_rays(self):
         guest = self.snapshot(self.peer)["spatial"]
@@ -120,6 +180,9 @@ class PaperSpaceTests(CandidateSetCase):
         self.latest_pose = {"position": [0, 0, 0], "rotation_xyzw": [0, 0, 0, 1]}
         self.setup_layout()
         self.align(self.peer)
+        position = [.20, -.09]
+        moved = self.paper("paper_move_latest", self.move_payload(position))
+        self.latest_pose = moved["latest_pose_paper"]
         def proposed(ctx, images):
             result = self.proposed(ctx, 6.1, 6.5)
             if ctx["request_id"] == "v2-edit":
@@ -137,11 +200,14 @@ class PaperSpaceTests(CandidateSetCase):
                 self.save_request(key, text)
                 item = self.wait_set(key)
                 self.assertEqual(item["status"], "ready", item)
-                poses = {c["candidate_id"]: {"position": [-.16 if c["candidate_key"] == "A" else .16, 0, .01],
+                poses = {c["candidate_id"]: {"position": [position[0] + (-.16 if c["candidate_key"] == "A" else .16),
+                                                         0, position[1] + .19],
                                              "rotation_xyzw": self.latest_pose["rotation_xyzw"]} for c in item["candidates"]}
                 selection = {"candidate_set_id": item["candidate_set_id"], "candidate_id": item["candidates"][-1]["candidate_id"]}
                 layout = {"latest_version_id": self.original, "active_candidate_set_id": item["candidate_set_id"],
-                          "candidate_poses_paper": poses}
+                          "candidate_poses_paper": poses, "expected_pose_revision": moved["latest_pose_revision"]}
+                self.paper("paper_move_latest", self.move_payload([0, 0], expected=1), status=(409,))
+                self.paper("paper_layout", {**layout, "expected_pose_revision": 0}, status=(409,))
                 self.paper("paper_candidate_select", selection, headers=self.peer, status=(409,))
                 self.paper("paper_layout", {**layout, "candidate_poses_paper": {"bogus": self.latest_pose}}, status=(409,))
                 self.paper("paper_layout", layout)
@@ -191,7 +257,7 @@ class PaperSpaceTests(CandidateSetCase):
         self.assertEqual(self.snapshot(late)["spatial"]["latest_version_id"], self.original)
         self.assertEqual(self.snapshot(late)["spatial"]["candidate_poses_paper"], poses)
 
-        # A previously locked, centered layout can move only in a new paper frame.
+        # The layout publisher cannot reposition Latest even when it has previously been dragged.
         before = self.snapshot(late)
         evidence = self.edge.root / "edit_requests" / self.sid
         frozen = {path: path.read_bytes() for path in evidence.glob("*/*.json")}

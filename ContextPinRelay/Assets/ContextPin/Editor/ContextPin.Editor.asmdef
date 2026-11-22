@@ -1,6 +1,6 @@
 {
   "name":"ContextPin.Editor",
   "rootNamespace":"ContextPin.Editor",
-  "references":["ContextPin.Runtime","Unity.InputSystem","UnityEngine.UI","Oculus.VR","Oculus.VR.Editor","Unity.XR.Management","Unity.XR.Management.Editor","Unity.XR.OpenXR","Unity.XR.OpenXR.Editor"],
+  "references":["ContextPin.Runtime","Unity.InputSystem","UnityEngine.UI","Oculus.VR","Oculus.VR.Editor","glTFast","Unity.XR.Management","Unity.XR.Management.Editor","Unity.XR.OpenXR","Unity.XR.OpenXR.Editor"],
   "includePlatforms":["Editor"]
 }

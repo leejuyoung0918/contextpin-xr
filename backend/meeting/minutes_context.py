@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 import zipfile
 
+from .edit_bundle import frozen_command_text
 from .parameter_relations import effective_values
 
 
@@ -88,9 +89,9 @@ def collect_rounds(folder, files, lines, groups, indices, decision_by_round):
                 raise ValueError("회의 패키지의 수정 요청과 인덱스가 다릅니다.")
             group = by_request.get(rid, {})
             refs = request["transcript"]["utterance_refs"]
-            command = resolve_command(refs, lines)
+            command = frozen_command_text(request, resolve_command(refs, lines))
             ids = [r["utterance_id"] for r in refs]
-            if (request.get("command_utterance_ids", ids) != ids or command != request["transcript"]["text"]):
+            if request.get("command_utterance_ids", ids) != ids:
                 raise ValueError("수정 명령이 요청 당시의 확정 전사와 다릅니다.")
             image = dict(request["visual_evidence"])
             image_path = (PurePosixPath(index["file"]).parent / image["file"]).as_posix()
@@ -104,6 +105,8 @@ def collect_rounds(folder, files, lines, groups, indices, decision_by_round):
                       "proposed_description": (group.get("interpreted_target") or {}).get("description")}
             rounds.append({"request_id": rid, "time": request["created_at"], "base_version_id": request["base_version_id"],
                            "command_utterance_ids": ids, "command_utterance_refs": refs, "command_text": command,
+                           "command_text_source": request.get("command_text_source", "linked_meeting_utterances"),
+                           "command_requested_by": request.get("participant_id"),
                            "target": target, "candidates": candidate_rows(group), "status": group.get("status", "saved"),
                            "question": group.get("question") or group.get("reason"), "request_file": index["file"],
                            "interrupted_at_meeting_end": group.get("interrupted_at_meeting_end", False)})

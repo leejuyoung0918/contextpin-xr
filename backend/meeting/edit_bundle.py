@@ -23,19 +23,24 @@ def window_for(state, request_id):
 
 
 def check_window(state, actor, request_id, base, revision):
+    from .paper_space import edit_lock, matches_frame
     window, _ = window_for(state, request_id)
     if (window["participant_id"] != actor or window.get("base_version_id") != base
-            or window.get("adopted_revision") != revision):
+            or window.get("adopted_revision") != revision or not matches_frame(state, window)):
         raise MeetingError("녹음을 시작한 참가자와 당시 Latest 버전을 확인하세요.", 409)
     if speech_ranges.snapshot(state)[request_id]["status"] != "final":
         raise MeetingError("수정 요청의 최종 전사를 기다려 주세요.", 409)
+    if ("latest_pose_paper" in window and request_id not in state.get("edit_requests", {})
+            and (edit_lock(state) or {}).get("request_id") != request_id):
+        raise MeetingError("현재 종이 위에서 진행 중인 수정 요청을 확인하세요.", 409)
 
 
 def command_utterances(state, bundle):
     """Resolve the exact final revisions selected when the command window closed."""
     refs = bundle["transcript"]["utterance_refs"]
     ids = [ref["utterance_id"] for ref in refs]
-    if not ids or bundle.get("command_utterance_ids", ids) != ids or len(ids) != len(set(ids)):
+    if ((not ids and bundle.get("command_text_source") != "command_window_stt")
+            or bundle.get("command_utterance_ids", ids) != ids or len(ids) != len(set(ids))):
         raise MeetingError("수정 요청의 발화 ID가 전사 근거와 다릅니다.", 409)
     timeline = {(u["utterance_id"], u["revision"]): u for u in state["utterances"]
                 if u.get("is_final", u.get("status") == "final")
@@ -44,6 +49,16 @@ def command_utterances(state, bundle):
         return [timeline[(ref["utterance_id"], ref["revision"])] for ref in refs]
     except KeyError as error:
         raise MeetingError("회의 전사에서 수정 요청의 확정 발화를 찾을 수 없습니다.", 409) from error
+
+
+def frozen_command_text(bundle, linked_text):
+    """Resolve the saved command without expanding a clipped utterance to its full meeting text."""
+    text = bundle["transcript"]["text"]
+    if not isinstance(text, str) or not text.strip() or bundle.get("command_text", text) != text:
+        raise MeetingError("저장된 수정 명령과 확정 문구가 다릅니다.", 409)
+    if bundle.get("command_text_source") != "command_window_stt" and text != linked_text:
+        raise MeetingError("수정 명령이 요청 당시의 확정 전사와 다릅니다.", 409)
+    return text
 
 
 def vector(data, key, size=3, normalized=False):
@@ -122,10 +137,12 @@ def save(coordinator, state, actor, client_id, base_id, ref, lines, fingerprint)
             if line["utterance_id"] not in recorded:
                 raise MeetingError("수정 요청의 원본 전사를 확인하세요.", 409)
             if line["source_mode"] == "manual" and line.get("prior_revision"):
-                source = "corrected"
+                if window.get("command_text_source") != "command_window_stt":
+                    source = "corrected"
             elif line["source_mode"] != "live_capture":
                 raise MeetingError("최종 발화의 입력 출처를 확인하세요.", 409)
-    transcript = {"utterance_id": lines[0]["utterance_id"], "text": " ".join(line["text"] for line in lines),
+    command_text = window.get("clip_text") or " ".join(line["text"] for line in lines)
+    transcript = {"utterance_id": lines[0]["utterance_id"] if lines else None, "text": command_text,
                   "utterance_refs": [{k: line[k] for k in ("utterance_id", "revision")} for line in lines],
                   "source": source,
                   "start_time": iso_time(capture["started_at"] + round(1000 * window["start_sample"] / capture["sample_rate"])),
@@ -135,7 +152,7 @@ def save(coordinator, state, actor, client_id, base_id, ref, lines, fingerprint)
     selection = {k: ref[k] for k in ("selection_id", "part_id", "base_version_id", "object_id", "timestamp",
                  "workspace_revision", "ray_origin_world", "ray_direction_world", "hit_world_position",
                  "hit_model_local_position", "hit_normal_world", "hit_point_asset_m", "workspace_pose", "latest_model_pose",
-                 "paper_frame_revision", "hit_position_paper", "ray_origin_paper", "ray_direction_paper") if k in ref}
+                 "paper_frame_revision", "latest_pose_revision", "hit_position_paper", "ray_origin_paper", "ray_direction_paper") if k in ref}
     visual = {k: ref[k] for k in ("selection_id", "image_source", "actual_rgb", "capture_timestamp", "camera_pose",
                                   "sensor_timestamp_us", "fallback_reason", "image_uv", "image_uv_origin") if k in ref}
     visual.update(image_asset_id=image["evidence_id"], file=image_file, sha256=image["sha256"])
@@ -149,13 +166,25 @@ def save(coordinator, state, actor, client_id, base_id, ref, lines, fingerprint)
         if hashlib.sha256(pixels).hexdigest() != image["sha256"]:
             raise MeetingError("업로드한 이미지와 저장된 이미지가 다릅니다.", 409)
         bundle = {"request_id": client_id, "meeting_id": state["session_id"], "participant_id": actor,
-                  "base_version_id": base_id, "created_at": iso_time(max(line["received_at"] for line in lines)),
+                  "base_version_id": base_id, "created_at": iso_time(window.get("finalized_at") or
+                                                                     max(line["received_at"] for line in lines)),
                   "command_utterance_ids": [line["utterance_id"] for line in lines],
                   "command_text": transcript["text"], "transcript": transcript,
                   "selection": selection, "visual_evidence": visual, "fingerprint": fingerprint,
                   "audio": {"file": "command.wav", "sha256": hashlib.sha256(audio).hexdigest(),
                             "stream_id": window["stream_id"], "sample_rate": capture["sample_rate"], "start_sample": window["start_sample"],
                             "end_sample": window["end_sample"]}}
+        if window.get("b_status") == "final":
+            from .paper_space import pose_fields
+            bundle.update(pose_fields(window))
+            marked = speech_ranges.snapshot(state)[client_id]
+            bundle["command_requested_by"] = actor
+            bundle["command_text_source"] = window["command_text_source"]
+            bundle["speaker_id"] = None
+            bundle["command"] = {k: marked[k] for k in ("command_start_sample_index", "command_end_sample_index",
+                "command_start_session_ms", "command_end_session_ms", "command_text", "command_text_source",
+                "command_requested_by", "command_utterance_ids", "speaker_id")}
+            bundle["command"]["utterance_refs"] = transcript["utterance_refs"]
         if folder.exists():
             if json.loads((folder / "request.json").read_text()) != bundle:
                 raise MeetingError("다른 내용으로 저장된 수정 요청입니다.", 409)

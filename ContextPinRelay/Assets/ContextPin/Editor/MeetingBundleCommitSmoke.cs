@@ -52,7 +52,7 @@ namespace ContextPin.Editor
                 var expectedCenter = new Vector2(key == "A" ? -.25f : .25f, .25f) * explicitAreaSize;
                 if (checkPhoneStand)
                 {
-                    expectedCenter = new Vector2(key == "A" ? -.14f : .14f, .24f);
+                    expectedCenter = ExpectedPhoneSlot(key);
                     var pivot = RelativePose(root, measuredPaper).position;
                     slotPosition = new Vector2(pivot.x, pivot.z);
                     Require(Mathf.Abs(pivot.y) < .0005f, "The phone stand CAD pivot must rest on the tabletop.");
@@ -98,7 +98,7 @@ namespace ContextPin.Editor
                 slots.SetValue(second, 0);
                 Require((bool)placement.Invoke(app, args), "B alone must fit.");
                 var offset = (Vector3)args[2];
-                var expected = checkPhoneStand ? new Vector2(.14f, .24f) : explicitAreaSize * .25f;
+                var expected = checkPhoneStand ? ExpectedPhoneSlot("B") : explicitAreaSize * .25f;
                 var point = checkPhoneStand ? offset : offset + bounds.center;
                 Require(Vector2.Distance(new Vector2(point.x, point.z), expected) < .001f,
                         "B alone must stay in its back-right slot.");
@@ -107,6 +107,13 @@ namespace ContextPin.Editor
                     boundsField.SetValue(second, new Bounds(bounds.center + new Vector3(.013f, 0, -.021f), bounds.size));
                     Require((bool)placement.Invoke(app, args) && Vector3.Distance((Vector3)args[2], offset) < .0005f,
                         "An asymmetric edit must leave the CAD base pivot fixed at its registered slot.");
+                    var wideLeft = new Bounds(bounds.center - .14f * Vector3.right, bounds.size);
+                    boundsField.SetValue(second, wideLeft);
+                    Require((bool)placement.Invoke(app, args), "An off-centre supported candidate must still fit.");
+                    var shifted = (Vector3)args[2];
+                    Require(shifted.x > offset.x + .02f && Mathf.Abs(shifted.y - offset.y) < .0005f &&
+                            shifted.x + wideLeft.min.x >= expectedPhoneLatest.x - .24f + .0049f,
+                        "Candidate B must move outward enough for its measured left edge to clear the centre gap.");
                 }
                 report.singleCandidateKeptSlot = true;
                 boundsField.SetValue(second, new Bounds(bounds.center, new Vector3(1, bounds.size.y, 1)));
@@ -130,7 +137,9 @@ namespace ContextPin.Editor
             {
                 var root = GameObject.Find("Candidate" + key);
                 if (root == null) return false;
+                if (IntegratedTest && !CheckPeerGallery(app, state, latest, set, index)) return false;
                 if (TimelineTest && index == 0 && !WaitForReviewSpeech(state)) return false;
+                if (IntegratedTest) ProbeBusyInput(app, latest, "CandidatesDisplayed", true, true);
                 var row = set["candidates"].Single(c => (string)c["candidate_key"] == key);
                 var bounds = ModelBoundsInPose(root, measuredPaper);
                 // The solid base extends beyond the grooves or backrest.
@@ -139,6 +148,7 @@ namespace ContextPin.Editor
                 Physics.SyncTransforms();
                 Require(Physics.Raycast(ray, out var hit, bounds.size.y + .04f) && hit.transform.IsChildOf(root.transform), "Candidate ray must hit its mesh.");
                 Require(PressRightWithLeftActive(app, ray, selectCandidate: true), "The right A edge must select the pointed candidate.");
+                if (IntegratedTest) ProbeBusyInput(app, latest, "Committing", true, true);
                 Require(Version(latest) == (string)set["base_version_id"], "A local button press cannot replace Latest ahead of commit.");
                 report.selectedCandidates[index] = (string)row["candidate_id"];
                 report.committedVersions[index] = (string)row["version_id"];
@@ -163,6 +173,7 @@ namespace ContextPin.Editor
                         (string)model["evidence"]["image_asset_id"] == (string)bundle["visual_evidence"]["image_asset_id"] &&
                         (string)model["assets"]["preview.glb"]["sha256"] == (string)row["model_asset"]["sha256"],
                         "The displayed version must commit the exact reviewed file, provenance and parent.");
+                if (IntegratedTest && !CheckPeerCommit(app, state, latest, index)) return false;
                 CheckSideLatest(state, latest, id, true);
                 if (index == 0) { report.middleVersion = id; report.v2Replaced = true; }
                 else

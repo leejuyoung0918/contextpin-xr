@@ -31,6 +31,8 @@ namespace ContextPin.Editor
                 InstallEditorPcmInput();
                 startRequested = false;
                 ResetTimelineSpeech();
+                shortWindow = cancellationWindow = null;
+                ResetIntegratedChecks();
                 report.captureFiles = new string[2];
                 report.selectedCandidates = new string[2];
                 report.committedVersions = new string[2];
@@ -145,21 +147,32 @@ namespace ContextPin.Editor
             {
                 case 0:
                     if (!ExplicitUi("ExplicitLatest").Contains(index == 0 ? "V1" : "V2")) return false;
+                    if (IntegratedTest && !CheckRoundDrag(app, state, latest, index)) return false;
+                    if (!IntegratedTest && index == 0 && ColocationTest && !CheckHostGrip(app, state, latest)) return false;
+                    if (checkPhoneStand && index == 0 && !CheckShortB(app, state)) return false;
+                    if (!IntegratedTest && index == 0 && ColocationTest && !CheckTimeoutAndCancellation(app, state)) return false;
                     if (index == 0 && TimelineTest && !BeforeTimelineCommand(app, state)) return false;
+                    if (IntegratedTest && index == 1)
+                    {
+                        QueueDiscussion("between");
+                        if (!HasLine(state, "공간")) return false;
+                    }
                     CheckSideLatest(state, latest, version, true);
                     captureRoundBaseline = rounds.Count;
                     captureVersionBaseline = versions.Count;
-                    if (!Click("ExplicitSpeechAction")) return false;
+                    if (!MarkCommand(app, true)) return false;
                     var pending = AppType.GetField("explicitRequest", AppMembers).GetValue(app);
                     captureId = (string)pending.GetType().GetField("RangeId").GetValue(pending);
+                    if (IntegratedTest) SavePlacementAtB(state, index);
                     speechRingStart = PcmCursor() + PcmRate / 8;
                     Require(inputRing.SetData(samples, speechRingStart), "Could not enqueue test speech.");
                     stopSpeechAt = Time.realtimeSinceStartupAsDouble + .125 + samples.Length / (double)PcmRate + .18;
                     return true;
                 case 1:
                     if (!TryRightRay(latest, out var early)) return false;
+                    if (IntegratedTest) ProbeBusyInput(app, latest, "RecordingEditCommand", false, true);
                     Require(!PressCapture(app, early) && images.Count == index, "A during recording must not freeze or upload evidence.");
-                    if (Time.realtimeSinceStartupAsDouble < stopSpeechAt || !Click("ExplicitSpeechAction")) return false;
+                    if (Time.realtimeSinceStartupAsDouble < stopSpeechAt || !MarkCommand(app, false)) return false;
                     Require(!PressCapture(app, early), "A before final STT, after stopping the mic range, must still be ignored.");
                     report.rejectedEarlyCapture = true;
                     return true;
@@ -167,16 +180,30 @@ namespace ContextPin.Editor
                     var range = state["design_speech_ranges"]?[captureId];
                     if ((string)range?["status"] is "failed" or "no_speech") throw new InvalidOperationException("STT: " + range);
                     if ((string)range?["status"] != "final") return false;
-                    captureTranscript = string.Join(" ", ((JArray)range["utterances"]).Select(u => (string)u["text"]));
+                    captureTranscript = (string)range["command_text"] ?? string.Join(" ", ((JArray)range["utterances"]).Select(u => (string)u["text"]));
                     if (string.IsNullOrWhiteSpace(captureTranscript) || !ExplicitUi("ExplicitTranscript").Contains(captureTranscript)) return false;
-                    Require(images.Count == index && (state["edit_requests"]?[captureId] == null), "Final STT alone must not persist a capture.");
+                    Require(images.Count == index && state["edit_requests"]?[captureId] == null && state["candidate_sets"]?[captureId] == null,
+                        "A final B-window transcript must wait for an image and ray before starting CAD.");
+                    if (checkPhoneStand)
+                    {
+                        var guidance = ExplicitUi("ExplicitDesignStatus");
+                        Require(guidance.Contains("가리키") && guidance.Contains("A"), "Final B transcript must prompt for ray + A: " + guidance);
+                        report.bAwaitedTarget = true;
+                    }
                     if (index == 0) report.finalMarkedSpeech = captureTranscript; else report.followupMarkedSpeech = captureTranscript;
+                    if (IntegratedTest)
+                    {
+                        VerifyFrozenPlacement(range, index, version);
+                        ProbeBusyInput(app, latest, "AwaitingTarget", true, false);
+                    }
                     RejectForeignCapture(app, version);
                     return true;
                 case 3: return FreezeTrackedCapture(app, latest, index);
                 case 4:
                     if (state["edit_requests"]?[captureId] == null) return false;
                     if (TimelineTest && index == 0) SpeakDuringGeneration(state);
+                    if (IntegratedTest && (string)state["candidate_sets"]?[captureId]?["status"] is ("generating" or "building"))
+                        ProbeBusyInput(app, latest, "GeneratingCandidates", true, true);
                     if (checkBundleAdoption) return VerifyReviewModels(app, state, latest, index);
                     return checkCandidateSet ? CheckBundleCandidates(app, state, index, version) : ExplicitUi("ExplicitDesignStatus").Contains("저장 완료");
                 default:
@@ -366,6 +393,14 @@ namespace ContextPin.Editor
             Require((string)speech["source"] == "stt" && (string)speech["text"] == captureTranscript &&
                 !string.IsNullOrEmpty((string)speech["utterance_id"]) && speech["start_time"] != null && speech["end_time"] != null &&
                 JToken.DeepEquals(transcriptFile, speech), "The final transcribed range must preserve its text, evidence ID, times and STT origin.");
+            if (checkPhoneStand) CheckRecordedButtonEdges(state, bundle, directory);
+            if (IntegratedTest)
+            {
+                VerifyFrozenPlacement(bundle, index, version);
+                VerifyFrozenPlacement(state["candidate_sets"][captureId], index, version);
+                Require((int)selection["latest_pose_revision"] == capturedRevisions[index], "Ray+A must use the frozen position revision.");
+                report.frozenPlacementVerified = true;
+            }
             ValidateCaptureWave(File.ReadAllBytes(Path.Combine(directory, "command.wav")), samples);
             report.savedBundleMediaVerified = true;
             report.captureFiles[index] = jsonPath;

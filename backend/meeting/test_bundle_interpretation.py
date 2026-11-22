@@ -112,6 +112,17 @@ class BundleInterpretationTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertEqual(set(ai.change_options({**ctx, "transcript": phrase})), {dimension})
 
+    def test_phone_stand_fixed_corners_reject_unrelated_dimension_changes(self):
+        config = json.loads((Path(__file__).parent / "phone_stand/assembly.json").read_text())
+        self.profile = config["profile"]
+        self.context.update(transcript="이쪽 모서리를 좀 더 둥글게 만들어줘.",
+                            parameters=self.profile["parameters"], fixed_parameters=config["fixed_parameters"],
+                            shared_edit_scope=self.profile.get("edit_scope"))
+        result = self.evaluate({"viewing_angle": 58}, {"lip_height": 18})
+        self.assertEqual(result["action"], "unsupported_specific_region")
+        self.assertEqual(result["candidates"], [])
+        self.assertIn("모서리 반경이 고정", result["question"])
+
     def test_truncated_completion_and_unconfigured_separate_endpoint(self):
         truncated = {"choices": [{"finish_reason": "length", "message": {"content": json.dumps(self.response)}}]}
         with patch.dict(os.environ, {"MEETING_BUNDLE_MODEL": "test-model", "MEETING_BUNDLE_BASE_URL": "http://127.0.0.1:18123/v1"}), \

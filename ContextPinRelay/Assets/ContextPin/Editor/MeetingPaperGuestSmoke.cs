@@ -57,7 +57,7 @@ namespace ContextPin.Editor
             var right = Vector3.ProjectOnPlane(camera.right, Vector3.up).normalized;
             var forward = Vector3.Cross(right, Vector3.up);
             measuredPaper = new Pose(camera.position + forward * .55f - Vector3.up * .24f + shift,
-                Quaternion.AngleAxis(heading, Vector3.up) * Quaternion.LookRotation(forward));
+                Quaternion.AngleAxis(heading, Vector3.up) * Quaternion.LookRotation(forward) * FixtureTilt);
             Require(Vector3.Dot(camera.right, measuredPaper.rotation * Vector3.right) < -.8f &&
                     Vector3.Distance(measuredPaper.position, hostPaper.position) > .12f,
                     "Guest must be looking from the opposite numbered edge, in a different world origin.");
@@ -91,13 +91,17 @@ namespace ContextPin.Editor
             var layout = profile.Value<string>("review_layout");
             var field = AppType.GetField("paperLatestPose", AppMembers);
             var canonical = (Pose)field.GetValue(app);
+            var spatial = (JObject)snapshot["spatial"];
+            var revision = spatial["latest_pose_revision"]?.DeepClone();
             Require(PaperState(app, "PaperRenderable") && !PaperState(app, "PaperLayoutNeedsReset"),
                 "A host aligned to current paper slots must be able to render.");
             try
             {
                 // Stored meetings keep their original profile and canonical pose from the host.
                 profile["review_layout"] = "center_latest_side_candidates";
-                field.SetValue(app, new Pose(canonical.position - Vector3.right * .24f, canonical.rotation));
+                field.SetValue(app, new Pose(Vector3.zero, canonical.rotation));
+                Require(!PaperState(app, "PaperLayoutNeedsReset"), "The host can deliberately move Latest to the paper centre.");
+                spatial.Remove("latest_pose_revision");
                 Require(PaperState(app, "PaperLayoutNeedsReset") && !PaperState(app, "PaperRenderable"),
                     "The legacy centre pose must block old models until the host republishes the offset layout.");
                 field.SetValue(app, canonical);
@@ -107,6 +111,7 @@ namespace ContextPin.Editor
             }
             finally
             {
+                if (revision != null) spatial["latest_pose_revision"] = revision;
                 profile["review_layout"] = layout;
                 field.SetValue(app, canonical);
             }
@@ -135,7 +140,7 @@ namespace ContextPin.Editor
                 Require(guidance.Contains("수정할 곳"), "The new command should ask for its target while the old A/B set is still visible.");
                 var candidate = GameObject.Find("CandidateB");
                 var b = ModelBoundsInPose(candidate, measuredPaper);
-                var ray = new Ray(measuredPaper.position + measuredPaper.rotation * new Vector3(b.max.x-.005f, b.max.y+.025f, b.center.z), Vector3.down);
+                var ray = new Ray(measuredPaper.position + measuredPaper.rotation * new Vector3(b.max.x-.005f, b.max.y+.025f, b.center.z), measuredPaper.rotation * Vector3.down);
                 Require(Physics.Raycast(ray, out var hit, 1) && hit.transform.IsChildOf(candidate.transform),
                     "The follow-up input must actually point at candidate B.");
                 Require(!PressRightWithLeftActive(app, ray, selectCandidate:true) &&
@@ -208,8 +213,15 @@ namespace ContextPin.Editor
                         transportType.GetMethod("StartEvents").Invoke(hostEvents, new object[] { (long)s["last_seq"] });
                     }
                     if (!(bool)transportType.GetProperty("EventsConnected").GetValue(hostEvents)) return false;
+                    CheckBlockedGrip(app, latest, "candidate review");
+                    report.gripReviewLocked = true;
                     CheckLegacyPaperLayout(app, s);
-                    CheckUnadoptedFollowup(app, sp);
+                    if (sp.ContainsKey("edit_lock"))
+                    {
+                        ProbeRejectedB(app);
+                        Require((string)sp["edit_lock"]?["status"] == "ready", "Review must keep the room locked to this candidate set.");
+                    }
+                    else CheckUnadoptedFollowup(app, sp);
                     JoinAsNewViewer(app, 1);
                     return true;
                 case 12:
@@ -248,7 +260,7 @@ namespace ContextPin.Editor
                     {
                         var b = ModelBoundsInPose(GameObject.Find("CandidateB"), measuredPaper);
                         var above = measuredPaper.position + measuredPaper.rotation * new Vector3(b.max.x-.005f, b.max.y+.025f, b.center.z);
-                        Require(PressRightWithLeftActive(app, new Ray(above, Vector3.down), selectCandidate:true),
+                        Require(PressRightWithLeftActive(app, new Ray(above, measuredPaper.rotation * Vector3.down), selectCandidate:true),
                             "Guest A on candidate B must send a suggestion.");
                         guestSuggested = true;
                         return false;
@@ -264,7 +276,14 @@ namespace ContextPin.Editor
                 case 16:
                     if (latest == null || Version(latest) != report.middleVersion || (string)s["adopted_version_id"] != report.middleVersion ||
                         GameObject.Find("CandidateContainer") != null) return false;
-                    RequireSamePhysicalPose(latest.transform, hostLatestPaper, "Guest V2 after remote commit");
+                    if (!report.guestGripBlocked)
+                    {
+                        RequireSamePhysicalPose(latest.transform, hostLatestPaper, "Guest V2 after remote commit");
+                        CheckBlockedGrip(app, latest, "guest");
+                        report.guestGripBlocked = true;
+                    }
+                    if (!CheckGuestLiveMove(app, sp, latest)) return false;
+                    RequireSamePhysicalPose(latest.transform, hostLatestPaper, "Guest V2 after remote host grip release");
                     CheckPaperLatest(latest);
                     CheckPhysicalScale(s, latest);
                     report.paperCommitReceived = true;

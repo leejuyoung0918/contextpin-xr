@@ -12,7 +12,9 @@ namespace ContextPin
 
         sealed class PendingDesignRequest
         {
-            public readonly string Id = Guid.NewGuid().ToString("N");
+            public readonly string Id;
+            public PendingDesignRequest() : this(Guid.NewGuid().ToString("N")) { }
+            public PendingDesignRequest(string id) { Id = id; }
             public string BaseId;
             public long Revision;
             public string RangeId, Transcript, TranscriptSource, SpeechError;
@@ -24,6 +26,13 @@ namespace ContextPin
             public string Error, RoundId;
             public JObject ObservedSnapshot;
             public double RangeMarkedAt;
+            public bool ButtonWindow, RemoteWindow, RemoteStartAccepted, WindowClosed;
+            public int MaxWindowMs;
+            public long EndLimitSample;
+            public double StartedAt, ClockOffset, ClockUncertainty;
+            public JObject RemoteEnd;
+            public Pose? FrozenPose;
+            public int PaperFrame, PoseRevision;
         }
 
         sealed class DesignSelection
@@ -42,7 +51,8 @@ namespace ContextPin
         bool ExplicitDesignMeeting => SpatialAssembly && TextValue(meetingSnapshot, "design_submit_mode") == "explicit";
         bool CaptureBundleMeeting => ExplicitDesignMeeting && TextValue(meetingSnapshot?["meeting"], "edit_request_output") == "bundle";
         bool CandidateGenerationMeeting => CaptureBundleMeeting && TextValue(meetingSnapshot?["meeting"], "candidate_generation") == "ai";
-        bool CapturingPaperEdit => SharedPaperMeeting && CaptureBundleMeeting && MeetingHost && explicitRequest != null &&
+        bool CapturingPaperEdit => SharedPaperMeeting && CaptureBundleMeeting && explicitRequest != null &&
+            (MeetingHost || explicitRequest.ButtonWindow) &&
             !explicitRequest.BundleSaved && !explicitRequest.Conflict &&
             explicitRequest.Speech is (DesignSpeech.Marking or DesignSpeech.Transcribing or DesignSpeech.Final);
         JObject CurrentCandidateSet
@@ -91,7 +101,8 @@ namespace ContextPin
         }
         bool BundleLatestReady => A4ReviewSurfaceActive && (!SharedPaperMeeting || PaperRenderable) &&
             meetingModel != null && meetingModel.activeInHierarchy && meetingLoadedVersion == AssemblyAdoptedId;
-        string PaperLatestPosition => PublishedCenterLayout ? "진행자가 정한 종이 중앙" :
+        string PaperLatestPosition => LatestPoseRevision > 0 ? "진행자가 정한 위치" :
+            PublishedCenterLayout ? "진행자가 정한 종이 중앙" :
             OffsetPaperGallery ? "종이 오른쪽 ②·③ 쪽" : "종이 오른쪽 앞";
         bool OtherDeviceRecordsDesign => !string.IsNullOrEmpty(TextValue(meetingSnapshot?["meeting"], "audio_device_id")) &&
             TextValue(meetingSnapshot["meeting"], "audio_device_id") != meetingDeviceId;
@@ -130,6 +141,7 @@ namespace ContextPin
             get
             {
                 var p = explicitRequest;
+                if (HoldCommandMeeting) return "";
                 if (p?.Conflict == true || p?.Sending == true || bundleCommitPending || bundleCommitTarget != null) return "";
                 if (p?.Speech == DesignSpeech.Marking) return CaptureBundleMeeting ? "발언 완료" : "수정 발언 완료";
                 if (!ExplicitDesignReady || OtherDeviceRecordsDesign || assemblyStarting || assemblyAudio == null || assemblyCaptureFrozen) return "";
@@ -145,12 +157,27 @@ namespace ContextPin
             get
             {
                 var p = explicitRequest;
+                if (IntegratedPaperControls && PaperRenderable && PaperEditLock is JObject active &&
+                    TextValue(active, "request_id") != p?.Id) return PaperInteractionHint();
                 if (p?.Conflict == true || !string.IsNullOrEmpty(p?.Error)) return p.Error;
                 if (A4ReviewSurfaceActive && latestPaperError != null) return latestPaperError;
+                if (IntegratedPaperControls && PaperRenderable && CurrentPaperInteraction != PaperInteraction.LatestDisplayed)
+                    return PaperInteractionHint();
                 if (!string.IsNullOrWhiteSpace(explicitHint)) return explicitHint;
                 if (CaptureBundleMeeting)
                 {
+                    if (p?.ButtonWindow == true && !p.BundleSaved)
+                    {
+                        if (p.Selection != null) return "지정한 부위와 사진을 보내는 중…";
+                        if (p.Speech == DesignSpeech.Marking) return "● 수정 요청 듣는 중\nB를 떼면 입력 완료";
+                        if (p.Speech == DesignSpeech.Transcribing) return "수정 내용을 확인하는 중…";
+                        if (p.Speech == DesignSpeech.Final) return "수정할 부분을 가리키고 A를 누르세요.";
+                        if (p.Speech == DesignSpeech.Failed) return p.SpeechError;
+                    }
                     var set = CurrentCandidateSet;
+                    if (IntegratedPaperControls && appliedPaperVersion == meetingLoadedVersion &&
+                        !string.IsNullOrEmpty(appliedPaperVersion) && (set == null || TextValue(set, "status") == "committed"))
+                        return PaperInteractionHint();
                     if (set != null && !CapturingPaperEdit && !(p?.Speech == DesignSpeech.Failed && !p.BundleSaved))
                         return BundleCandidateStatus(set);
                     if (SharedPaperMeeting && p?.BundleSaved == true && p.BaseId != AssemblyAdoptedId)
@@ -163,6 +190,7 @@ namespace ContextPin
                     if (p?.Speech == DesignSpeech.Final) return PaperLatestPosition + "의 Latest에서 수정할 곳을 가리키고 오른쪽 A를 누르세요.";
                     if (p?.Speech == DesignSpeech.Failed) return p.SpeechError + " PC에서 이 구간의 전사를 입력할 수도 있습니다.";
                     if (!A4ReviewSurfaceActive) return "메뉴의 ‘A4로 다시 맞추기’로 종이 위치를 확인하세요.";
+                    if (HoldCommandMeeting && ExplicitDesignReady) return "B를 누른 채 수정 요청을 말하세요.";
                     if (ExplicitDesignReady && !OtherDeviceRecordsDesign && assemblyAudio != null)
                         return "회의 전체를 전사 중입니다. 수정할 내용은 ‘수정 요청’을 누르고 말하세요.";
                 }
@@ -204,7 +232,7 @@ namespace ContextPin
 
         void StartExplicitCamera(bool userRequested)
         {
-            if (SharedPaperMeeting && !MeetingHost || !ExplicitDesignMeeting || ExplicitCameraReady || explicitCameraStarting || meetingTransport == null) return;
+            if (SharedPaperMeeting && !MeetingHost && !HoldCommandMeeting || !ExplicitDesignMeeting || ExplicitCameraReady || explicitCameraStarting || meetingTransport == null) return;
             // Android's first permission dialog suspends tracking. A4 placement can finish
             // without RGB, and the existing camera button lets the wearer opt in later.
             if (CaptureBundleMeeting && !userRequested &&
@@ -267,7 +295,8 @@ namespace ContextPin
 
         bool HandleExplicitTargetPress(Ray rightAim, bool panelOwnsPointer)
         {
-            if (!ExplicitDesignReady || OtherDeviceRecordsDesign || AssemblySampling || AssemblyQrScanning || ReviewTableSampling ||
+            if (IntegratedPaperControls && (CurrentPaperInteraction != PaperInteraction.AwaitingTarget || !OwnPaperTarget)) return false;
+            if (!ExplicitDesignReady || OtherDeviceRecordsDesign && explicitRequest?.RemoteWindow != true || AssemblySampling || AssemblyQrScanning || ReviewTableSampling ||
                 movingMeetingPanel || panelOwnsPointer || explicitRequest?.Conflict == true ||
                 explicitRequest?.Sending == true || (explicitRequest?.Submission != null && explicitRequest.RoundId == null)) return false;
             if (CaptureBundleMeeting && (explicitRequest?.Speech != DesignSpeech.Final || explicitRequest.BundleSaved ||
@@ -352,8 +381,12 @@ namespace ContextPin
                 var shared = PaperSelectionPayload(reviewTable, PaperFrameRevision, p.BaseId, rightAim, hit.point);
                 foreach (string field in new[] { "paper_frame_revision", "ray_origin_paper", "ray_direction_paper", "hit_position_paper" })
                     photo.BundleEvidence[field] = shared[field].DeepClone();
-                shared["selection_id"] = photo.Id;
-                SendPaperCommand("paper_selection", shared);
+                if (p.FrozenPose.HasValue) photo.BundleEvidence["latest_pose_revision"] = p.PoseRevision;
+                else
+                {
+                    shared["selection_id"] = photo.Id;
+                    SendPaperCommand("paper_selection", shared);
+                }
             }
             photo.Reference.Merge(photo.BundleEvidence);
             p.Selection = photo;
@@ -467,6 +500,8 @@ namespace ContextPin
             if (p.Conflict)
             {
                 explicitRequest = null;
+                RestoreAwaitingPaperTarget();
+                if (explicitRequest != null) return;
                 ShowExplicitHint("새 Latest에서 수정 발언과 부위를 다시 지정하세요.");
                 return;
             }
@@ -482,17 +517,29 @@ namespace ContextPin
 
         void UpdateExplicitDesign()
         {
+            RestoreAwaitingPaperTarget();
             if (!ExplicitDesignMeeting || explicitRequest == null) return;
             var p = explicitRequest;
+            if (!p.BundleSaved && p.Selection != null && CaptureBundleMeeting && HasSavedEditBundle(p))
+            {
+                MarkEditBundleSaved(p);
+                return;
+            }
             if (p.RoundId != null || p.Conflict || p.BundleSaved) return;
             bool frozenBundle = CaptureBundleMeeting && p.Selection != null;
             // After dispatch the immutable envelope can be retried across a lost response.
             // Before dispatch an obsolete reference cannot be applied to the new head.
-            if (!frozenBundle && p.Submission == null && (p.BaseId != AssemblyAdoptedId || p.Revision != meetingSnapshot.Value<long>("adopted_revision")))
+            bool placementChanged = p.FrozenPose.HasValue && (p.PaperFrame != PaperFrameRevision || p.PoseRevision != LatestPoseRevision);
+            if (!frozenBundle && p.Submission == null && (placementChanged || p.BaseId != AssemblyAdoptedId || p.Revision != meetingSnapshot.Value<long>("adopted_revision")))
             {
-                if (p.Speech == DesignSpeech.Marking) TryMarkDesignSpeech(p.RangeId, false, out _);
+                if (p.Speech == DesignSpeech.Marking)
+                {
+                    if (p.ButtonWindow) EndHeldCommand(p);
+                    else TryMarkDesignSpeech(p.RangeId, false, out _);
+                }
                 p.Conflict = true;
-                p.Error = "준비 중 다른 채택본이 저장됐습니다. 새 Latest를 확인한 뒤 다시 지정하세요.";
+                p.Error = placementChanged ? "기준 위치가 바뀌었습니다. 현재 Latest에서 다시 요청하세요." :
+                    "준비 중 다른 채택본이 저장됐습니다. 새 Latest를 확인한 뒤 다시 지정하세요.";
                 Draw();
                 return;
             }
@@ -500,11 +547,6 @@ namespace ContextPin
             if (p.ObservedSnapshot != meetingSnapshot)
             {
                 p.ObservedSnapshot = meetingSnapshot;
-                if (p.Submission != null && CaptureBundleMeeting && HasSavedEditBundle(p))
-                {
-                    MarkEditBundleSaved(p);
-                    return;
-                }
                 if (p.Submission != null && !CaptureBundleMeeting)
                 {
                     var seen = Values(meetingSnapshot, "rounds").FirstOrDefault(r =>
@@ -521,16 +563,30 @@ namespace ContextPin
                 if (p.RangeId != null && meetingSnapshot["design_speech_ranges"]?[p.RangeId] is JObject range)
                 {
                     var status = TextValue(range, "status");
+                    bool released = p.FrozenPose.HasValue && !HasSavedEditBundle(p) &&
+                        (status is ("recording" or "transcribing" or "final") && TextValue(PaperEditLock, "request_id") != p.Id ||
+                        p.Selection != null && status is ("failed" or "cancelled"));
+                    if (released)
+                    {
+                        EndOpenHeldCommand();
+                        p.Conflict = true;
+                        p.RetryTransfer = false;
+                        p.Error = TextValue(range, "error");
+                        if (p.Error.Length == 0) p.Error = "이 요청의 위치 고정이 해제됐습니다. B를 누른 채 다시 말하세요.";
+                        Draw();
+                        return;
+                    }
                     bool corrected = CaptureBundleMeeting && p.Speech == DesignSpeech.Final && p.Submission == null &&
                         status == "final" && range["utterances"] is JArray rows &&
                         !rows.Select(row => row.Value<int>("revision")).SequenceEqual(p.UtteranceRefs.Select(row => row.Value<int>("revision")));
                     if (p.Speech == DesignSpeech.Transcribing || p.Speech == DesignSpeech.Marking && status == "failed" ||
+                        p.ButtonWindow && p.Speech == DesignSpeech.Final && status is ("failed" or "cancelled") ||
                         CaptureBundleMeeting && p.Speech == DesignSpeech.Failed && status == "final" || corrected)
                         ReceiveExplicitSpeech(p, range);
                 }
             }
             if ((p.Speech is DesignSpeech.Marking or DesignSpeech.Transcribing) &&
-                (assemblyCaptureFrozen || AssemblySessionStatus != "recording" || assemblyAudio == null) &&
+                (AssemblySessionStatus != "recording" || !p.RemoteWindow && (assemblyCaptureFrozen || assemblyAudio == null)) &&
                 meetingSnapshot["design_speech_ranges"]?[p.RangeId]?["end_sample"]?.Type != JTokenType.Integer &&
                 Time.realtimeSinceStartupAsDouble - p.RangeMarkedAt > 3)
             {
@@ -557,7 +613,7 @@ namespace ContextPin
         void MarkEditBundleSaved(PendingDesignRequest p)
         {
             p.BundleSaved = true;
-            p.Sending = p.RetryTransfer = false;
+            p.Conflict = p.Sending = p.RetryTransfer = false;
             p.Error = explicitHint = null;
             Draw();
         }
@@ -566,11 +622,14 @@ namespace ContextPin
         {
             var state = TextValue(range, "status");
             if (state is "recording" or "transcribing") return;
-            if (state == "final" && range["utterances"] is JArray items && items.Count > 0 && (CaptureBundleMeeting || items.Count <= 5) &&
+            string commandText = TextValue(range, "command_text");
+            bool exactClip = p.ButtonWindow && TextValue(range,"command_text_source") == "command_window_stt" &&
+                !string.IsNullOrWhiteSpace(commandText);
+            if (state == "final" && range["utterances"] is JArray items && (items.Count > 0 || exactClip) && (CaptureBundleMeeting || items.Count <= 5) &&
                 items.All(item => !string.IsNullOrEmpty(TextValue(item,"utterance_id")) && item["revision"]?.Type == JTokenType.Integer &&
                     !string.IsNullOrWhiteSpace(TextValue(item,"text"))))
             {
-                p.Transcript = string.Join(" ", items.Select(item => TextValue(item, "text")));
+                p.Transcript = commandText.Length > 0 ? commandText : string.Join(" ", items.Select(item => TextValue(item, "text")));
                 p.TranscriptSource = TextValue(range, "transcript_source");
                 p.SpeechError = null;
                 p.UtteranceRefs = new JArray(items.Select(item => new JObject
@@ -582,7 +641,13 @@ namespace ContextPin
             else
             {
                 p.Speech = DesignSpeech.Failed;
-                p.SpeechError = state == "no_speech" ? "수정 요청을 듣지 못했습니다. 다시 말해 주세요." : TextValue(range, "error");
+                p.SpeechError = state switch {
+                    "too_short" => "B를 누른 채 수정 내용을 말해주세요.",
+                    "too_long" => "수정 요청이 길었습니다. B를 누른 채 짧게 다시 말하세요.",
+                    "cancelled" => "수정 요청이 취소됐습니다.",
+                    "no_speech" => "수정 요청을 듣지 못했습니다. 다시 말해 주세요.",
+                    _ => TextValue(range, "error")
+                };
                 if (string.IsNullOrWhiteSpace(p.SpeechError)) p.SpeechError = "지정한 구간을 전사하지 못했습니다. 다시 말해 주세요.";
             }
             explicitHint = null;
@@ -638,6 +703,7 @@ namespace ContextPin
 
         void ReleaseExplicitDesign()
         {
+            editBHeld = false;
             explicitRequest = null;
             explicitCameraStarting = false;
             explicitHint = explicitCameraMessage = null;

@@ -56,6 +56,7 @@ namespace ContextPin.Editor
 
         static void ReleaseEditorPcmInput()
         {
+            EndTestBInput();
             recordingObservedAt = 0;
             AppType.GetField("EditorOpenPcmInput", PcmHooks).SetValue(null, null);
             AppType.GetField("EditorPcmPosition", PcmHooks).SetValue(null, null);
@@ -87,7 +88,7 @@ namespace ContextPin.Editor
             var heading = Quaternion.AngleAxis(portrait ? -18 : 24, Vector3.up) * Quaternion.LookRotation(forward);
             explicitAreaSize = portrait ? new Vector2(.210f, .297f) : new Vector2(.297f, .210f);
             measuredPaper = new Pose(head.position + forward * .66f - Vector3.up * .14f
-                + right * (portrait ? -.13f : -.09f), heading);
+                + right * (portrait ? -.13f : -.09f), heading * FixtureTilt);
         }
 
         // Clockwise around the paper as seen on the desk: front-left, front-right, back-right, back-left.
@@ -144,7 +145,7 @@ namespace ContextPin.Editor
             var bounds = ModelBoundsInPose(model, measuredPaper);
             var basePoint = checkPhoneStand ? RelativePose(model.transform, measuredPaper).position :
                 new Vector3(bounds.center.x, bounds.min.y, bounds.center.z);
-            var expected = checkPhoneStand ? new Vector3(.24f, 0, 0) : new Vector3(explicitAreaSize.x * .25f, 0, -explicitAreaSize.y * .25f);
+            var expected = checkPhoneStand ? expectedPhoneLatest : new Vector3(explicitAreaSize.x * .25f, 0, -explicitAreaSize.y * .25f);
             Require(Vector3.Distance(basePoint, expected) < .001f && Mathf.Abs(bounds.min.y) < .001f && Quaternion.Angle(model.transform.rotation, measuredPaper.rotation) < .1f,
                 $"Latest must sit on the tabletop at paper-relative offset {expected}, measured {basePoint}.");
             RequireAssemblyMesh(model);
@@ -171,9 +172,12 @@ namespace ContextPin.Editor
                 case 1: TouchPaper(app, PaperCorner(0), 1); break; // Double-tap one corner.
                 case 2: TouchPaper(app, PaperCorner(0) + measuredPaper.rotation * Vector3.right * .10f, 1); break;
                 case 3: TouchPaper(app, PaperCorner(1), 2); break;
-                case 4: TouchPaper(app, PaperCorner(2) + Vector3.up * .045f, 2); break;
+                case 4: TouchPaper(app, PaperCorner(2) - measuredPaper.rotation * Vector3.forward * .09f, 2); break;
                 case 5: TouchPaper(app, PaperCorner(2), 3); break;
-                case 6: TouchPaper(app, (PaperCorner(3) + PaperCorner(2)) * .5f, 3); break;
+                case 6:
+                    TouchPaper(app, PaperCorner(3) + measuredPaper.rotation * Vector3.up * .045f, 3);
+                    TouchPaper(app, (PaperCorner(3) + PaperCorner(2)) * .5f, 3);
+                    break;
                 case 7:
                     TouchPaper(app, PaperCorner(3), 4);
                     report.a4InvalidCornersRejected = true;

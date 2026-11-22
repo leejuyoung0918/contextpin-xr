@@ -17,6 +17,7 @@ from .test_explicit_design import ExplicitDesignCase, PNG
 
 class EditBundleCase(ExplicitDesignCase):
     candidate_mode = {}
+    sample_rate_hz = 8000
 
     def start_meeting(self):
         self.edge = self.client.app.state.coordinator
@@ -32,7 +33,7 @@ class EditBundleCase(ExplicitDesignCase):
         self.edges = {}
         self.socket.send_json({"session_id": self.sid, "token": self.headers["Authorization"].split()[1],
                                **getattr(self, "stream_options", {}),
-                               "device_id": "a", "actual_sample_rate_hz": 8000, "channels": 1,
+                               "device_id": "a", "actual_sample_rate_hz": self.sample_rate_hz, "channels": 1,
                                "codec": "pcm_s16le", "stream_start_sample_index": 0,
                                "stream_start_source_monotonic_ms": monotonic_ms,
                                "clock_offset_ms": self.stream_epoch_ms - monotonic_ms, "clock_uncertainty_ms": 0})

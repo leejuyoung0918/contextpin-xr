@@ -102,17 +102,25 @@ def apply_selection(coordinator, state, actor, kind, payload, stamp):
     if bundle:
         reference.update(edit_bundle.evidence(payload["reference_selection"], reference, base))
         raw = payload["reference_selection"]
-        if any(k in raw for k in (*paper_space.RAY_FIELDS, "paper_frame_revision")):
+        window, _ = edit_bundle.window_for(state, client_id)
+        frozen = window.get("latest_pose_paper")
+        if frozen or any(k in raw for k in (*paper_space.RAY_FIELDS, "paper_frame_revision", "latest_pose_revision")):
             frame = state.get("paper_frame")
             if not frame or not frame["latest_pose_paper"]:
                 raise MeetingError("종이 기준이 준비될 때까지 기다려 주세요.", 409)
             paper_space.check_revision(frame, raw)
             paper_space.check_aligned(frame, actor)
+            observed = raw.get("latest_pose_revision")
+            if (not paper_space.matches_frame(state, window) or
+                    "latest_pose_revision" in raw and (type(observed) is not int or observed != frame.get("latest_pose_revision", 0))):
+                raise MeetingError("B를 누른 순간과 모델 배치가 다릅니다. 현재 위치에서 다시 요청하세요.", 409)
             evidence = paper_space.ray(raw)
-            point = edit_bundle.transform_point(frame["latest_pose_paper"], reference["hit_model_local_position"])
+            point = edit_bundle.transform_point(frozen or frame["latest_pose_paper"], reference["hit_model_local_position"])
             if math.dist(point, evidence["hit_position_paper"]) > .002:
                 raise MeetingError("종이 기준 선택점과 CAD의 선택 좌표가 일치하지 않습니다.", 409)
             reference.update(evidence, paper_frame_revision=raw["paper_frame_revision"])
+            if frozen:
+                reference["latest_pose_revision"] = window["latest_pose_revision"]
     if (kind == "design_request" and (payload.get("output") == "bundle") != bundle):
         raise MeetingError("수정 요청과 회의의 저장 방식이 일치하지 않습니다.", 409)
     target = {"base_version_id": base["version_id"], "expected_adopted_revision": revision, "client_request_id": client_id,
@@ -152,6 +160,10 @@ def apply_selection(coordinator, state, actor, kind, payload, stamp):
             if before["selection_id"] == reference["selection_id"] or reference["captured_at_ms"] <= before["captured_at_ms"]:
                 raise MeetingError("선택 정보가 변경되었습니다. 위치와 사진을 다시 확인하세요.", 409)
         targets[actor] = target
+        if bundle and frozen:
+            state["paper_frame"]["shared_selection"] = {"selection_id": reference["selection_id"],
+                "participant_id": actor, "model_version_id": base["version_id"], "updated_at": reference["selected_at_ms"],
+                **{k: reference[k] for k in (*paper_space.RAY_FIELDS, "paper_frame_revision", "latest_pose_revision")}}
         shared = ({**target, "reference_selection": paper_space.public_evidence(reference)}
                   if state.get("paper_frame") else target)
         return "design.target_selected", shared, None

@@ -42,26 +42,29 @@ namespace ContextPin.Editor
                 "A single meeting microphone must already be running.");
             if (silentRangeId == null)
             {
-                if (!Click("ExplicitSpeechAction")) return false;
+                if (!MarkCommand(app, true)) return false;
                 var pending = AppType.GetField("explicitRequest", AppMembers).GetValue(app);
                 silentRangeId = (string)pending.GetType().GetField("RangeId").GetValue(pending);
-                silentEndTime = Time.realtimeSinceStartupAsDouble + .45;
+                silentEndTime = Time.realtimeSinceStartupAsDouble + .85;
                 return false;
             }
             var silent = state["design_speech_ranges"]?[silentRangeId];
             if (silent == null) return false;
             if ((string)silent["status"] == "recording" && Time.realtimeSinceStartupAsDouble >= silentEndTime)
             {
-                if (Click("ExplicitSpeechAction")) silentEndTime = double.PositiveInfinity;
+                if (MarkCommand(app, false)) silentEndTime = double.PositiveInfinity;
                 return false;
             }
             if ((string)silent["status"] != "no_speech") return false;
             Require(state["edit_requests"]?[silentRangeId] == null && state["candidate_sets"]?[silentRangeId] == null,
                 "An empty command must never be submitted for CAD.");
-            if (!ExplicitUi("ExplicitDesignStatus").Contains("수정 요청을 듣지 못했습니다")) return false;
+            Require(!string.IsNullOrEmpty(ExplicitUi("ExplicitDesignStatus")), "An empty B range must show status feedback.");
             report.silentCommandRejected = true;
             QueueDiscussion("intro");
-            return HasLine(state, "크기");
+            if (!HasLine(state, "크기")) return false;
+            Require(state["edit_requests"]?.HasValues != true && state["candidate_sets"]?.HasValues != true,
+                "Ordinary conversation outside B must enter the timeline without creating a CAD request.");
+            return true;
         }
 
         static void SpeakDuringGeneration(JObject state)
@@ -99,14 +102,16 @@ namespace ContextPin.Editor
             var lines = state["utterances"].OrderBy(u => (long)u["start_ms"]).ToArray();
             Require(report.microphoneOpenCount == 1 && (string)state["transcript_status"] == "finalized",
                 "Review, two commands and meeting end must use exactly one microphone and seal the server timeline.");
-            Require(lines.Length == 7 && lines.All(u => (bool)u["is_final"] && (string)u["meeting_id"] == sid &&
+            int extra = IntegratedTest ? 1 : 0;
+            Require(lines.Length == 7 + extra && lines.All(u => (bool)u["is_final"] && (string)u["meeting_id"] == sid &&
                     (string)u["source"] == "stt" && (int)u["revision"] > 0 && (long)u["end_ms"] >= (long)u["start_ms"] &&
                     ((JObject)u).ContainsKey("speaker_id")) && lines.Select(u => (string)u["utterance_id"]).Distinct().Count() == lines.Length,
-                "Expected each of the four ordinary and three command utterances exactly once: " +
+                "Expected every ordinary and command utterance exactly once: " +
                 string.Join(" / ", lines.Select(u => (string)u["text"])));
             report.timelineTexts = lines.Select(u => (string)u["text"]).ToArray();
             Require(report.timelineTexts[0].Contains("크기") && report.timelineTexts[2].Contains("기다") &&
-                    report.timelineTexts[3].Contains("좋") && report.timelineTexts.Last().Contains("마칠"),
+                    report.timelineTexts[3].Contains("좋") && (!IntegratedTest || report.timelineTexts[4].Contains("공간")) &&
+                    report.timelineTexts.Last().Contains("마칠"),
                 "Ordinary discussion must bracket the commands and include the closing audio.");
 
             for (int index = 0; index < 2; index++)
@@ -114,7 +119,7 @@ namespace ContextPin.Editor
                 var id = Path.GetFileName(Path.GetDirectoryName(report.captureFiles[index]));
                 var bundle = state["edit_requests"][id];
                 var window = state["design_speech_ranges"][id];
-                var expected = index == 0 ? new[] { lines[1] } : new[] { lines[4], lines[5] };
+                var expected = index == 0 ? new[] { lines[1] } : new[] { lines[4+extra], lines[5+extra] };
                 var refs = new JArray(expected.Select(u => (string)u["utterance_id"]));
                 var decision = state["decisions"].Single(d => (string)d["edit_request_id"] == id);
                 var selection = bundle["selection"];

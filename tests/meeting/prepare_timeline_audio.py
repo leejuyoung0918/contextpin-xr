@@ -16,6 +16,7 @@ def main():
         "generation": ["완성될 때까지 잠시 기다려 봅시다."],
         "review": ["두 번째 안이 더 좋아 보여요."],
         "lip": ["이 부분은 앞쪽 받침턱입니다.", "앞쪽 받침턱의 높이를 조금 늘려 주세요."],
+        "between": ["책상 공간은 충분해 보여요."],
         "closing": ["오늘 회의는 여기까지 마칠게요."],
     }
     with tempfile.TemporaryDirectory() as temporary:

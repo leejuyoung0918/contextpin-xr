@@ -45,7 +45,8 @@ class Command(BaseModel):
         "meeting_start", "meeting_pause", "meeting_end", "meeting_retry", "meeting_readopt",
         "design_request", "design_target", "pointer", "edit_begin", "edit_preview", "edit_renew", "edit_cancel", "edit_commit", "verify",
         "generate_edit_candidates", "commit_edit_candidate",
-        "paper_alignment", "paper_layout", "paper_reset", "paper_selection", "paper_candidate_select",
+        "design_speech_boundary", "cancel_design_speech",
+        "paper_alignment", "paper_layout", "paper_reset", "paper_selection", "paper_candidate_select", "paper_move_latest",
     ]
     payload: dict = Field(default_factory=dict)
 

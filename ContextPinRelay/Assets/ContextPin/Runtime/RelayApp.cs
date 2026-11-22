@@ -167,12 +167,14 @@ namespace ContextPin
             // Includes the first trigger-down frame on a move/alignment button, before its callback runs.
             bool uiAction = clicked && hit != null && hit.transform.IsChildOf(panel);
             bool blockAction = panelOwnsPointer || uiAction;
+            bool movingLatest = xr && ReadLatestGrip(blockAction);
+            if (movingLatest) { clicked = false; blockAction = true; }
             bool marking = false;
             if (xr && IsAssemblyMeeting && (A4PointSampling || TabletopPointSampling) && !ReviewTableSampling)
                 ReadTabletopPlacementButton(blockAction);
             else if (xr && IsAssemblyMeeting && (AssemblySampling || ReviewTableSampling))
                 marking = UpdateAssemblyProbe(blockAction || (hit != null && (!ReviewTableSampling || hit.transform.IsChildOf(panel))));
-            else if (!ReadExplicitTargetButton(blockAction) && probe.gameObject.activeSelf)
+            else if ((movingLatest || !ReadExplicitTargetButton(blockAction)) && probe.gameObject.activeSelf)
                 probe.gameObject.SetActive(false);
             if(!panelOwnsPointer)
                 UpdateCollaborationPointer(hit, hitSomething ? r.point : Vector3.zero, clicked);

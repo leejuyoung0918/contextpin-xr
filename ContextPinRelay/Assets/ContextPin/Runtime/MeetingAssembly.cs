@@ -215,6 +215,8 @@ namespace ContextPin
 
         void InvalidateAssemblyAlignment()
         {
+            EndOpenHeldCommand();
+            latestGrab = null;
             InvalidateExplicitSelection();
             bool hadTable = tableRegistered || ReviewTableSampling;
             ClearReviewTable();
@@ -262,7 +264,8 @@ namespace ContextPin
             var paper = A4CornerCount == 4 ? a4Size : reviewTableSize;
             var origin = OffsetPaperGallery ? surface.position : WorkspaceOrigin;
             var besideProduct = OffsetPaperGallery ? Vector3.right * PaperLatestRight : new Vector3(paper.x * .25f, 0, -paper.y * .25f);
-            var mount = SharedPaperMeeting && paperLatestPose.HasValue ? PaperToWorldPose(surface, paperLatestPose.Value) :
+            var shownPose = GrabApplies ? latestGrab.Preview : paperLatestPose;
+            var mount = SharedPaperMeeting && shownPose.HasValue ? PaperToWorldPose(surface, shownPose.Value) :
                 new Pose(origin + surface.rotation * besideProduct, WorkspaceRotation);
             latestAnchor.SetPositionAndRotation(mount.position, mount.rotation);
             var model = meetingModel.transform;
