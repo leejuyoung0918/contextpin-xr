@@ -40,4 +40,4 @@ Luck(2013)은 설계 회의에서 모호함이 해소되지 않은 채 남을 �
 
 ---
 
-[발표 슬라이드](FormBridge_Presentation.pptx) · [시연 영상](../media/formbridge-demo.mp4)
+[발표 슬라이드](FormBridge_Presentation.pptx) · [시연 영상 다운로드](https://github.com/leejuyoung0918/contextpin-xr/raw/refs/heads/main/docs/media/formbridge-demo.mp4)
